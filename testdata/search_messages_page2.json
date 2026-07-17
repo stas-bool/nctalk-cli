@@ -1,0 +1,28 @@
+{
+  "ocs": {
+    "meta": {
+      "status": "ok",
+      "statuscode": 200,
+      "message": "OK"
+    },
+    "data": {
+      "isPaginated": false,
+      "cursor": "",
+      "entries": [
+        {
+          "title": "Carol",
+          "subline": "third message on page 2",
+          "resourceUrl": "https://nc.example.com/call/tok-team#message_200",
+          "iconSource": "",
+          "attributes": {
+            "conversation": "tok-team",
+            "messageId": 200,
+            "actorType": "users",
+            "actorId": "carol",
+            "timestamp": "1752710500"
+          }
+        }
+      ]
+    }
+  }
+}

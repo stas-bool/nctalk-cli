@@ -1,0 +1,149 @@
+{
+  "ocs": {
+    "meta": {
+      "status": "ok",
+      "statuscode": 200,
+      "message": "OK"
+    },
+    "data": [
+      {
+        "type": 1,
+        "token": "tok-1to1-bob",
+        "displayName": "Bob Bobson",
+        "unreadMessages": 3,
+        "actorType": "users",
+        "actorId": "bob",
+        "lastMessage": {
+          "id": 9001,
+          "actorType": "users",
+          "actorId": "bob",
+          "actorDisplayName": "Bob Bobson",
+          "messageType": "comment",
+          "systemMessage": "",
+          "message": "привет {file}",
+          "messageParameters": {
+            "file": {
+              "type": "file",
+              "id": "5001",
+              "name": "report.pdf",
+              "path": "/files/report.pdf",
+              "link": "https://nc.example.com/f/5001"
+            }
+          },
+          "reactions": {},
+          "referenceId": "",
+          "timestamp": 1718000000,
+          "isReplyable": true,
+          "markdown": true,
+          "threadId": 0,
+          "expirationTimestamp": 0,
+          "token": "tok-1to1-bob"
+        }
+      },
+      {
+        "type": 2,
+        "token": "tok-team",
+        "displayName": "Team Chat",
+        "unreadMessages": 0,
+        "actorType": "users",
+        "actorId": "alice",
+        "lastMessage": {
+          "id": 8001,
+          "actorType": "users",
+          "actorId": "alice",
+          "actorDisplayName": "Alice",
+          "messageType": "comment",
+          "systemMessage": "",
+          "message": "всем привет",
+          "messageParameters": {},
+          "reactions": { "👍": 2 },
+          "referenceId": "",
+          "timestamp": 1718000100,
+          "isReplyable": true,
+          "markdown": false,
+          "threadId": 0,
+          "expirationTimestamp": 0,
+          "token": "tok-team"
+        }
+      },
+      {
+        "type": 3,
+        "token": "tok-public",
+        "displayName": "Public Room",
+        "unreadMessages": 5,
+        "actorType": "users",
+        "actorId": "alice",
+        "lastMessage": {
+          "id": 7001,
+          "actorType": "guests",
+          "actorId": "guest::anon-42",
+          "actorDisplayName": "Guest",
+          "messageType": "comment",
+          "systemMessage": "",
+          "message": "вопрос по теме?",
+          "messageParameters": {},
+          "reactions": {},
+          "referenceId": "",
+          "timestamp": 1718000200,
+          "isReplyable": false,
+          "markdown": false,
+          "threadId": 0,
+          "expirationTimestamp": 0,
+          "token": "tok-public"
+        }
+      },
+      {
+        "type": 4,
+        "token": "tok-former-1to1",
+        "displayName": "Former 1:1",
+        "unreadMessages": 0,
+        "actorType": "users",
+        "actorId": "carol",
+        "lastMessage": {
+          "id": 6001,
+          "actorType": "users",
+          "actorId": "carol",
+          "actorDisplayName": "Carol Carolson",
+          "messageType": "comment",
+          "systemMessage": "",
+          "message": "старое сообщение",
+          "messageParameters": {},
+          "reactions": {},
+          "referenceId": "",
+          "timestamp": 1710000000,
+          "isReplyable": false,
+          "markdown": false,
+          "threadId": 0,
+          "expirationTimestamp": 0,
+          "token": "tok-former-1to1"
+        }
+      },
+      {
+        "type": 2,
+        "token": "tok-projx",
+        "displayName": "Project X",
+        "unreadMessages": 2,
+        "actorType": "users",
+        "actorId": "alice",
+        "lastMessage": {
+          "id": 5001,
+          "actorType": "users",
+          "actorId": "dave",
+          "actorDisplayName": "Dave",
+          "messageType": "comment",
+          "systemMessage": "",
+          "message": "апдейт по задаче",
+          "messageParameters": {},
+          "reactions": { "❤️": 1 },
+          "referenceId": "",
+          "timestamp": 1718000300,
+          "isReplyable": true,
+          "markdown": false,
+          "threadId": 0,
+          "expirationTimestamp": 0,
+          "token": "tok-projx"
+        }
+      }
+    ]
+  }
+}

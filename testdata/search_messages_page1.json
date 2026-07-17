@@ -1,0 +1,41 @@
+{
+  "ocs": {
+    "meta": {
+      "status": "ok",
+      "statuscode": 200,
+      "message": "OK"
+    },
+    "data": {
+      "isPaginated": true,
+      "cursor": "cursor-page2",
+      "entries": [
+        {
+          "title": "Alice",
+          "subline": "hello world",
+          "resourceUrl": "https://nc.example.com/call/tok-team#message_100",
+          "iconSource": "",
+          "attributes": {
+            "conversation": "tok-team",
+            "messageId": 100,
+            "actorType": "users",
+            "actorId": "alice",
+            "timestamp": "1752710400"
+          }
+        },
+        {
+          "title": "Bob",
+          "subline": "second message",
+          "resourceUrl": "https://nc.example.com/call/tok-team#message_101",
+          "iconSource": "",
+          "attributes": {
+            "conversation": "tok-team",
+            "messageId": 101,
+            "actorType": "users",
+            "actorId": "bob",
+            "timestamp": "1752710401"
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "ocs": {
+    "meta": {
+      "status": "ok",
+      "statuscode": 200,
+      "message": "OK"
+    },
+    "data": {
+      "👍": [
+        {
+          "actorType": "users",
+          "actorId": "alice",
+          "actorDisplayName": "Alice",
+          "timestamp": 1700000000
+        },
+        {
+          "actorType": "users",
+          "actorId": "bob",
+          "actorDisplayName": "Bob Bobson",
+          "timestamp": 1700000001
+        }
+      ],
+      "❤️": [
+        {
+          "actorType": "guests",
+          "actorId": "guest::anon-42",
+          "actorDisplayName": "Guest",
+          "timestamp": 1700000002
+        }
+      ]
+    }
+  }
+}

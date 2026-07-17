@@ -1,0 +1,180 @@
+package main
+
+// main_test.go — e2e-тесты связки config → client → cli через httptest.Server
+// (план Task 5.1, спека §5/§9). Тестируется именно интеграция слоёв: реальный
+// config.Load (читает env, выставленный через t.Setenv), реальный
+// client.NewTalkClient (ходит на httptest-сервер) и реальный cli.Run (роутинг
+// + handler-ы + render).
+//
+// Контракт безопасности: отдельный тест проверяет, что пароль не утекает в
+// stdout/stderr при cross-host redirect (клиент его блокирует, ошибка
+// пробрасывается через sanitizeErr — без userinfo/query и без Authorization).
+
+import (
+	"bytes"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+// roomsListJSON — OCS-конверт с двумя комнатами для e2e-теста rooms list.
+// Подобрано так, чтобы actorId/displayName были детерминированно проверяемы
+// в stdout (рендер RoomsTable: ТИП ЧАТ TOKEN НЕПРОЧИТАНО АКТЁР ПОСЛЕДНЕЕ).
+const roomsListJSON = `{
+  "ocs": {
+    "meta": {"status": "ok", "statuscode": 200, "message": "OK"},
+    "data": [
+      {"type": 1, "token": "tok-bob", "displayName": "Bob Bobson", "unreadMessages": 3, "actorType": "users", "actorId": "bob"},
+      {"type": 2, "token": "tok-team", "displayName": "Team Chat", "unreadMessages": 0, "actorType": "users", "actorId": "alice"}
+    ]
+  }
+}`
+
+// chatShowJSON — OCS-конверт с двумя сообщениями для e2e-теста chat show.
+// MessageType=comment (чтобы пройти дефолтный фильтр «скрывать system»).
+// Меньше chatPageSize (200), поэтому клиент не уходит в пагинацию.
+const chatShowJSON = `{
+  "ocs": {
+    "meta": {"status": "ok", "statuscode": 200, "message": "OK"},
+    "data": [
+      {"id": 100, "actorType": "users", "actorId": "bob",   "actorDisplayName": "Bob",   "messageType": "comment", "message": "hello world", "timestamp": 1718000000, "token": "tok-bob"},
+      {"id": 99,  "actorType": "users", "actorId": "alice", "actorDisplayName": "Alice", "messageType": "comment", "message": "hi there",   "timestamp": 1718000100, "token": "tok-bob"}
+    ]
+  }
+}`
+
+// setEnv выставляет валидные креды/URL/timeout через t.Setenv (с авто-восстанов-
+// лом после теста). URL указывает на httptest-сервер.
+func setEnv(t *testing.T, url string) {
+	t.Helper()
+	t.Setenv("NEXTCLOUD_URL", url)
+	t.Setenv("NEXTCLOUD_LOGIN", "user")
+	t.Setenv("NEXTCLOUD_PASS", "pass")
+	t.Setenv("NEXTCLOUD_TIMEOUT", "5s")
+}
+
+// TestRun_RoomsList_E2E — полный цикл config → client → cli для `rooms list`.
+// httptest-сервер отдаёт фикс-ответ на /ocs/v2.php/apps/spreed/api/v4/room;
+// проверяем что stdout содержит заголовок таблицы, имена комнат и actorId
+// (план Task 5.1 Step 1, спека §6).
+func TestRun_RoomsList_E2E(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/apps/spreed/api/v4/room") {
+			t.Errorf("rooms list: неожиданный путь запроса: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, roomsListJSON)
+	}))
+	defer srv.Close()
+
+	setEnv(t, srv.URL)
+	var out, errOut bytes.Buffer
+	code := run([]string{"rooms", "list"}, &out, &errOut, nil)
+	if code != 0 {
+		t.Fatalf("rooms list: exit=%d, stderr=%s", code, errOut.String())
+	}
+
+	stdout := out.String()
+	for _, want := range []string{"Bob Bobson", "Team Chat", "bob", "alice", "НЕПРОЧИТАНО"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("rooms list: stdout не содержит %q; вывод=\n%s", want, stdout)
+		}
+	}
+}
+
+// TestRun_ChatShow_E2E — полный цикл config → client → cli для `chat show <token>`.
+// Token передаётся позиционно, поэтому ResolveRoom НЕ делает дополнительных
+// сетевых запросов — единственный вызов на /api/v1/chat/<token>. Проверяем
+// что stdout содержит id, авторов и текст сообщений (формат MessagesTable).
+func TestRun_ChatShow_E2E(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "/apps/spreed/api/v1/chat/tok-bob") {
+			t.Errorf("chat show: неожиданный путь запроса: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, chatShowJSON)
+	}))
+	defer srv.Close()
+
+	setEnv(t, srv.URL)
+	var out, errOut bytes.Buffer
+	code := run([]string{"chat", "show", "tok-bob"}, &out, &errOut, nil)
+	if code != 0 {
+		t.Fatalf("chat show: exit=%d, stderr=%s", code, errOut.String())
+	}
+
+	stdout := out.String()
+	for _, want := range []string{"Bob", "Alice", "hello world", "hi there", "[100]", "[99]"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("chat show: stdout не содержит %q; вывод=\n%s", want, stdout)
+		}
+	}
+}
+
+// TestRun_NoEnv_Returns1 — все NEXTCLOUD_* пустые → config.Load возвращает
+// ошибку, run пишет её в stderr с префиксом "nctalk:" и возвращает 1.
+// stdout остаётся пустым. Сообщения config.Load содержат только имена
+// переменных (не значения) — поэтому вывод безопасен (спека §5/§9).
+func TestRun_NoEnv_Returns1(t *testing.T) {
+	// Явно опустошаем все четыре env-переменные (t.Setenv восстанавливает
+	// значения после теста).
+	t.Setenv("NEXTCLOUD_URL", "")
+	t.Setenv("NEXTCLOUD_LOGIN", "")
+	t.Setenv("NEXTCLOUD_PASS", "")
+	t.Setenv("NEXTCLOUD_TIMEOUT", "")
+
+	var out, errOut bytes.Buffer
+	code := run(nil, &out, &errOut, nil)
+	if code != 1 {
+		t.Fatalf("ожидался exit 1, получен %d (stderr=%q)", code, errOut.String())
+	}
+	if out.Len() != 0 {
+		t.Errorf("stdout должен быть пуст, получено: %q", out.String())
+	}
+	stderr := errOut.String()
+	if !strings.HasPrefix(stderr, "nctalk:") {
+		t.Errorf("stderr должен начинаться с 'nctalk:', получено: %q", stderr)
+	}
+	if !strings.Contains(stderr, "обязателен") {
+		t.Errorf("stderr должен упоминать обязательную переменную: %q", stderr)
+	}
+}
+
+// TestRun_PasswordDoesNotLeak_CrossHostRedirect — критичный для безопасности
+// тест на утечку пароля (план Task 5.1 Step 6, спека §5/§9).
+//
+// Сценарий: httptest-сервер присылает cross-host 302 на evil.example.com.
+// client.sameHostRedirectPolicy блокирует редирект (Authorization не уходит
+// на чужой хост); http.Client оборачивает ошибку в *url.Error; sanitizeErr
+// отрезает userinfo/query из URL. cli.Run печатает текст ошибки в stderr.
+//
+// Утверждение: SECRET_MARKER (значение NEXTCLOUD_PASS) не встречается ни в
+// stdout, ни в stderr. Если это когда-нибудь сломается — это регрессия
+// контракта безопасности, релиз нельзя выпускать.
+func TestRun_PasswordDoesNotLeak_CrossHostRedirect(t *testing.T) {
+	const secret = "SECRET_MARKER"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Любой запрос → редирект на чужой хост; клиент обязан его заблокировать.
+		http.Redirect(w, r, "https://evil.example.com/leak", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	t.Setenv("NEXTCLOUD_URL", srv.URL)
+	t.Setenv("NEXTCLOUD_LOGIN", "user")
+	t.Setenv("NEXTCLOUD_PASS", secret)
+	t.Setenv("NEXTCLOUD_TIMEOUT", "5s")
+
+	var out, errOut bytes.Buffer
+	code := run([]string{"rooms", "list"}, &out, &errOut, nil)
+	if code == 0 {
+		t.Fatalf("ожидался ненулевой exit при cross-host redirect, получен 0 (stdout=%q)", out.String())
+	}
+	if strings.Contains(out.String(), secret) {
+		t.Errorf("УТЕЧКА: пароль найден в stdout: %q", out.String())
+	}
+	if strings.Contains(errOut.String(), secret) {
+		t.Errorf("УТЕЧКА: пароль найден в stderr: %q", errOut.String())
+	}
+}

@@ -1,0 +1,46 @@
+{
+  "ocs": {
+    "meta": {
+      "status": "ok",
+      "statuscode": 200,
+      "message": "OK"
+    },
+    "data": {
+      "isPaginated": true,
+      "entries": [
+        {
+          "title": "Team Chat",
+          "url": "https://nc.example.com/call/tok-team",
+          "iconSource": "",
+          "attributes": {
+            "conversation": "tok-team",
+            "user": "alice",
+            "name": "Team Chat",
+            "type": "room"
+          }
+        },
+        {
+          "title": "Public Room",
+          "url": "https://nc.example.com/call/tok-public",
+          "iconSource": "",
+          "attributes": {
+            "conversation": "tok-public",
+            "name": "Public Room",
+            "type": "room"
+          }
+        },
+        {
+          "title": "Project X",
+          "url": "https://nc.example.com/call/tok-projx",
+          "iconSource": "",
+          "attributes": {
+            "conversation": "tok-projx",
+            "user": "dave",
+            "name": "Project X",
+            "type": "room"
+          }
+        }
+      ]
+    }
+  }
+}
