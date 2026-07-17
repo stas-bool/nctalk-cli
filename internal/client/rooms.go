@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"net/http"
+	"strings"
 )
 
 // RoomType — тип комнаты Nextcloud Talk (спека §12):
@@ -56,6 +57,43 @@ func (c *TalkClient) ListRooms(ctx context.Context, opts ListRoomsOpts) ([]Room,
 		return nil, err
 	}
 	return filterRooms(rooms, opts), nil
+}
+
+// FindRooms возвращает ВСЕ совпадения (одно или несколько). Empty → пустой срез,
+// не ошибка (спека §6 `rooms find`).
+//
+// query — case-insensitive подстрока по DisplayName:
+// strings.Contains(strings.ToLower(r.DisplayName), strings.ToLower(query)).
+// Пустой query математически совпадает с любой строкой, поэтому сам по себе
+// фильтра не делает — удобно для поиска «только по actorId».
+//
+// actorId — необязательный фильтр; при непустом дополнительно требуется точное
+// совпадение r.ActorId == actorId (спека §8: --user принимает actorId; для
+// type=1 one-to-one ActorId — собеседник, не текущий пользователь).
+//
+// Поиск идёт по ВСЕМ комнатам, включая former (типы 4/5/6): список
+// запрашивается с IncludeFormer=true. Правило «exit 3 / неоднозначно» — слой
+// cli (RoomCommand), здесь НЕ применяется: метод отдаёт срез как есть.
+func (c *TalkClient) FindRooms(ctx context.Context, query, actorId string) ([]Room, error) {
+	rooms, err := c.ListRooms(ctx, ListRoomsOpts{IncludeFormer: true})
+	if err != nil {
+		return nil, err
+	}
+
+	q := strings.ToLower(query)
+	out := make([]Room, 0, len(rooms))
+	for _, r := range rooms {
+		// Подстрока по DisplayName, case-insensitive.
+		if !strings.Contains(strings.ToLower(r.DisplayName), q) {
+			continue
+		}
+		// Точный фильтр по ActorId — только когда actorId задан явно.
+		if actorId != "" && r.ActorId != actorId {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out, nil
 }
 
 // filterRooms применяет клиентские фильтры к списку комнат. Порядок проверок

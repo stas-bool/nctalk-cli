@@ -189,6 +189,100 @@ func TestListRooms_FormerIncluded(t *testing.T) {
 	}
 }
 
+// TestFindRooms проверяет клиентскую фильтрацию FindRooms: подстрока по
+// DisplayName (case-insensitive) + необязательный точный фильтр по ActorId.
+// Список комнат берётся из той же фикстуры testdata/rooms_list.json, что и в
+// TestListRooms* (5 комнат, с IncludeFormer=true видны все).
+//
+// FindRooms возвращает ВСЕ совпадения (слой «exit 3/неоднозначно» — это cli, не
+// клиент); пустой результат — пустой срез и nil error.
+func TestFindRooms(t *testing.T) {
+	ts := roomsTestServer(t)
+	defer ts.Close()
+
+	c := NewTalkClient(testCfg(ts.URL))
+
+	tests := []struct {
+		name       string
+		query      string
+		actorId    string
+		wantLen    int
+		wantTokens []string // ожидаемый набор токенов (порядок не важен)
+	}{
+		{
+			// "bob" (lower) содержится только в "Bob Bobson".
+			name:       "substring matches exactly one room",
+			query:      "bob",
+			actorId:    "",
+			wantLen:    1,
+			wantTokens: []string{"tok-1to1-bob"},
+		},
+		{
+			// "p" (lower) содержится в "public room" и "project x", но НЕ в
+			// "bob bobson" / "team chat" / "former 1:1" → ровно 2 совпадения.
+			// Не ошибка — клиент отдаёт срез как есть.
+			name:       "substring matches two rooms is not an error",
+			query:      "p",
+			actorId:    "",
+			wantLen:    2,
+			wantTokens: []string{"tok-public", "tok-projx"},
+		},
+		{
+			// Пустой query → проходят все по подстроке; фильтр по actorId="bob"
+			// оставляет только 1:1 с Бобом (спека §8: --user принимает actorId).
+			name:       "actorId filter keeps only bob rooms",
+			query:      "",
+			actorId:    "bob",
+			wantLen:    1,
+			wantTokens: []string{"tok-1to1-bob"},
+		},
+		{
+			// Ничего не найдено → пустой срез (не nil), nil error.
+			name:    "no match returns empty slice and nil error",
+			query:   "zzz-not-found",
+			actorId: "",
+			wantLen: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rooms, err := c.FindRooms(context.Background(), tc.query, tc.actorId)
+			if err != nil {
+				t.Fatalf("FindRooms(%q, %q): got error %v, want nil", tc.query, tc.actorId, err)
+			}
+			if got := len(rooms); got != tc.wantLen {
+				t.Fatalf("len(rooms) = %d, want %d (query=%q actorId=%q)", got, tc.wantLen, tc.query, tc.actorId)
+			}
+			// Контракт «Empty → пустой срез, не ошибка»: пустой результат должен
+			// быть именно ненулевым пустым срезом, не nil.
+			if tc.wantLen == 0 && rooms == nil {
+				t.Errorf("rooms = nil, want non-nil empty slice")
+			}
+			// Проверка набора токенов (порядок не важен).
+			if tc.wantTokens != nil {
+				got := make(map[string]bool, len(rooms))
+				for _, r := range rooms {
+					got[r.Token] = true
+				}
+				for _, tok := range tc.wantTokens {
+					if !got[tok] {
+						t.Errorf("ожидался token %q в результате; фактические комнаты = %#v", tok, rooms)
+					}
+				}
+			}
+			// При заданном actorId ВСЕ возвращённые комнаты обязаны иметь его.
+			if tc.actorId != "" {
+				for _, r := range rooms {
+					if r.ActorId != tc.actorId {
+						t.Errorf("ActorId: got %q, want %q (фильтр по actorId нарушен)", r.ActorId, tc.actorId)
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestListRooms_FormerIncludedAndUnreadOnly проверяет комбинированный сценарий:
 // IncludeFormer=true + UnreadOnly=true. В фикстуре у former (type=4)
 // unread=0, поэтому она не должна появиться. Это страховка от регрессии:
