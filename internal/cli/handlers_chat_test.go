@@ -15,6 +15,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -22,10 +25,11 @@ import (
 	"github.com/stas/nctalk/internal/client"
 )
 
-// chatSpyClient — заглушка TalkClient для тестов chat show. GetChat фиксирует
-// аргументы вызова в gotToken/gotOpts и возвращает chatMsgs/chatErr. FindRooms
-// возвращает findRooms/findErr — это нужно для тестов --name (неоднозначное
-// разрешение комнаты через ResolveRoom).
+// chatSpyClient — заглушка TalkClient для тестов chat show/send. GetChat
+// фиксирует аргументы вызова в gotToken/gotOpts и возвращает chatMsgs/chatErr.
+// SendMessage фиксирует аргументы в gotSendToken/gotSendOpts и возвращает
+// sendId/sendErr. FindRooms возвращает findRooms/findErr — это нужно для тестов
+// --name (неоднозначное разрешение комнаты через ResolveRoom).
 type chatSpyClient struct {
 	// GetChat-запись
 	gotToken  string
@@ -35,6 +39,15 @@ type chatSpyClient struct {
 	// GetChat-результат
 	chatMsgs []client.Message
 	chatErr  error
+
+	// SendMessage-запись (Task 4.4)
+	gotSendToken string
+	gotSendOpts  client.SendMessageOpts
+	sendCalls    int
+
+	// SendMessage-результат
+	sendId  int
+	sendErr error
 
 	// FindRooms-результат (для --name)
 	findRooms []client.Room
@@ -49,6 +62,13 @@ func (m *chatSpyClient) GetChat(_ context.Context, token string, opts client.Get
 	return m.chatMsgs, m.chatErr
 }
 
+func (m *chatSpyClient) SendMessage(_ context.Context, token string, opts client.SendMessageOpts) (int, error) {
+	m.sendCalls++
+	m.gotSendToken = token
+	m.gotSendOpts = opts
+	return m.sendId, m.sendErr
+}
+
 func (m *chatSpyClient) FindRooms(_ context.Context, _, _ string) ([]client.Room, error) {
 	m.findCalls++
 	return m.findRooms, m.findErr
@@ -60,9 +80,6 @@ func (m *chatSpyClient) ListRooms(_ context.Context, _ client.ListRoomsOpts) ([]
 }
 func (m *chatSpyClient) SearchRooms(_ context.Context, _ string, _ int) ([]client.ConversationResult, error) {
 	return nil, errMock
-}
-func (m *chatSpyClient) SendMessage(_ context.Context, _ string, _ client.SendMessageOpts) (int, error) {
-	return 0, errMock
 }
 func (m *chatSpyClient) GetReactions(_ context.Context, _ string, _ int) (map[string][]client.ReactionActor, error) {
 	return nil, errMock
@@ -512,5 +529,222 @@ func TestChatShowClientError(t *testing.T) {
 	}
 	if ee.Err != sentinel {
 		t.Errorf("err: got %v, want %v", ee.Err, sentinel)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// chat send (Task 4.4)
+// -----------------------------------------------------------------------------
+//
+// newChatSendDeps собирает Deps со шпионом, зафиксированным Now и заданным
+// stdin (Deps.Stdin). Для chat send тестов stdin обязателен — иначе handler
+// fallback-нул бы на реальный os.Stdin и завис на чтении терминала.
+func newChatSendDeps(c *chatSpyClient, stdin io.Reader) Deps {
+	d := newChatDeps(c)
+	d.Stdin = stdin
+	return d
+}
+
+// TestChatSendStdinText — тело из stdin → SendMessage вызван с этим телом, в
+// stdout выведен id (текстовый формат `<int>\n`).
+func TestChatSendStdinText(t *testing.T) {
+	spy := &chatSpyClient{sendId: 777}
+	deps := newChatSendDeps(spy, strings.NewReader("hello talk"))
+
+	ee := chatSendHandler(context.Background(), deps, []string{"TOK"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	if spy.sendCalls != 1 {
+		t.Fatalf("SendMessage calls: got %d, want 1", spy.sendCalls)
+	}
+	if spy.gotSendToken != "TOK" {
+		t.Errorf("token: got %q, want %q", spy.gotSendToken, "TOK")
+	}
+	if spy.gotSendOpts.Message != "hello talk" {
+		t.Errorf("Message: got %q, want %q", spy.gotSendOpts.Message, "hello talk")
+	}
+	out := deps.Stdout.(*bytes.Buffer).String()
+	wantOut := "777\n"
+	if out != wantOut {
+		t.Errorf("stdout: got %q, want %q", out, wantOut)
+	}
+}
+
+// TestChatSendStdinJSON — jsonOut=true → в stdout валидный JSON `{"id": <int>}`
+// (проверка через json.Unmarshal), id совпадает с sendId.
+func TestChatSendStdinJSON(t *testing.T) {
+	spy := &chatSpyClient{sendId: 42}
+	deps := newChatSendDeps(spy, strings.NewReader("json body"))
+
+	ee := chatSendHandler(context.Background(), deps, []string{"TOK"}, true)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	raw := deps.Stdout.(*bytes.Buffer).Bytes()
+	var got struct {
+		Id int `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("stdout не валидный JSON: %v; raw=%s", err, raw)
+	}
+	if got.Id != 42 {
+		t.Errorf("json.id: got %d, want 42", got.Id)
+	}
+}
+
+// TestChatSendFile — тело из --file <path> (создаётся через os.CreateTemp),
+// содержимое файла доходит до SendMessage как opts.Message.
+func TestChatSendFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "msg.txt")
+	if err := os.WriteFile(path, []byte("from-file-body"), 0o600); err != nil {
+		t.Fatalf("write temp file: %v", err)
+	}
+	// Stdin пустой, но при --file он не читается — поэтому пустой buffer
+	// подходит (handler не дойдёт до чтения stdin).
+	spy := &chatSpyClient{sendId: 9}
+	deps := newChatSendDeps(spy, strings.NewReader(""))
+
+	ee := chatSendHandler(context.Background(), deps, []string{"TOK", "--file", path}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	if spy.sendCalls != 1 {
+		t.Fatalf("SendMessage calls: got %d, want 1", spy.sendCalls)
+	}
+	if spy.gotSendOpts.Message != "from-file-body" {
+		t.Errorf("Message: got %q, want %q", spy.gotSendOpts.Message, "from-file-body")
+	}
+}
+
+// TestChatSendReplyToSilent — --reply-to 42 --silent доходят до mock-клиента
+// как opts.ReplyTo=42 и opts.Silent=true.
+func TestChatSendReplyToSilent(t *testing.T) {
+	spy := &chatSpyClient{sendId: 1}
+	deps := newChatSendDeps(spy, strings.NewReader("payload"))
+
+	ee := chatSendHandler(context.Background(), deps,
+		[]string{"TOK", "--reply-to", "42", "--silent"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	if spy.gotSendOpts.ReplyTo != 42 {
+		t.Errorf("ReplyTo: got %d, want 42", spy.gotSendOpts.ReplyTo)
+	}
+	if !spy.gotSendOpts.Silent {
+		t.Errorf("Silent: got false, want true")
+	}
+}
+
+// TestChatSendReferenceId — --reference-id <uuid> доходит до mock-клиента как
+// opts.ReferenceId. Бонус-проверка флага, добавленного в Task 4.4.
+func TestChatSendReferenceId(t *testing.T) {
+	spy := &chatSpyClient{sendId: 1}
+	deps := newChatSendDeps(spy, strings.NewReader("x"))
+
+	const ref = "11111111-2222-3333-4444-555555555555"
+	ee := chatSendHandler(context.Background(), deps,
+		[]string{"TOK", "--reference-id", ref}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	if spy.gotSendOpts.ReferenceId != ref {
+		t.Errorf("ReferenceId: got %q, want %q", spy.gotSendOpts.ReferenceId, ref)
+	}
+}
+
+// TestChatSendEmptyStdin — пустой stdin → ExitGeneric БЕЗ вызова SendMessage
+// (счётчик вызовов = 0) и БЕЗ FindRooms (если бы был --name). Тело отсекается
+// до любого сетевого запроса — это явное требование DoD Task 4.4.
+func TestChatSendEmptyStdin(t *testing.T) {
+	spy := &chatSpyClient{sendId: 1}
+	deps := newChatSendDeps(spy, strings.NewReader(""))
+
+	ee := chatSendHandler(context.Background(), deps, []string{"TOK"}, false)
+	if ee.Code != ExitGeneric {
+		t.Fatalf("code: got %d, want %d (ExitGeneric)", ee.Code, ExitGeneric)
+	}
+	if ee.Err == nil {
+		t.Fatalf("Err: got nil, want non-nil (тело сообщения пусто)")
+	}
+	if !strings.Contains(ee.Err.Error(), "пусто") {
+		t.Errorf("Err text: got %q, want содержит 'пусто'", ee.Err.Error())
+	}
+	if spy.sendCalls != 0 {
+		t.Errorf("SendMessage не должен вызываться при пустом теле; got %d calls", spy.sendCalls)
+	}
+	if spy.findCalls != 0 {
+		t.Errorf("FindRooms не должен вызываться при пустом теле; got %d calls", spy.findCalls)
+	}
+}
+
+// TestChatSendEmptyFile — пустой --file → ExitGeneric БЕЗ вызова SendMessage
+// (аналог пустого stdin, но через файловый путь).
+func TestChatSendEmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "empty.txt")
+	if err := os.WriteFile(path, []byte{}, 0o600); err != nil {
+		t.Fatalf("write temp file: %v", err)
+	}
+	spy := &chatSpyClient{sendId: 1}
+	deps := newChatSendDeps(spy, strings.NewReader(""))
+
+	ee := chatSendHandler(context.Background(), deps, []string{"TOK", "--file", path}, false)
+	if ee.Code != ExitGeneric {
+		t.Fatalf("code: got %d, want %d (ExitGeneric)", ee.Code, ExitGeneric)
+	}
+	if spy.sendCalls != 0 {
+		t.Errorf("SendMessage не должен вызываться при пустом --file; got %d calls", spy.sendCalls)
+	}
+}
+
+// TestChatSendClientError — SendMessage вернул ошибку (имитация OCS-error от
+// сервера, например невалидный replyTo) → ExitGeneric, обёрнутка сохранена.
+func TestChatSendClientError(t *testing.T) {
+	sentinel := fmt.Errorf("ocs: invalid replyTo")
+	spy := &chatSpyClient{sendErr: sentinel}
+	deps := newChatSendDeps(spy, strings.NewReader("payload"))
+
+	ee := chatSendHandler(context.Background(), deps, []string{"TOK"}, false)
+	if ee.Code != ExitGeneric {
+		t.Fatalf("code: got %d, want %d", ee.Code, ExitGeneric)
+	}
+	if ee.Err != sentinel {
+		t.Errorf("err: got %v, want %v", ee.Err, sentinel)
+	}
+}
+
+// TestChatSendNameResolves — --name с 1 совпадением → SendMessage зовётся с
+// токеном найденной комнаты (интеграция с ResolveRoom).
+func TestChatSendNameResolves(t *testing.T) {
+	spy := &chatSpyClient{
+		findRooms: []client.Room{{Type: 1, Token: "NAMETOKEN", DisplayName: "Project", ActorId: "u-1"}},
+		sendId:    5,
+	}
+	deps := newChatSendDeps(spy, strings.NewReader("hi"))
+
+	ee := chatSendHandler(context.Background(), deps, []string{"--name", "proj"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	if spy.gotSendToken != "NAMETOKEN" {
+		t.Errorf("token: got %q, want %q (from --name resolution)", spy.gotSendToken, "NAMETOKEN")
+	}
+}
+
+// TestChatSendInvalidReplyTo — нечисловой --reply-to → ExitGeneric без вызова
+// SendMessage (ошибка парсинга, никакого сетевого запроса).
+func TestChatSendInvalidReplyTo(t *testing.T) {
+	spy := &chatSpyClient{sendId: 1}
+	deps := newChatSendDeps(spy, strings.NewReader("x"))
+
+	ee := chatSendHandler(context.Background(), deps,
+		[]string{"TOK", "--reply-to", "not-a-number"}, false)
+	if ee.Code != ExitGeneric {
+		t.Fatalf("code: got %d, want %d", ee.Code, ExitGeneric)
+	}
+	if spy.sendCalls != 0 {
+		t.Errorf("SendMessage не должен вызываться при невалидном --reply-to; got %d calls", spy.sendCalls)
 	}
 }

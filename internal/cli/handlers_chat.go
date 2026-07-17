@@ -11,6 +11,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -264,8 +266,160 @@ func parseRelativeAt(s string, now time.Time) (int64, bool) {
 	return now.Add(-d).Unix(), true
 }
 
-// chatSendHandler — реализация `chat send <room> --text <text>` (спека §6).
-// Stub до Task 4.4.
-func chatSendHandler(_ context.Context, _ Deps, _ []string, _ bool) ExitError {
-	return ExitError{Code: ExitGeneric, Err: errors.New("chat send: not implemented")}
+// chatSendHandler — реализация `chat send <room>` (спека §6 chat send).
+//
+// Отправляет сообщение в комнату <room>. Тело сообщения берётся из stdin
+// (по умолчанию) либо из файла через --file <path>. Опциональные параметры:
+//   - --reply-to <int> — id сообщения, на которое это ответ;
+//   - --silent — отправить без уведомления получателей;
+//   - --reference-id <uuid> — клиентский dedup-идентификатор.
+//
+// Источник тела:
+//   - --file <path> → os.ReadFile(path), файл читается целиком;
+//   - иначе → io.ReadAll(deps.Stdin), при deps.Stdin==nil fallback на os.Stdin.
+//
+// Пустое тело (пустой stdin или пустой файл) → клиентская ошибка ДО любого
+// сетевого вызова (ни ResolveRoom.FindRooms, ни SendMessage не вызываются).
+//
+// Вывод (спека §6, ветвление по глобальному --json, который уже вынесен в
+// jsonOut слоем Run):
+//   - jsonOut=true → render.NewMessageIDJSON → в stdout `{"id": <int>}`;
+//   - иначе → render.NewMessageID → в stdout `<int>\n`.
+//
+// Ошибка клиента (OCS-error от сервера, например невалидный replyTo) приходитит
+// из client-слоя уже sanitized (без URL/userinfo) — пробрасывается как
+// ExitError{ExitGeneric, err}.
+func chatSendHandler(ctx context.Context, deps Deps, args []string, jsonOut bool) ExitError {
+	// 1. Разбор флагов: ручной scan (без flag-пакета, спека §3). Поддерживаем
+	// обе формы — `--flag value` и `--flag=value` — единообразно с chatShow.
+	var (
+		positionals  []string
+		nameFlag     string
+		fileFlag     string
+		replyToRaw   string
+		replyToSet   bool
+		silentFlag   bool
+		referenceId  string
+	)
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--name":
+			if i+1 >= len(args) {
+				return ExitError{Code: ExitGeneric, Err: errors.New("chat send: --name требует значение")}
+			}
+			nameFlag = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--name="):
+			nameFlag = strings.TrimPrefix(a, "--name=")
+		case a == "--file":
+			if i+1 >= len(args) {
+				return ExitError{Code: ExitGeneric, Err: errors.New("chat send: --file требует значение (путь)")}
+			}
+			fileFlag = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--file="):
+			fileFlag = strings.TrimPrefix(a, "--file=")
+		case a == "--reply-to":
+			if i+1 >= len(args) {
+				return ExitError{Code: ExitGeneric, Err: errors.New("chat send: --reply-to требует значение (id сообщения)")}
+			}
+			replyToRaw = args[i+1]
+			replyToSet = true
+			i++
+		case strings.HasPrefix(a, "--reply-to="):
+			replyToRaw = strings.TrimPrefix(a, "--reply-to=")
+			replyToSet = true
+		case a == "--silent":
+			silentFlag = true
+		case a == "--reference-id":
+			if i+1 >= len(args) {
+				return ExitError{Code: ExitGeneric, Err: errors.New("chat send: --reference-id требует значение")}
+			}
+			referenceId = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--reference-id="):
+			referenceId = strings.TrimPrefix(a, "--reference-id=")
+		case strings.HasPrefix(a, "--"):
+			return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat send: неизвестный флаг %q", a)}
+		default:
+			// Первый позиционный — token/room (primary). Лишние позиционные
+			// игнорируем — строгость тут скорее вредна (случайный пробел).
+			positionals = append(positionals, a)
+		}
+	}
+
+	// 2. Парсинг --reply-to в int (если флаг присутствовал).
+	var replyTo int
+	if replyToSet {
+		n, err := strconv.Atoi(replyToRaw)
+		if err != nil {
+			return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat send: --reply-to ожидает целое число, получено %q", replyToRaw)}
+		}
+		replyTo = n
+	}
+
+	// 3. Чтение тела ДО ResolveRoom: пустое тело отсекается без единого
+	// сетевого вызова (ни FindRooms, ни SendMessage) — это явно требует спека
+	// и DoD Task 4.4.
+	var body []byte
+	var readErr error
+	if fileFlag != "" {
+		body, readErr = os.ReadFile(fileFlag)
+	} else {
+		stdin := deps.Stdin
+		if stdin == nil {
+			// Production-путь: main не проставляет Stdin, fallback на реальный
+			// os.Stdin. Тесты всегда кладут свой io.Reader.
+			stdin = os.Stdin
+		}
+		body, readErr = io.ReadAll(stdin)
+	}
+	if readErr != nil {
+		return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat send: не удалось прочитать тело: %w", readErr)}
+	}
+	if len(body) == 0 {
+		// Пустое stdin/файл — это ошибка пользователя, не сети; клиент не зовём.
+		return ExitError{Code: ExitGeneric, Err: errors.New("chat send: тело сообщения пусто")}
+	}
+
+	// 4. Разрешение <room>: positional token (primary) или --name (поиск).
+	var positional string
+	if len(positionals) > 0 {
+		positional = positionals[0]
+	}
+	token, err := ResolveRoom(ctx, deps.Client, positional, nameFlag, deps.Stderr)
+	if err != nil {
+		// ResolveRoom возвращает ExitError с корректным кодом
+		// (ExitAmbiguous/ExitNotFound/ExitGeneric) — сохраняем его.
+		var ee ExitError
+		if errors.As(err, &ee) {
+			return ee
+		}
+		return ExitError{Code: ExitGeneric, Err: err}
+	}
+
+	// 5. Отправка. SendMessageOpts{Message, ReplyTo, Silent, ReferenceId}.
+	id, err := deps.Client.SendMessage(ctx, token, client.SendMessageOpts{
+		Message:     string(body),
+		ReplyTo:     replyTo,
+		Silent:      silentFlag,
+		ReferenceId: referenceId,
+	})
+	if err != nil {
+		// OCS-error/сеть — текст уже sanitized в client-слое (спека §5, §9).
+		return ExitError{Code: ExitGeneric, Err: err}
+	}
+
+	// 6. Вывод id по ветке jsonOut (спека §6).
+	if jsonOut {
+		if err := render.NewMessageIDJSON(deps.Stdout, id); err != nil {
+			return ExitError{Code: ExitGeneric, Err: err}
+		}
+	} else {
+		if err := render.NewMessageID(deps.Stdout, id); err != nil {
+			return ExitError{Code: ExitGeneric, Err: err}
+		}
+	}
+	return ExitError{Code: ExitOK}
 }

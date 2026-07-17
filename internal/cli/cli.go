@@ -36,10 +36,14 @@ var _ TalkClient = (*client.TalkClient)(nil)
 // диагностику (main передаёт os.Stdout/os.Stderr, тесты — *bytes.Buffer).
 // Now — функция текущего времени; если nil, Run подставляет time.Now — это
 // нужно для парсинга относительных --since ("1h"/"2d") в тестах.
+// Stdin — источник тела для `chat send` (stdin по умолчанию). Если nil,
+// handler-ы сами fallback-ят на os.Stdin (так, чтобы nil был валидным
+// значением для команд, не читающих stdin). Тесты кладут сюда bytes.Buffer.
 type Deps struct {
 	Client TalkClient
 	Stdout io.Writer
 	Stderr io.Writer
+	Stdin  io.Reader
 	Now    func() time.Time
 }
 
