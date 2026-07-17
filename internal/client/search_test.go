@@ -178,3 +178,248 @@ func TestSearchRooms_LimitOmittedWhenNonPositive(t *testing.T) {
 		}
 	}
 }
+
+// searchMessagesFixtureServer поднимает httptest-сервер, отдающий
+// testdata/search_messages_page1.json при запросе БЕЗ cursor (или с неизвестным
+// cursor) и testdata/search_messages_page2.json при cursor=cursor-page2.
+// Эмулирует серверную пагинацию talk-message provider'а (спека §6, §8).
+// Необязательный счётчик calls инкрементируется на каждый запрос.
+func searchMessagesFixtureServer(t *testing.T, calls *int32) *httptest.Server {
+	t.Helper()
+	body1, err := os.ReadFile(filepath.Join("..", "..", "testdata", "search_messages_page1.json"))
+	if err != nil {
+		t.Fatalf("read page1 fixture: %v", err)
+	}
+	body2, err := os.ReadFile(filepath.Join("..", "..", "testdata", "search_messages_page2.json"))
+	if err != nil {
+		t.Fatalf("read page2 fixture: %v", err)
+	}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls != nil {
+			atomic.AddInt32(calls, 1)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		// cursor=cursor-page2 → вторая страница (isPaginated=false).
+		if r.URL.Query().Get("cursor") == "cursor-page2" {
+			_, _ = w.Write(body2)
+			return
+		}
+		_, _ = w.Write(body1)
+	}))
+}
+
+// TestSearchMessages_SinglePage проверяет контракт «по умолчанию ОДНА страница»
+// (спека §6): даже если сервер сообщает isPaginated=true и возвращает cursor,
+// при All=false клиент делает ровно один запрос. Заодно — базовый маппинг полей
+// одной entry (title/subline/resourceUrl + все attributes).
+func TestSearchMessages_SinglePage(t *testing.T) {
+	var calls int32
+	ts := searchMessagesFixtureServer(t, &calls)
+	defer ts.Close()
+
+	c := NewTalkClient(testCfg(ts.URL))
+	res, err := c.SearchMessages(context.Background(), "hello", SearchMessagesOpts{})
+	if err != nil {
+		t.Fatalf("SearchMessages: %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("HTTP calls = %d, want 1 (All=false → одна страница, несмотря на isPaginated=true)", got)
+	}
+	// В page1 фикстуре 2 entries.
+	if got, want := len(res), 2; got != want {
+		t.Fatalf("len(res) = %d, want %d", got, want)
+	}
+	// Проверка маппинга первой entry.
+	r := res[0]
+	if r.Title != "Alice" {
+		t.Errorf("Title: got %q, want %q", r.Title, "Alice")
+	}
+	if r.Subline != "hello world" {
+		t.Errorf("Subline: got %q, want %q", r.Subline, "hello world")
+	}
+	if r.ResourceUrl != "https://nc.example.com/call/tok-team#message_100" {
+		t.Errorf("ResourceUrl: got %q", r.ResourceUrl)
+	}
+	if r.Attributes.Conversation != "tok-team" {
+		t.Errorf("Attributes.Conversation: got %q, want %q", r.Attributes.Conversation, "tok-team")
+	}
+	if r.Attributes.MessageId != 100 {
+		t.Errorf("Attributes.MessageId: got %d, want 100", r.Attributes.MessageId)
+	}
+	if r.Attributes.ActorType != "users" {
+		t.Errorf("Attributes.ActorType: got %q, want %q", r.Attributes.ActorType, "users")
+	}
+	if r.Attributes.ActorId != "alice" {
+		t.Errorf("Attributes.ActorId: got %q, want %q", r.Attributes.ActorId, "alice")
+	}
+}
+
+// TestSearchMessages_AllTwoPages проверяет пагинацию при All=true (спека §6):
+// сервер отдаёт page1 (isPaginated=true, cursor=cursor-page2), затем page2
+// (isPaginated=false). Клиент обязан собрать обе страницы — итого 2 запроса и
+// 3 entry (2 из page1 + 1 из page2).
+func TestSearchMessages_AllTwoPages(t *testing.T) {
+	var calls int32
+	ts := searchMessagesFixtureServer(t, &calls)
+	defer ts.Close()
+
+	c := NewTalkClient(testCfg(ts.URL))
+	res, err := c.SearchMessages(context.Background(), "hello", SearchMessagesOpts{All: true})
+	if err != nil {
+		t.Fatalf("SearchMessages: %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("HTTP calls = %d, want 2 (page1 с cursor + page2 с isPaginated=false)", got)
+	}
+	// 2 entry из page1 + 1 entry из page2.
+	if got, want := len(res), 3; got != want {
+		t.Fatalf("len(res) = %d, want %d (2 из page1 + 1 из page2)", got, want)
+	}
+	// Последняя entry — из page2 (Carol, messageId=200).
+	last := res[len(res)-1]
+	if last.Title != "Carol" {
+		t.Errorf("последняя entry Title: got %q, want %q (должна прийти из page2)", last.Title, "Carol")
+	}
+	if last.Attributes.MessageId != 200 {
+		t.Errorf("последняя entry MessageId: got %d, want 200", last.Attributes.MessageId)
+	}
+}
+
+// TestSearchMessages_AllCapFivePages проверяет cap 5 страниц (спека §6):
+// сервер ВСЕГДА возвращает isPaginated=true и непустой cursor. Клиент обязан
+// остановиться ровно на 5 запросах, не зацикливаясь.
+func TestSearchMessages_AllCapFivePages(t *testing.T) {
+	var calls int32
+	// Программная page с isPaginated=true и непустым cursor — возвращается на
+	// любой запрос независимо от cursor.
+	entry := map[string]any{
+		"title":       "Alice",
+		"subline":     "msg",
+		"resourceUrl": "https://nc.example.com/call/tok#message_1",
+		"attributes": map[string]any{
+			"conversation": "tok",
+			"messageId":    1,
+			"actorType":    "users",
+			"actorId":      "alice",
+			"timestamp":    "1752710400",
+		},
+	}
+	body := ocsBody(t, 200, "OK", map[string]any{
+		"isPaginated": true,
+		"cursor":      "more",
+		"entries":     []map[string]any{entry},
+	})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	defer ts.Close()
+
+	c := NewTalkClient(testCfg(ts.URL))
+	res, err := c.SearchMessages(context.Background(), "hello", SearchMessagesOpts{All: true})
+	if err != nil {
+		t.Fatalf("SearchMessages: %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 5 {
+		t.Errorf("HTTP calls = %d, want 5 (cap maxSearchMessagesPages=5, сервер не сообщает конец)", got)
+	}
+	if got, want := len(res), 5; got != want {
+		t.Errorf("len(res) = %d, want %d (по одной entry с каждой из 5 страниц)", got, want)
+	}
+}
+
+// TestSearchMessages_EmptyTermNoCall проверяет клиентский guard (спека §8):
+// пустой term → ошибка "term не может быть пустым" ДО любого HTTP-вызова.
+// Счётчик запросов обязан остаться 0.
+func TestSearchMessages_EmptyTermNoCall(t *testing.T) {
+	var calls int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(ocsBody(t, 200, "OK", map[string]any{"entries": []any{}}))
+	}))
+	defer ts.Close()
+
+	c := NewTalkClient(testCfg(ts.URL))
+	res, err := c.SearchMessages(context.Background(), "", SearchMessagesOpts{Limit: 5})
+	if err == nil {
+		t.Fatal(`SearchMessages(""): got nil error, want "term не может быть пустым"`)
+	}
+	if got := err.Error(); got != "term не может быть пустым" {
+		t.Errorf("error: got %q, want %q", got, "term не может быть пустым")
+	}
+	if res != nil {
+		t.Errorf("res: got %#v, want nil при клиентской ошибке", res)
+	}
+	if got := atomic.LoadInt32(&calls); got != 0 {
+		t.Errorf("HTTP calls = %d, want 0 (пустой term отсекается на клиенте)", got)
+	}
+}
+
+// TestSearchMessages_TimestampFromString проверяет нормализацию timestamp
+// (спека §12) ОТДЕЛЬНЫМ кейсом: сервер присылает attributes.timestamp СТРОКОЙ
+// "1752710400", а MessageResult.Attributes.Timestamp должен быть int64(1752710400).
+func TestSearchMessages_TimestampFromString(t *testing.T) {
+	var calls int32
+	ts := searchMessagesFixtureServer(t, &calls)
+	defer ts.Close()
+
+	c := NewTalkClient(testCfg(ts.URL))
+	res, err := c.SearchMessages(context.Background(), "hello", SearchMessagesOpts{})
+	if err != nil {
+		t.Fatalf("SearchMessages: %v", err)
+	}
+	if len(res) == 0 {
+		t.Fatal("res пуст, хотим хотя бы одну entry для проверки timestamp")
+	}
+	// Первая entry в page1 имеет timestamp="1752710400" (строка в JSON).
+	const want int64 = 1752710400
+	if got := res[0].Attributes.Timestamp; got != want {
+		t.Errorf("Timestamp: got %d (type %T), want %d — строка ответа должна нормализоваться в int64", got, got, want)
+	}
+}
+
+// TestSearchMessages_LimitClampedAndPerson проверяет нормализацию limit
+// (спека §6 search): при Limit=99 (>25) серверу уходит limit=25. Заодно — что
+// From (actorId) маппится в query-параметр person, а на первом запросе cursor
+// НЕ передаётся.
+func TestSearchMessages_LimitClampedAndPerson(t *testing.T) {
+	var gotLimit, gotPerson, gotTerm, gotCursor string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		gotLimit = q.Get("limit")
+		gotPerson = q.Get("person")
+		gotTerm = q.Get("term")
+		gotCursor = q.Get("cursor")
+		w.Header().Set("Content-Type", "application/json")
+		// Возвращаем одну страницу с isPaginated=false, чтобы All не ушёл в
+		// лишнюю пагинацию (нам важен первый запрос).
+		_, _ = w.Write(ocsBody(t, 200, "OK", map[string]any{
+			"isPaginated": false,
+			"entries":     []any{},
+		}))
+	}))
+	defer ts.Close()
+
+	c := NewTalkClient(testCfg(ts.URL))
+	if _, err := c.SearchMessages(context.Background(), "hello", SearchMessagesOpts{
+		Limit: 99,
+		From:  "alice",
+		All:   true,
+	}); err != nil {
+		t.Fatalf("SearchMessages: %v", err)
+	}
+	if gotLimit != "25" {
+		t.Errorf("server got limit=%q, want %q (Limit=99 → clamp 25)", gotLimit, "25")
+	}
+	if gotPerson != "alice" {
+		t.Errorf("server got person=%q, want %q (From → person)", gotPerson, "alice")
+	}
+	if gotTerm != "hello" {
+		t.Errorf("server got term=%q, want %q", gotTerm, "hello")
+	}
+	if gotCursor != "" {
+		t.Errorf("на первом запросе cursor не должен передаваться, got %q", gotCursor)
+	}
+}
