@@ -304,6 +304,27 @@ func TestReactionsGetHandlerMissingArgs(t *testing.T) {
 	}
 }
 
+// TestReactionsGetHandlerNonPositiveMessageId — `reactions get tok 0` и
+// отрицательные: неположительный id лишён смысла, отсекаем ДО сетевого вызова
+// (guard по замечанию review; сервер ответил бы 4xx).
+func TestReactionsGetHandlerNonPositiveMessageId(t *testing.T) {
+	for _, raw := range []string{"0", "-1"} {
+		spy := &reactionsSpyClient{reactions: map[string][]client.ReactionActor{}}
+		deps := newReactionsDeps(spy)
+
+		ee := reactionsGetHandler(context.Background(), deps, []string{"tok", raw}, false)
+		if ee.Code != ExitGeneric {
+			t.Fatalf("messageId %s: code got %d, want %d", raw, ee.Code, ExitGeneric)
+		}
+		if ee.Err == nil {
+			t.Fatalf("messageId %s: err nil, want non-nil", raw)
+		}
+		if spy.gotToken != "" {
+			t.Errorf("messageId %s: GetReactions не должен был вызваться; got token=%q", raw, spy.gotToken)
+		}
+	}
+}
+
 // TestReactionsGetHandlerClientError — GetReactions возвращает ошибку → handler
 // пробрасывает её как ExitGeneric (код 1), stdout пуст.
 func TestReactionsGetHandlerClientError(t *testing.T) {

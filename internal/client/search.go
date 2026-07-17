@@ -1,22 +1,16 @@
 package client
 
-// search.go — Unified-поиск комнат через provider talk-conversations (Task 2.4,
-// спека §8). Файл локально-самодостаточный: НЕ модифицирует общий paths.go
-// (константа пути держится здесь) и НЕ модифицирует client.go (запрос с query
-// выполняется локальным методом — общий doOCS не поддерживает RawQuery, см.
-// комментарий к doSearchOCSGet).
+// search.go — Unified-поиск комнат/сообщений через providers talk-conversations
+// и talk-message (Task 2.4, спека §8). Файл локально-самодостаточный: НЕ
+// модифицирует общий paths.go (константы путей держатся здесь). Транспорт —
+// единый client.doOCS (с поддержкой query).
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/url"
-	"path"
 	"strconv"
-	"strings"
 )
 
 // pathSearchRooms — канонический путь Unified-поиска по conversations
@@ -61,7 +55,7 @@ type searchConversationsData struct {
 // Разбор: ocs.data.entries[] → title, attributes.conversation (это token).
 // Пустые entries → ненулевой пустой срез, nil error. Серверный 4xx (если пустой
 // term каким-то образом прошёл бы сквозь guard) доходит как стандартная
-// OCS-ошибка с meta.message (см. doSearchOCSGet).
+// OCS-ошибка с meta.message (см. doOCS).
 func (c *TalkClient) SearchRooms(ctx context.Context, term string, limit int) ([]ConversationResult, error) {
 	// Клиентский guard: пустой term отсекаем ДО любого HTTP-вызова (спека §8).
 	if term == "" {
@@ -77,7 +71,7 @@ func (c *TalkClient) SearchRooms(ctx context.Context, term string, limit int) ([
 	}
 
 	var data searchConversationsData
-	if err := c.doSearchOCSGet(ctx, pathSearchRooms, q, &data); err != nil {
+	if _, err := c.doOCS(ctx, http.MethodGet, pathSearchRooms, q, nil, false, &data); err != nil {
 		return nil, err
 	}
 
@@ -91,85 +85,6 @@ func (c *TalkClient) SearchRooms(ctx context.Context, term string, limit int) ([
 		})
 	}
 	return out, nil
-}
-
-// doSearchOCSGet выполняет OCS GET с query-параметрами — локальный аналог doOCS
-// (client.go) для случая, когда запрос несёт query.
-//
-// НЕОБХОДИМОСТЬ отдельного метода: общий doOCS собирает URL через
-// path.Join(baseURL.Path, p) и кладёт результат в URL.Path, а RawQuery не
-// выставляет. Если передать путь с '?' в doOCS, path.Join оставит '?' в строке
-// пути, URL.String() закодирует его в %3F, и сервер получит литеральный '?' в
-// path — query до эндпоинта не дойдёт. Этот метод, в отличие от doOCS,
-// выставляет RawQuery отдельно от Path.
-//
-// Контракт ошибок — идентичен doOCS (стандартная обработка, спека §8):
-//   - заголовки Authorization (Basic, собирается на каждый запрос), OCS-APIRequest,
-//     Accept — те же, что в doOCS;
-//   - декодирование OCSEnvelope; при meta.statusCode >= 400 возвращается ошибка с
-//     meta.message (серверный 400 по пустому term покажет именно серверный message);
-//   - transport/decode-ошибки пропускаются через sanitizeErr (без userinfo/query).
-//
-// Метод локален для Task 2.4 и НЕ должен конфликтовать с параллельными
-// Task 2.5/2.7 (у тех — свои файлы chat.go/reactions.go со своими именами).
-// После завершения параллельных задач может быть объединён с doOCS (добавлением
-// query-параметра в сигнатуру doOCS), чтобы убрать дублирование.
-func (c *TalkClient) doSearchOCSGet(ctx context.Context, p string, query url.Values, out any) error {
-	// Склеиваем baseURL и путь так же, как в doOCS (нормализация слэшей через
-	// path.Join), НО query выставляем в RawQuery, а не дописываем в путь.
-	fullURL := *c.baseURL
-	joined := path.Join(c.baseURL.Path, p)
-	if !strings.HasPrefix(joined, "/") {
-		joined = "/" + joined
-	}
-	fullURL.Path = joined
-	fullURL.RawPath = ""
-	fullURL.RawQuery = query.Encode()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL.String(), nil)
-	if err != nil {
-		return sanitizeErr(err)
-	}
-
-	// Authorization: Basic base64(login:password) (RFC 7617). На каждый запрос
-	// собираем заново — не кэшируем. Идентично doOCS.
-	creds := c.cfg.Login + ":" + c.cfg.Password
-	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(creds)))
-	req.Header.Set("OCS-APIRequest", "true")
-	req.Header.Set("Accept", "application/json")
-	// Content-Type не ставим: GET без тела (mutate=false по аналогии с doOCS).
-
-	resp, err := c.doer.Do(req)
-	if err != nil {
-		// На случай redirect-ошибки с открытым Body — закрываем идемпотентно.
-		if resp != nil {
-			_ = resp.Body.Close()
-		}
-		return sanitizeErr(err)
-	}
-	defer resp.Body.Close()
-
-	// Декодируем конверт в две фазы: сначала meta + RawMessage для data, затем
-	// (при успехе) распаковываем data в out. Так ошибка API не ломает типизацию.
-	var env OCSEnvelope[json.RawMessage]
-	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
-		return sanitizeErr(fmt.Errorf("client: не удалось декодировать OCS-ответ: %w", err))
-	}
-	if env.OCS.Meta.StatusCode >= 400 {
-		msg := env.OCS.Meta.Message
-		if msg == "" {
-			msg = fmt.Sprintf("OCS statusCode=%d", env.OCS.Meta.StatusCode)
-		}
-		return errors.New("client: " + msg)
-	}
-	// out может быть nil (нужен только статус) или data отсутствовать — тогда не
-	// трогаем out.
-	if out != nil && len(env.OCS.Data) > 0 {
-		if err := json.Unmarshal(env.OCS.Data, out); err != nil {
-			return sanitizeErr(fmt.Errorf("client: не удалось распаковать ocs.data: %w", err))
-		}
-	}
-	return nil
 }
 
 // pathSearchMessages — канонический путь Unified-поиска по сообщениям
@@ -263,8 +178,8 @@ type searchMessagesData struct {
 //   - attributes.timestamp приходит СТРОКОЙ — нормализуется в int64 (спека §12);
 //     при некорректном значении поле остаётся 0 (поиск не валится).
 //
-// Пустые entries → ненулевой пустой срез, nil error. Использует локальный
-// query-aware транспорт doSearchOCSGet (общий doOCS не выставляет RawQuery).
+// Пустые entries → ненулевой пустой срез, nil error. Транспорт — единый
+// query-aware client.doOCS.
 func (c *TalkClient) SearchMessages(ctx context.Context, term string, opts SearchMessagesOpts) ([]MessageResult, error) {
 	// Клиентский guard: пустой term отсекаем ДО любого HTTP-вызова (спека §8).
 	if term == "" {
@@ -302,7 +217,7 @@ func (c *TalkClient) SearchMessages(ctx context.Context, term string, opts Searc
 		}
 
 		var data searchMessagesData
-		if err := c.doSearchOCSGet(ctx, pathSearchMessages, q, &data); err != nil {
+		if _, err := c.doOCS(ctx, http.MethodGet, pathSearchMessages, q, nil, false, &data); err != nil {
 			return nil, err
 		}
 

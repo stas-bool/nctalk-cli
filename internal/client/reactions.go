@@ -29,19 +29,24 @@ type ReactionActor struct {
 // Разбор: ocs.data → map[string][]ReactionActor.
 //
 // Контракт пустого результата: data={} → пустая (non-nil) map, nil error
-// (спека §6: exit 0, «реакций нет»). Это достигается пред. инициализацией out
-// через make — даже если ocs.data пуст, вызывающий получает валидную пустую map.
+// (спека §6: exit 0, «реакций нет»). Гарантия non-nil держится ПОСЛЕ анмаршала:
+// json.Unmarshal([]byte("null"), &out) обнуляет предсозданную map в nil (а
+// «null» проходит guard len(data)>0, т.к. RawMessage("null") имеет len 4), —
+// поэтому после doOCS явно переинициализируем nil-map в пустую.
 func (c *TalkClient) GetReactions(ctx context.Context, token string, messageId int) (map[string][]ReactionActor, error) {
 	// Собираем путь: базовая константа + url.PathEscape(token) + messageId.
 	// PathEscape на token — защита от специальных символов в path-сегменте;
 	// messageId форматируем через strconv.Itoa (целое — безопасно без эскейпа).
 	p := pathReaction + "/" + url.PathEscape(token) + "/" + strconv.Itoa(messageId)
 
-	// make гарантирует non-nil map даже при пустом data={}: json.Unmarshal
-	// переиспользует существующую map, оставляя её пустой.
 	out := make(map[string][]ReactionActor)
-	if err := c.doOCS(ctx, http.MethodGet, p, nil, false, &out); err != nil {
+	if _, err := c.doOCS(ctx, http.MethodGet, p, nil, nil, false, &out); err != nil {
 		return nil, err
+	}
+	// ocs.data может прийти как null — тогда json.Unmarshal обнуляет map в nil.
+	// Возвращаем гарантированно non-nil пустую map (контракт «реакций нет»).
+	if out == nil {
+		out = map[string][]ReactionActor{}
 	}
 	return out, nil
 }

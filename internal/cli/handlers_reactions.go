@@ -99,6 +99,11 @@ func reactionsGetHandler(ctx context.Context, deps Deps, args []string, jsonOut 
 	if err != nil {
 		return ExitError{Code: ExitGeneric, Err: fmt.Errorf("reactions get: <messageId> ожидает целое число, получено %q", msgIdRaw)}
 	}
+	if messageId <= 0 {
+		// Неположительный id отсекаем ДО сетевого вызова — серверный 4xx вместо
+		// этого дал бы менее понятную диагностику (спека §7: exit 1).
+		return ExitError{Code: ExitGeneric, Err: fmt.Errorf("reactions get: <messageId> ожидает положительное число, получено %d", messageId)}
+	}
 
 	// Получаем реакции (клиент возвращает non-nil пустую map для «реакций нет»).
 	reps, err := deps.Client.GetReactions(ctx, token, messageId)

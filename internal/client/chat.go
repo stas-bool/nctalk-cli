@@ -2,21 +2,18 @@ package client
 
 // chat.go — чтение и отправка сообщений комнаты (Task 2.5 `chat show`,
 // Task 2.6 `chat send`; спека §6, §12). Содержит пагинированный GetChat
-// (limit=200 + перебор lastKnownMessageId назад) с ранним стопом по timestamp,
-// query-aware transport doOCSGet и SendMessage (POST chat send).
+// (перебор lastKnownMessageId назад, курсор — из заголовка X-Chat-Last-Given)
+// с ранним стопом по timestamp и SendMessage (POST chat send).
 
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
-	"path"
 	"strconv"
-	"strings"
 )
 
 // pathChat — канонический путь chat-эндпоинта (спека §6, §12). Локальная
@@ -24,85 +21,118 @@ import (
 // конфликтовать с параллельными Task 2.4 (search) и Task 2.7 (reactions).
 const pathChat = "/ocs/v2.php/apps/spreed/api/v1/chat"
 
-// chatPageSize — размер страницы выборки (серверный limit=). Тянем максимум
-// разрешённого спекой — по 200 сообщений за запрос.
+// chatPageSize — потолок размера страницы выборки (серверный limit= принимает
+// 1..200). Фактический serverLimit ниже уменьшается до opts.Limit, когда она
+// меньше 200 — чтобы в самом частом сценарии (chat show, дефолт 20) не тянуть
+// по сети 200 сообщений и выкидывать 180.
 const chatPageSize = 200
+
+// headerChatLastGiven — заголовок ответа chat-эндпоинта: id самого старого
+// сообщения в отданной странице (документация Nextcloud Talk). Это КАНОНИЧЕСКИЙ
+// курсор пагинации назад: его значение (а не id из тела) нужно передавать как
+// lastKnownMessageId следующего запроса. Не зависит от порядка сообщений в
+// теле ответа.
+const headerChatLastGiven = "X-Chat-Last-Given"
 
 // GetChatOpts — параметры GetChat.
 type GetChatOpts struct {
-	// Limit — потолок ВЫБОРКИ (не путать с серверным limit=, который всегда
-	// равен chatPageSize, и с cli-флагом --last). <=0 → без потолка: тянем все
-	// доступные страницы, пока не достигнем начала чата.
+	// Limit — потолок ВЫБОРКИ (не путать с cli-флагом --last). <=0 → без потолка:
+	// тянем все доступные страницы, пока не достигнем начала чата.
 	Limit int
 	// LastKnownMessageId — точка старта перебора назад: 0 = с самого свежего
 	// сообщения; иначе сервер отдаёт сообщения строго старше этого id.
 	LastKnownMessageId int
-	// StopBeforeTs — ранний стоп (секунды Unix): при первом сообщении с
-	// Timestamp СТРОГО меньше StopBeforeTs обрезаем выборку (само сообщение и
-	// всё старше НЕ включаем) и прекращаем пагинацию. 0 = без раннего стопа.
+	// StopBeforeTs — ранний стоп (секунды Unix): сообщения с Timestamp СТРОГО
+	// меньше StopBeforeTs НЕ включаются в результат, а пагинация прекращается,
+	// как только страница пересекает порог (пагинация идёт в прошлое, поэтому
+	// следующие страницы только старше). 0 = без раннего стопа.
 	StopBeforeTs int64
 }
 
-// GetChat возвращает сообщения комнаты token, упорядоченные от новых к старым
-// (спека §6 `chat show`, §12).
+// GetChat возвращает сообщения комнаты token (спека §6 `chat show`, §12).
 //
-// Пагинация: страницы по chatPageSize (200) сообщений, перебор
-// lastKnownMessageId назад (lookIntoFuture=0). Следующая страница тянется с
-// lastKnownMessageId = id самого старого сообщения предыдущей страницы.
+// Пагинация НЕ опирается на порядок сообщений в теле ответа:
+//   - курсором служит заголовок X-Chat-Last-Given (id самого старого сообщения
+//     страницы) — его подставляем как lastKnownMessageId следующего запроса;
+//   - стоп — пустая страница, HTTP 304/204 (transport трактует как пусто),
+//     пустой/отсутствующий заголовок, либо неизменившийся курсор (нет прогресса);
+//   - потолок opts.Limit обрезает накопленный результат.
 //
-// Цикл продолжается, пока (а) предыдущая страница вернула ровно chatPageSize
-// и (б) не достигнут потолок opts.Limit и (в) не сработал ранний стоп
-// opts.StopBeforeTs. Пустая страница = достигли начала чата — выходим без
-// ошибки (и не зацикливаемся).
+// serverLimit выбирается как min(opts.Limit, chatPageSize) при opts.Limit>0 —
+// для частого chat show с потолком 20 сервер отдаст 20, а не 200 (экономия
+// трафика). При opts.Limit=0 (без потолка) — chatPageSize=200 за запрос.
 //
-// opts.Limit — потолок ВЫБОРКИ, а не серверный limit=: серверу всегда шлётся
-// limit=200, излишек обрезается на клиенте после накопления.
+// Ранний стоп (StopBeforeTs) фильтрует страницу по timestamp без допущения о
+// порядке: из страницы оставляются только сообщения с ts>=StopBeforeTs, а при
+// обнаружении хотя бы одного «слишком старого» — пагинация прекращается
+// (следующие страницы строго старше). Корректность --since дополнительно
+// дублируется в CLI-слое.
 func (c *TalkClient) GetChat(ctx context.Context, token string, opts GetChatOpts) ([]Message, error) {
+	// serverLimit — сколько просим у сервера за один запрос.
+	serverLimit := chatPageSize
+	if opts.Limit > 0 && opts.Limit < chatPageSize {
+		serverLimit = opts.Limit
+	}
+
 	result := make([]Message, 0)
 	lastKnown := opts.LastKnownMessageId
 	for {
-		page, err := c.getChatPage(ctx, token, lastKnown)
+		page, lastGiven, err := c.getChatPage(ctx, token, lastKnown, serverLimit)
 		if err != nil {
 			return nil, err
 		}
-		// Пустая страница — достигли начала чата (или чат пустой). Без этой
-		// проверки пустой чат зациклился бы на повторных запросах.
+		// Пустая страница (или 304/204, отданные transport-ом как пусто) —
+		// достигли начала чата (или чат пуст). Без этой проверки пустой чат
+		// зациклился бы на повторных запросах.
 		if len(page) == 0 {
 			break
 		}
 
-		// Ранний стоп: режем страницу по первому сообщению строго старше
-		// opts.StopBeforeTs. Сообщения упорядочены от новых к старым, поэтому
-		// найдя первое «слишком старое», всё после него тоже отбрасываем.
+		// Ранний стоп по timestamp — БЕЗ допущения о порядке сообщений: оставляем
+		// только сообщения страницы с ts>=StopBeforeTs; если хотя бы одно
+		// «слишком старое» попалось — дальше пагинации нет (следующая страница
+		// строго старше), прекращаем.
 		if opts.StopBeforeTs != 0 {
-			cut := -1
+			trimmed := page[:0]
+			stopped := false
 			for i := range page {
 				if page[i].Timestamp < opts.StopBeforeTs {
-					cut = i
-					break
+					stopped = true
+					continue
 				}
+				trimmed = append(trimmed, page[i])
 			}
-			if cut >= 0 {
-				result = append(result, page[:cut]...)
-				break // ранний стоп сработал — пагинацию прекращаем
+			result = append(result, trimmed...)
+			if stopped {
+				break
 			}
+		} else {
+			result = append(result, page...)
 		}
 
-		result = append(result, page...)
-		lastKnown = page[len(page)-1].Id // самое старое в странице
-
-		// Неполная страница — достигли начала чата.
-		if len(page) < chatPageSize {
-			break
-		}
 		// Потолок выборки достигнут — больше не тянем.
 		if opts.Limit > 0 && len(result) >= opts.Limit {
 			break
 		}
+		// Неполная страница — достигли начала чата (страховка поверх заголовка).
+		if len(page) < serverLimit {
+			break
+		}
+		// Курсор следующей страницы — из заголовка X-Chat-Last-Given. Нет
+		// заголовка или значение не поменялось с прошлого захода — стоп
+		// (сервер сообщил об отсутствии более старых сообщений).
+		if lastGiven == "" {
+			break
+		}
+		next, parseErr := strconv.Atoi(lastGiven)
+		if parseErr != nil || next <= 0 || next == lastKnown {
+			break
+		}
+		lastKnown = next
 	}
 
-	// Применяем потолок выборки (сервер отдаёт страницами по 200, поэтому
-	// накопленное может превышать opts.Limit).
+	// Применяем потолок выборки (сервер отдаёт страницами, поэтому накопленное
+	// может превышать opts.Limit на величину до одной страницы).
 	if opts.Limit > 0 && len(result) > opts.Limit {
 		result = result[:opts.Limit]
 	}
@@ -110,90 +140,34 @@ func (c *TalkClient) GetChat(ctx context.Context, token string, opts GetChatOpts
 }
 
 // getChatPage выполняет один GET-запрос страницы chat-истории и декодирует
-// OCS-конверт в []Message. query: limit=chatPageSize, lookIntoFuture=0,
-// lastKnownMessageId (только если lastKnown > 0 — иначе сервер отдаёт самое
-// свежее).
-func (c *TalkClient) getChatPage(ctx context.Context, token string, lastKnown int) ([]Message, error) {
+// OCS-конверт в []Message. Возвращает также значение заголовка
+// X-Chat-Last-Given (курсор следующей страницы, может быть пустым).
+//
+// query: limit=serverLimit, lookIntoFuture=0, lastKnownMessageId (только при
+// lastKnown>0 — иначе сервер отдаёт самое свежее), setReadMarker=0 (читающий
+// `chat show` НЕ должен молча помечать комнату прочитанной — «отметка
+// прочитанным» за рамками MVP, спека §11).
+func (c *TalkClient) getChatPage(ctx context.Context, token string, lastKnown, serverLimit int) ([]Message, string, error) {
 	p := pathChat + "/" + url.PathEscape(token)
 	q := url.Values{}
-	q.Set("limit", strconv.Itoa(chatPageSize))
+	q.Set("limit", strconv.Itoa(serverLimit))
 	q.Set("lookIntoFuture", "0")
+	// setReadMarker=0: chat show — это «подглянуть», не «прочитать». Дефолт
+	// сервера =1 сбросил бы unread; явно гасим (спека §11 выносит отметку
+	// прочитанным за рамки MVP).
+	q.Set("setReadMarker", "0")
 	if lastKnown > 0 {
 		q.Set("lastKnownMessageId", strconv.Itoa(lastKnown))
 	}
 	var out []Message
-	if err := c.doOCSGet(ctx, p, q, &out); err != nil {
-		return nil, err
+	header, err := c.doOCS(ctx, http.MethodGet, p, q, nil, false, &out)
+	if err != nil {
+		return nil, "", err
 	}
 	if out == nil {
 		out = []Message{}
 	}
-	return out, nil
-}
-
-// doOCSGet — query-aware вариант doOCS для GET-запросов к OCS-эндпоинтам.
-//
-// doOCS принимает только путь и собирает URL через path.Join, который
-// экранирует '?' в '%3F' (query отрезается). Для chat-эндпоинта нужны
-// query-параметры (limit/lookIntoFuture/lastKnownMessageId), поэтому здесь
-// URL собирается с RawQuery отдельно.
-//
-// Контракт ошибок, заголовки и sanitize-политика — идентичны doOCS (см.
-// client.go). Не вынесено в client.go, чтобы не конфликтовать с параллельными
-// задачами Task 2.4/2.7; при необходимости рефакторится в общий хелпер позже.
-func (c *TalkClient) doOCSGet(ctx context.Context, p string, q url.Values, out any) error {
-	u := *c.baseURL
-	joined := path.Join(c.baseURL.Path, p)
-	if !strings.HasPrefix(joined, "/") {
-		joined = "/" + joined
-	}
-	u.Path = joined
-	u.RawPath = ""
-	if len(q) > 0 {
-		u.RawQuery = q.Encode()
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return sanitizeErr(err)
-	}
-	// Authorization собирается на каждый запрос заново (не кэшируется) — тот же
-	// контракт безопасности, что в doOCS (спека §5).
-	creds := c.cfg.Login + ":" + c.cfg.Password
-	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(creds)))
-	req.Header.Set("OCS-APIRequest", "true")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.doer.Do(req)
-	if err != nil {
-		// При redirect-ошибке http.Client может вернуть предыдущий Response с
-		// уже закрытым Body — закрываем идемпотентно.
-		if resp != nil {
-			_ = resp.Body.Close()
-		}
-		return sanitizeErr(err)
-	}
-	defer resp.Body.Close()
-
-	// Декодирование в две фазы (как в doOCS): сначала meta + RawMessage, при
-	// успехе — распаковка data в out.
-	var env OCSEnvelope[json.RawMessage]
-	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
-		return sanitizeErr(fmt.Errorf("client: не удалось декодировать OCS-ответ: %w", err))
-	}
-	if env.OCS.Meta.StatusCode >= 400 {
-		msg := env.OCS.Meta.Message
-		if msg == "" {
-			msg = fmt.Sprintf("OCS statusCode=%d", env.OCS.Meta.StatusCode)
-		}
-		return errors.New("client: " + msg)
-	}
-	if out != nil && len(env.OCS.Data) > 0 {
-		if err := json.Unmarshal(env.OCS.Data, out); err != nil {
-			return sanitizeErr(fmt.Errorf("client: не удалось распаковать ocs.data: %w", err))
-		}
-	}
-	return nil
+	return out, header.Get(headerChatLastGiven), nil
 }
 
 // SendMessageOpts — параметры SendMessage (спека §6 `chat send`).
@@ -266,7 +240,7 @@ func (c *TalkClient) SendMessage(ctx context.Context, token string, opts SendMes
 	// path.Join с baseURL.Path.
 	p := pathChat + "/" + url.PathEscape(token)
 	var out sendMessageResp
-	if err := c.doOCS(ctx, http.MethodPost, p, bytes.NewReader(body), true, &out); err != nil {
+	if _, err := c.doOCS(ctx, http.MethodPost, p, nil, bytes.NewReader(body), true, &out); err != nil {
 		return 0, err
 	}
 	return out.Id, nil

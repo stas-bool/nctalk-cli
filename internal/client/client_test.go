@@ -65,7 +65,7 @@ func TestDoOCS_Headers(t *testing.T) {
 
 	c := NewTalkClient(testCfg(ts.URL))
 	var out []Message
-	if err := c.doOCS(context.Background(), http.MethodGet, pathRooms, nil, false, &out); err != nil {
+	if _, err := c.doOCS(context.Background(), http.MethodGet, pathRooms, nil, nil, false, &out); err != nil {
 		t.Fatalf("doOCS: %v", err)
 	}
 	if gotAuth != wantAuth() {
@@ -113,7 +113,7 @@ func TestDoOCS_Success(t *testing.T) {
 
 	c := NewTalkClient(testCfg(ts.URL))
 	var out []Message
-	if err := c.doOCS(context.Background(), http.MethodGet, pathRooms, nil, false, &out); err != nil {
+	if _, err := c.doOCS(context.Background(), http.MethodGet, pathRooms, nil, nil, false, &out); err != nil {
 		t.Fatalf("doOCS: %v", err)
 	}
 	if len(out) != 1 {
@@ -151,7 +151,7 @@ func TestDoOCS_OCSError(t *testing.T) {
 
 	c := NewTalkClient(testCfg(ts.URL))
 	var out []Message
-	err := c.doOCS(context.Background(), http.MethodGet, pathRooms, nil, false, &out)
+	_, err := c.doOCS(context.Background(), http.MethodGet, pathRooms, nil, nil, false, &out)
 	if err == nil {
 		t.Fatal("err = nil, want error containing 'room not found'")
 	}
@@ -174,7 +174,7 @@ func TestDoOCS_MutateContentType(t *testing.T) {
 	c := NewTalkClient(testCfg(ts.URL))
 	var out any
 	body := strings.NewReader(`{"x":1}`)
-	if err := c.doOCS(context.Background(), http.MethodPost, pathRooms, body, true, &out); err != nil {
+	if _, err := c.doOCS(context.Background(), http.MethodPost, pathRooms, nil, body, true, &out); err != nil {
 		t.Fatalf("doOCS: %v", err)
 	}
 	if gotCT != "application/json" {
@@ -252,7 +252,7 @@ func TestRedirect_CrossHostBlocked(t *testing.T) {
 
 	c := NewTalkClient(testCfg(tsA.URL))
 	var out []Message
-	err := c.doOCS(context.Background(), http.MethodGet, pathRooms, nil, false, &out)
+	_, err := c.doOCS(context.Background(), http.MethodGet, pathRooms, nil, nil, false, &out)
 	if err == nil {
 		t.Fatal("err = nil, want cross-host redirect error")
 	}
@@ -298,7 +298,7 @@ func TestRedirect_SameHostFollowed(t *testing.T) {
 
 	c := NewTalkClient(testCfg(ts.URL))
 	var out []Message
-	if err := c.doOCS(context.Background(), http.MethodGet, pathRooms, nil, false, &out); err != nil {
+	if _, err := c.doOCS(context.Background(), http.MethodGet, pathRooms, nil, nil, false, &out); err != nil {
 		t.Fatalf("doOCS: %v", err)
 	}
 	if got := atomic.LoadInt32(&finalHits); got != 1 {
@@ -307,4 +307,47 @@ func TestRedirect_SameHostFollowed(t *testing.T) {
 	if len(out) != 1 || out[0].Id != 7 {
 		t.Errorf("out: got %+v, want single message id=7", out)
 	}
+}
+
+// TestRedirect_BlocksHttpsToHttpDowngrade — same-host редирект с https на http
+// должен блокироваться: иначе Authorization (с паролем) уйдёт в открытом виде.
+// Политика проверяется напрямую (без TLS-сервера) — синтетическими запросами.
+func TestRedirect_BlocksHttpsToHttpDowngrade(t *testing.T) {
+	cases := []struct {
+		name    string
+		prev    string // scheme://host предыдущего запроса
+		next    string // scheme://host нового запроса
+		wantErr bool
+	}{
+		{"https→http same host (даунгрейд)", "https://nc", "http://nc", true},
+		{"https→https same host (разрешено)", "https://nc", "https://nc", false},
+		{"http→http same host (разрешено)", "http://nc", "http://nc", false},
+		{"http→https same host (апгрейд, разрешено)", "http://nc", "https://nc", false},
+		{"https→https cross host (блок)", "https://nc", "https://evil", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prevU := mustParseURL(tc.prev)
+			nextU := mustParseURL(tc.next)
+			err := sameHostRedirectPolicy(
+				&http.Request{URL: nextU},
+				[]*http.Request{{URL: prevU}},
+			)
+			if tc.wantErr && err == nil {
+				t.Errorf("хотели ошибку блокировки, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("не хотели ошибку, got %v", err)
+			}
+		})
+	}
+}
+
+// mustParseURL — вспомогательный парсер для тестов политики редиректов.
+func mustParseURL(s string) *url.URL {
+	u, err := url.Parse(s)
+	if err != nil {
+		panic(err)
+	}
+	return u
 }

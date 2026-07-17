@@ -53,7 +53,7 @@ type ListRoomsOpts struct {
 // Фильтры opts применяются на клиенте к полученному списку.
 func (c *TalkClient) ListRooms(ctx context.Context, opts ListRoomsOpts) ([]Room, error) {
 	var rooms []Room
-	if err := c.doOCS(ctx, http.MethodGet, pathRooms, nil, false, &rooms); err != nil {
+	if _, err := c.doOCS(ctx, http.MethodGet, pathRooms, nil, nil, false, &rooms); err != nil {
 		return nil, err
 	}
 	return filterRooms(rooms, opts), nil

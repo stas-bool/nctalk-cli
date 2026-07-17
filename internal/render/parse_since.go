@@ -25,8 +25,8 @@ const (
 // процесса (TZ из окружения); ISO-с-зоной — как есть. При ошибке парсинга
 // возвращается понятная ошибка с перечнем допустимых форматов.
 func ParseSince(s string) (int64, error) {
-	// 1) Относительные форматы: <N><s|m|h|d>.
-	if ts, ok := parseRelative(s); ok {
+	// 1) Относительные форматы: <N><s|m|h|d> — от реального time.Now().
+	if ts, ok := ParseRelativeAt(s, time.Now()); ok {
 		return ts, nil
 	}
 	// 2) Дата без времени → начало дня, локальная TZ.
@@ -48,10 +48,14 @@ func ParseSince(s string) (int64, error) {
 	)
 }
 
-// parseRelative разбирает относительные форматы вида "<N><суффикс>", где суффикс
+// ParseRelativeAt разбирает относительные форматы вида "<N><суффикс>", где суффикс
 // s — секунды, m — минуты, h — часы, d — 24 часа. Возвращает unix-секунды now-N
 // и флаг успешного разбора; false — если строка не соответствует формату.
-func parseRelative(s string) (int64, bool) {
+//
+// Экспортируется, чтобы CLI-слой мог прокинуть своё deps.Now (детерминизм в
+// тестах): единственная реализация набора суффиксов (s/m/h/d) — здесь, в
+// render-слое; раньше в cli дублировалась копия.
+func ParseRelativeAt(s string, now time.Time) (int64, bool) {
 	if len(s) < 2 { // минимум "1s"
 		return 0, false
 	}
@@ -74,5 +78,5 @@ func parseRelative(s string) (int64, bool) {
 	default:
 		return 0, false
 	}
-	return time.Now().Add(-d).Unix(), true
+	return now.Add(-d).Unix(), true
 }

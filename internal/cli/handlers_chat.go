@@ -192,7 +192,9 @@ func chatShowHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 	// 8. Предупреждение при достигнутом cap 200 И пустом результате фильтра.
 	// sampleLen == 200 — простейшая аппроксимация «сервер вернул полную
 	// страницу» (обычно означает, что есть ещё более старые сообщения).
-	if sampleLen == 200 && len(filtered) == 0 {
+	// Гасим предупреждение при явном --last: пользователь сам задал потолок и
+	// знает объём выборки (иначе ложноположительно срабатывает на `--last 200`).
+	if sampleLen == 200 && len(filtered) == 0 && last <= 0 {
 		fmt.Fprintln(deps.Stderr,
 			"выборка ограничена 200 сообщениями, совпадений не найдено; "+
 				"сузьте диапазон (--since) или используйте search (серверный фильтр person=)")
@@ -230,40 +232,10 @@ func chatShowHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 // real time.Now(), что не подходит для тестов с зафиксированным deps.Now.
 // Абсолютные форматы (дата/ISO) не зависят от now и идут через render.ParseSince.
 func parseSinceAt(s string, now time.Time) (int64, error) {
-	if ts, ok := parseRelativeAt(s, now); ok {
+	if ts, ok := render.ParseRelativeAt(s, now); ok {
 		return ts, nil
 	}
 	return render.ParseSince(s)
-}
-
-// parseRelativeAt — локальный аналог render.parseRelative с опорой на now
-// вместо real time.Now(). Дублирование оправдано: render.parseRelative не
-// экспортируется, а менять render-слой в этой задаче мы не должны. Набор
-// суффиксов и семантика — идентичны render.parseRelative (см. parse_since.go).
-func parseRelativeAt(s string, now time.Time) (int64, bool) {
-	if len(s) < 2 { // минимум "1s"
-		return 0, false
-	}
-	suffix := s[len(s)-1]
-	num := s[:len(s)-1]
-	n, err := strconv.Atoi(num)
-	if err != nil || n < 0 {
-		return 0, false
-	}
-	var d time.Duration
-	switch suffix {
-	case 's':
-		d = time.Duration(n) * time.Second
-	case 'm':
-		d = time.Duration(n) * time.Minute
-	case 'h':
-		d = time.Duration(n) * time.Hour
-	case 'd':
-		d = time.Duration(n) * 24 * time.Hour
-	default:
-		return 0, false
-	}
-	return now.Add(-d).Unix(), true
 }
 
 // chatSendHandler — реализация `chat send <room>` (спека §6 chat send).
@@ -356,6 +328,11 @@ func chatSendHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 		if err != nil {
 			return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat send: --reply-to ожидает целое число, получено %q", replyToRaw)}
 		}
+		if n <= 0 {
+			// Неположительный id — явно ошибочный ввод: отсекаем ДО ResolveRoom и
+			// SendMessage, не тратя сетевой запрос (сервер всё равно вернёт 4xx).
+			return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat send: --reply-to ожидает положительное число, получено %d", n)}
+		}
 		replyTo = n
 	}
 
@@ -378,8 +355,18 @@ func chatSendHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 	if readErr != nil {
 		return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat send: не удалось прочитать тело: %w", readErr)}
 	}
-	if len(body) == 0 {
-		// Пустое stdin/файл — это ошибка пользователя, не сети; клиент не зовём.
+	// Срезаем ОДИН завершающий перевод строки: `echo "hi" | nctalk chat send`
+	// отправил бы "hi\n" (с сохранением сервером \n). Многострочные тела (с \n
+	// внутри) валидны — поэтому тримим ровно один trailing \n / \r\n, не пачку.
+	text := string(body)
+	if strings.HasSuffix(text, "\r\n") {
+		text = text[:len(text)-2]
+	} else if strings.HasSuffix(text, "\n") {
+		text = text[:len(text)-1]
+	}
+	if len(text) == 0 {
+		// Пустое stdin/файл (или только перевод строки) — ошибка пользователя,
+		// не сети; клиент не зовём.
 		return ExitError{Code: ExitGeneric, Err: errors.New("chat send: тело сообщения пусто")}
 	}
 
@@ -401,7 +388,7 @@ func chatSendHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 
 	// 5. Отправка. SendMessageOpts{Message, ReplyTo, Silent, ReferenceId}.
 	id, err := deps.Client.SendMessage(ctx, token, client.SendMessageOpts{
-		Message:     string(body),
+		Message:     text,
 		ReplyTo:     replyTo,
 		Silent:      silentFlag,
 		ReferenceId: referenceId,

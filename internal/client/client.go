@@ -79,6 +79,10 @@ func NewTalkClientWithDoer(cfg config.Config, doer httpDoer) *TalkClient {
 //     обернёт её в *url.Error и вернёт вызывающему; doOCS прокинет её через
 //     sanitizeErr.
 //
+// Дополнительно блокируется даунгрейд схемы https→http: при same-host редиректе
+// с https на http заголовок Authorization (с паролем) уплыл бы в открытом виде.
+// Спека §5 («same-host follows») про схему умалчивает — закрываем явный пробел.
+//
 // http.ErrUseLastResponse НЕ используем: он оставляет редирект «висеть» без
 // ошибки и требует ручной обработки тела. Лимит редиректов — стандартный (10).
 //
@@ -89,25 +93,47 @@ func sameHostRedirectPolicy(req *http.Request, via []*http.Request) error {
 		return nil
 	}
 	prev := via[len(via)-1]
-	if req.URL.Host == prev.URL.Host {
-		return nil
+	if req.URL.Host != prev.URL.Host {
+		return errors.New("cross-host redirect blocked: " + req.URL.Host)
 	}
-	return errors.New("cross-host redirect blocked: " + req.URL.Host)
+	// Даунгрейд https→http на том же хосте — запрещаем: Basic-auth уйдёт открыто.
+	if prev.URL.Scheme == "https" && req.URL.Scheme == "http" {
+		return errors.New("insecure scheme downgrade blocked: https→http")
+	}
+	return nil
 }
 
-// doOCS выполняет OCS-запрос и распаковывает конверт в out.
+// doOCS выполняет OCS-запрос и распаковывает конверт в out. Это ЕДИНСТВЕННЫЙ
+// транспортный метод клиента (раньше было три копии: doOCS/doOCSGet/
+// doSearchOCSGet — собраны в одну, чтобы убрать рассинхрон redact/заголовков).
 //
-// method — HTTP-метод; p — путь относительно baseURL (начинается с '/'),
-// обычно берётся из именованной константы (см. paths.go); body — тело запроса
-// (nil для GET); mutate=true добавляет заголовок Content-Type: application/json
-// (для POST/PUT/DELETE); out — указатель на целевой тип для поля ocs.data
-// (может быть nil, если нужен только статус).
+// Параметры:
+//   - method — HTTP-метод;
+//   - p — путь относительно baseURL (начинается с '/'), обычно из именованной
+//     константы (см. paths.go);
+//   - query — необязательные query-параметры (nil → без RawQuery); для GET с
+//     limit/term/cursor и т.п.;
+//   - body — тело запроса (nil для GET);
+//   - mutate=true добавляет заголовок Content-Type: application/json
+//     (для POST/PUT/DELETE);
+//   - out — указатель на целевой тип для поля ocs.data (может быть nil, если
+//     нужен только статус).
+//
+// Возвращается http.Header ответа — нужен chat-пагинации для чтения заголовка
+// X-Chat-Last-Given; прочие вызывающие его игнорируют. В заголовках ответа нет
+// кредов (Authorization — заголовок запроса, не ответа).
 //
 // Контракт ошибок:
 //   - при meta.statusCode >= 400 возвращается ошибка с meta.message;
+//   - HTTP 304 Not Modified / 204 No Content трактуются как «пустой ответ» —
+//     декодирования нет, out не трогается, возвращается (header, nil). Для chat
+//     (lookIntoFuture=0) 304 = «старых сообщений больше нет» → чистый стоп
+//     пагинации без ошибки;
 //   - любая transport/decode-ошибка пропускается через sanitizeErr (без userinfo
-//     и query в тексте).
-func (c *TalkClient) doOCS(ctx context.Context, method, p string, body io.Reader, mutate bool, out any) error {
+//     и query в тексте); в текст decode-ошибки включается HTTP-статус, чтобы
+//     не-OCS тело (HTML login-page, 5xx reverse-proxy) не давало непрозрачное
+//     «invalid character '<'».
+func (c *TalkClient) doOCS(ctx context.Context, method, p string, query url.Values, body io.Reader, mutate bool, out any) (http.Header, error) {
 	// Склеиваем baseURL и путь без двойных слэшей. path.Join нормирует слэши
 	// и убирает trailing '/'; для абсолютного пути результат начинаем с '/'.
 	fullURL := *c.baseURL
@@ -118,10 +144,15 @@ func (c *TalkClient) doOCS(ctx context.Context, method, p string, body io.Reader
 	fullURL.Path = joined
 	// RawPath сбрасываем, чтобы url.String() пересобрал путь из Path без мусора.
 	fullURL.RawPath = ""
+	if len(query) > 0 {
+		// RawQuery выставляем отдельно от Path — path.Join не умеет в query
+		// (закодировал бы '?' в %3F, и сервер получил бы литерал в пути).
+		fullURL.RawQuery = query.Encode()
+	}
 
 	req, err := http.NewRequestWithContext(ctx, method, fullURL.String(), body)
 	if err != nil {
-		return sanitizeErr(err)
+		return nil, sanitizeErr(err)
 	}
 
 	// Authorization: Basic base64(login:password) (RFC 7617). На каждый запрос
@@ -142,16 +173,23 @@ func (c *TalkClient) doOCS(ctx context.Context, method, p string, body io.Reader
 		if resp != nil {
 			_ = resp.Body.Close()
 		}
-		return sanitizeErr(err)
+		return nil, sanitizeErr(err)
 	}
 	defer resp.Body.Close()
+
+	// 304 Not Modified / 204 No Content: тела нет, декодировать нечего. Трактуем
+	// как пустой ответ (out не трогаем) — для chat-пагинации это чистый стоп.
+	if resp.StatusCode == http.StatusNotModified || resp.StatusCode == http.StatusNoContent {
+		return resp.Header, nil
+	}
 
 	// Декодируем конверт в две фазы: сначала meta + RawMessage для data, потом
 	// (при успехе) распаковываем data в out. Так ошибка API не ломает типизацию
 	// out и не приводит к двойному декодированию.
 	var env OCSEnvelope[json.RawMessage]
 	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
-		return sanitizeErr(fmt.Errorf("client: не удалось декодировать OCS-ответ: %w", err))
+		// HTTP-статус в тексте — диагностика не-OCS тела (HTML, 5xx) без потерь.
+		return nil, sanitizeErr(fmt.Errorf("client: не удалось декодировать OCS-ответ (HTTP %d): %w", resp.StatusCode, err))
 	}
 
 	if env.OCS.Meta.StatusCode >= 400 {
@@ -159,15 +197,15 @@ func (c *TalkClient) doOCS(ctx context.Context, method, p string, body io.Reader
 		if msg == "" {
 			msg = fmt.Sprintf("OCS statusCode=%d", env.OCS.Meta.StatusCode)
 		}
-		return errors.New("client: " + msg)
+		return nil, errors.New("client: " + msg)
 	}
 
 	// out может быть nil (нужен только статус) или data может отсутствовать —
 	// тогда не трогаем out.
 	if out != nil && len(env.OCS.Data) > 0 {
 		if err := json.Unmarshal(env.OCS.Data, out); err != nil {
-			return sanitizeErr(fmt.Errorf("client: не удалось распаковать ocs.data: %w", err))
+			return nil, sanitizeErr(fmt.Errorf("client: не удалось распаковать ocs.data: %w", err))
 		}
 	}
-	return nil
+	return resp.Header, nil
 }

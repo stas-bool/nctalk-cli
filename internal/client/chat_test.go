@@ -6,8 +6,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -37,6 +39,7 @@ type chatReq struct {
 	limit              string
 	lookIntoFuture     string
 	lastKnownMessageId string
+	setReadMarker      string
 }
 
 // chatReqLog — потокобезопасный лог запросов, полученных тест-сервером.
@@ -59,9 +62,12 @@ func (l *chatReqLog) snapshot() []chatReq {
 	return out
 }
 
-// chatPagesServer поднимает httptest-сервер, раздающий две страницы истории по
+// chatPagesServer поднимает httptest-сервер, раздающий страницы истории по
 // lastKnownMessageId: пустой/0 → page1, "801" → page2, прочее → пустой массив
-// (достигли начала чата). Возвращает сервер и лог запросов для проверок.
+// (достигли начала чата). Канонический курсор пагинации — заголовок
+// X-Chat-Last-Given: сервер выставляет его в id самого старого сообщения
+// страницы (как реальный Nextcloud Talk); для пустой страницы заголовок не
+// ставится (сигнал «более старых нет»). Возвращает сервер и лог запросов.
 func chatPagesServer(t *testing.T, page1, page2 []Message) (*httptest.Server, *chatReqLog) {
 	t.Helper()
 	log := &chatReqLog{}
@@ -72,6 +78,7 @@ func chatPagesServer(t *testing.T, page1, page2 []Message) (*httptest.Server, *c
 			limit:              q.Get("limit"),
 			lookIntoFuture:     q.Get("lookIntoFuture"),
 			lastKnownMessageId: q.Get("lastKnownMessageId"),
+			setReadMarker:      q.Get("setReadMarker"),
 		})
 		w.Header().Set("Content-Type", "application/json")
 		var data []Message
@@ -86,20 +93,31 @@ func chatPagesServer(t *testing.T, page1, page2 []Message) (*httptest.Server, *c
 		if data == nil {
 			data = []Message{}
 		}
+		// Курсор следующей страницы — из заголовка X-Chat-Last-Given (id самого
+		// старого сообщения = последний элемент, т.к. genMessages упорядочивает
+		// от нового к старому). Для пустой страницы заголовок не ставим.
+		if len(data) > 0 {
+			w.Header().Set(headerChatLastGiven, strconv.Itoa(data[len(data)-1].Id))
+		}
 		_, _ = w.Write(ocsBody(t, 200, "OK", data))
 	})), log
 }
 
 // assertChatQueryCommon проверяет, что каждый запрос в логе несёт каноничные
-// query-параметры (limit=200, lookIntoFuture=0) и стучится на путь нужного токена.
-func assertChatQueryCommon(t *testing.T, reqs []chatReq) {
+// query-параметры: limit=wantLimit (динамический: min(opts.Limit,200)),
+// lookIntoFuture=0, setReadMarker=0 (chat show НЕ помечает прочитанным), и
+// стучится на путь нужного токена.
+func assertChatQueryCommon(t *testing.T, reqs []chatReq, wantLimit string) {
 	t.Helper()
 	for i, r := range reqs {
-		if r.limit != "200" {
-			t.Errorf("req[%d].limit: got %q, want %q", i, r.limit, "200")
+		if r.limit != wantLimit {
+			t.Errorf("req[%d].limit: got %q, want %q", i, r.limit, wantLimit)
 		}
 		if r.lookIntoFuture != "0" {
 			t.Errorf("req[%d].lookIntoFuture: got %q, want %q", i, r.lookIntoFuture, "0")
+		}
+		if r.setReadMarker != "0" {
+			t.Errorf("req[%d].setReadMarker: got %q, want %q (chat show не помечает прочитанным)", i, r.setReadMarker, "0")
 		}
 		if r.path != "/ocs/v2.php/apps/spreed/api/v1/chat/tok" {
 			t.Errorf("req[%d].path: got %q, want /.../chat/tok", i, r.path)
@@ -121,7 +139,7 @@ func TestGetChat_SinglePage_TruncatesToLimit(t *testing.T) {
 		t.Fatalf("GetChat: %v", err)
 	}
 	reqs := log.snapshot()
-	assertChatQueryCommon(t, reqs)
+	assertChatQueryCommon(t, reqs, "20")
 	if got, want := len(reqs), 1; got != want {
 		t.Fatalf("запросов: got %d, want %d (Limit=20 → одна страница достаточно)", got, want)
 	}
@@ -140,8 +158,8 @@ func TestGetChat_SinglePage_TruncatesToLimit(t *testing.T) {
 }
 
 // TestGetChat_TwoPages_RollsLastKnownMessageId — Limit=210: одна страница (200)
-// не покрывает потолок, клиент прокручивает lastKnownMessageId=801 и тянет
-// вторую страницу (50). Итог 250 → обрезаем до 210.
+// не покрывает потолок, клиент берёт курсор из заголовка X-Chat-Last-Given
+// (801), тянет вторую страницу (50). Итог 250 → обрезаем до 210.
 func TestGetChat_TwoPages_RollsLastKnownMessageId(t *testing.T) {
 	ts, log := chatPagesServer(t, genMessages(1000, 801), genMessages(800, 751))
 	defer ts.Close()
@@ -152,7 +170,7 @@ func TestGetChat_TwoPages_RollsLastKnownMessageId(t *testing.T) {
 		t.Fatalf("GetChat: %v", err)
 	}
 	reqs := log.snapshot()
-	assertChatQueryCommon(t, reqs)
+	assertChatQueryCommon(t, reqs, "200")
 	if got, want := len(reqs), 2; got != want {
 		t.Fatalf("запросов: got %d, want %d (Limit=210 → две страницы)", got, want)
 	}
@@ -193,7 +211,7 @@ func TestGetChat_EarlyStop(t *testing.T) {
 		t.Fatalf("GetChat: %v", err)
 	}
 	reqs := log.snapshot()
-	assertChatQueryCommon(t, reqs)
+	assertChatQueryCommon(t, reqs, "200")
 	if got, want := len(reqs), 1; got != want {
 		t.Fatalf("запросов: got %d, want %d (ранний стоп на page1 → без page2)", got, want)
 	}
@@ -233,6 +251,89 @@ func TestGetChat_EmptyChat(t *testing.T) {
 	}
 	if got, want := len(msgs), 0; got != want {
 		t.Fatalf("len(msgs): got %d, want %d", got, want)
+	}
+}
+
+// TestGetChat_EmptyChat_304 — сервер отдаёт 304 Not Modified на самый первый
+// запрос (документация Talk: «no older messages» в том числе для пустого чата).
+// Контракт: 304 трактуется как пустая страница → чистый стоп БЕЗ ошибки
+// декодирования (тело у 304 пустое). Ровно 1 запрос, пустой non-nil результат.
+func TestGetChat_EmptyChat_304(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer srv.Close()
+
+	c := NewTalkClient(testCfg(srv.URL))
+	msgs, err := c.GetChat(context.Background(), "tok", GetChatOpts{Limit: 0})
+	if err != nil {
+		t.Fatalf("GetChat: got error %v, want nil (304 → чистый стоп, не ошибка)", err)
+	}
+	if msgs == nil {
+		t.Fatal("msgs = nil, want non-nil пустой срез")
+	}
+	if got := len(msgs); got != 0 {
+		t.Errorf("len(msgs): got %d, want 0", got)
+	}
+}
+
+// TestGetChat_StopsOn_304_MidPagination — сервер отдаёт ПОЛНУЮ page1 (200) с
+// заголовком X-Chat-Last-Given (есть курсор), а на второй запрос — 304 (старых
+// сообщений больше нет). GetChat обязан: не упасть на декоде пустого тела 304,
+// остановить пагинацию, вернуть то, что успел собрать с page1.
+func TestGetChat_StopsOn_304_MidPagination(t *testing.T) {
+	page1 := genMessages(300, 101) // 200 сообщений (id 300..101), старший id=101
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("lastKnownMessageId") == "" {
+			// Полная первая страница + курсор дальше (id самого старого в page1).
+			w.Header().Set(headerChatLastGiven, "101")
+			_, _ = w.Write(ocsBody(t, 200, "OK", page1))
+			return
+		}
+		// Вторая страница — 304: старых сообщений нет.
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer srv.Close()
+
+	c := NewTalkClient(testCfg(srv.URL))
+	msgs, err := c.GetChat(context.Background(), "tok", GetChatOpts{Limit: 0})
+	if err != nil {
+		t.Fatalf("GetChat: got error %v, want nil (304 mid-pagination → чистый стоп)", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("запросов: got %d, want 2 (полная page1 + 304-страница)", got)
+	}
+	if got, want := len(msgs), 200; got != want {
+		t.Errorf("len(msgs): got %d, want %d (только page1)", got, want)
+	}
+}
+
+// TestGetChat_StopsWhenHeaderMissing — сервер отдаёт ПОЛНУЮ страницу, но БЕЗ
+// заголовка X-Chat-Last-Given (нестандартно, но робастно): клиент обязан
+// остановиться, НЕ зацикливаясь (курсора нет — перебирать дальше некуда).
+func TestGetChat_StopsWhenHeaderMissing(t *testing.T) {
+	page1 := genMessages(300, 101) // 200 сообщений, БЕЗ заголовка
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(ocsBody(t, 200, "OK", page1))
+	}))
+	defer srv.Close()
+
+	c := NewTalkClient(testCfg(srv.URL))
+	msgs, err := c.GetChat(context.Background(), "tok", GetChatOpts{Limit: 0})
+	if err != nil {
+		t.Fatalf("GetChat: %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("запросов: got %d, want 1 (нет заголовка → стоп, без зацикливания)", got)
+	}
+	if got, want := len(msgs), 200; got != want {
+		t.Errorf("len(msgs): got %d, want %d", got, want)
 	}
 }
 

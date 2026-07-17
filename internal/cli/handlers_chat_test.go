@@ -379,6 +379,27 @@ func TestChatShowBelowCapNoWarning(t *testing.T) {
 	}
 }
 
+// TestChatShowLastExplicitNoWarning — `--last 200` (явный потолок) + фильтр
+// вырезал всё: предупреждения о cap 200 НЕ должно быть — пользователь сам задал
+// потолок и знает объём выборки. Без guard срабатывало бы ложноположительно.
+func TestChatShowLastExplicitNoWarning(t *testing.T) {
+	msgs := make([]client.Message, 200)
+	for i := range msgs {
+		msgs[i] = makeChatMsg(i+1, "bob", "comment", "from-bob", chatFixedNow.Unix())
+	}
+	spy := &chatSpyClient{chatMsgs: msgs}
+	deps := newChatDeps(spy)
+
+	ee := chatShowHandler(context.Background(), deps, []string{"TOK", "--last", "200", "--from", "alice"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (0 совпадений → exit 0)", ee.Code, ExitOK)
+	}
+	stderr := deps.Stderr.(*bytes.Buffer).String()
+	if strings.Contains(stderr, "выборка ограничена 200") {
+		t.Errorf("при явном --last 200 предупреждения быть не должно; stderr=%q", stderr)
+	}
+}
+
 // -----------------------------------------------------------------------------
 // Подстановка messageParameters
 // -----------------------------------------------------------------------------
@@ -746,5 +767,66 @@ func TestChatSendInvalidReplyTo(t *testing.T) {
 	}
 	if spy.sendCalls != 0 {
 		t.Errorf("SendMessage не должен вызываться при невалидном --reply-to; got %d calls", spy.sendCalls)
+	}
+}
+
+// TestChatSendReplyToNonPositive — --reply-to 0 и отрицательные значения
+// отсекаются ДО сетевого вызова: неположительный id сообщения лишён смысла,
+// сервер ответил бы 4xx. Покрывает guard, добавленный по замечанию review.
+func TestChatSendReplyToNonPositive(t *testing.T) {
+	for _, raw := range []string{"0", "-5"} {
+		spy := &chatSpyClient{sendId: 1}
+		deps := newChatSendDeps(spy, strings.NewReader("payload"))
+
+		ee := chatSendHandler(context.Background(), deps,
+			[]string{"TOK", "--reply-to", raw}, false)
+		if ee.Code != ExitGeneric {
+			t.Fatalf("--reply-to %s: code got %d, want %d", raw, ee.Code, ExitGeneric)
+		}
+		if ee.Err == nil {
+			t.Fatalf("--reply-to %s: err nil, want non-nil", raw)
+		}
+		if spy.sendCalls != 0 {
+			t.Errorf("--reply-to %s: SendMessage не должен вызываться; got %d calls", raw, spy.sendCalls)
+		}
+	}
+}
+
+// TestChatSendStdinTrimsTrailingNewline — `echo "hi" | nctalk chat send`
+// отправляет "hi\n"; один завершающий перевод строки срезается, до сервера
+// доходит ровно "hi". Многострочные тела (с \n внутри) сохраняются.
+func TestChatSendStdinTrimsTrailingNewline(t *testing.T) {
+	// Unix trailing newline.
+	spy := &chatSpyClient{sendId: 1}
+	deps := newChatSendDeps(spy, strings.NewReader("hi\n"))
+
+	ee := chatSendHandler(context.Background(), deps, []string{"TOK"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("unix newline: code got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	if spy.gotSendOpts.Message != "hi" {
+		t.Errorf("unix newline: Message got %q, want %q (trailing \\n не срезан)", spy.gotSendOpts.Message, "hi")
+	}
+
+	// CRLF trailing newline.
+	spy2 := &chatSpyClient{sendId: 1}
+	deps2 := newChatSendDeps(spy2, strings.NewReader("hi\r\n"))
+	ee = chatSendHandler(context.Background(), deps2, []string{"TOK"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("crlf newline: code got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	if spy2.gotSendOpts.Message != "hi" {
+		t.Errorf("crlf newline: Message got %q, want %q", spy2.gotSendOpts.Message, "hi")
+	}
+
+	// Многострочное тело: внутренние переводы строк сохраняются, один trailing — срезается.
+	spy3 := &chatSpyClient{sendId: 1}
+	deps3 := newChatSendDeps(spy3, strings.NewReader("line1\nline2\n"))
+	ee = chatSendHandler(context.Background(), deps3, []string{"TOK"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("multiline: code got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	if want := "line1\nline2"; spy3.gotSendOpts.Message != want {
+		t.Errorf("multiline: Message got %q, want %q (внутренние \\n должны сохраниться)", spy3.gotSendOpts.Message, want)
 	}
 }

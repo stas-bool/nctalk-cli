@@ -108,3 +108,29 @@ func TestGetReactions_Empty(t *testing.T) {
 		t.Errorf("len(reactions) = %d, want 0", len(reactions))
 	}
 }
+
+// TestGetReactions_NullData — сервер отдаёт ocs.data: null. json.Unmarshal
+// []byte("null") в map обнуляет её в nil (а guard len(data)>0 пропускает, т.к.
+// RawMessage("null") имеет len 4). Без явной переинициализации GetReactions
+// вернул бы nil-мапу → render.ReactionsJSON напечатал бы `null` вместо `{}`.
+// Контракт: возвращается non-nil пустая map, nil error.
+func TestGetReactions_NullData(t *testing.T) {
+	const nullDataBody = `{"ocs":{"meta":{"status":"ok","statuscode":200,"message":"OK"},"data":null}}`
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(nullDataBody))
+	}))
+	defer ts.Close()
+
+	c := NewTalkClient(testCfg(ts.URL))
+	reactions, err := c.GetReactions(context.Background(), "tok-team", 8001)
+	if err != nil {
+		t.Fatalf("GetReactions: got err %v, want nil (data:null — НЕ ошибка)", err)
+	}
+	if reactions == nil {
+		t.Fatal("reactions = nil, want non-nil пустая map (data:null не должен давать nil)")
+	}
+	if len(reactions) != 0 {
+		t.Errorf("len(reactions) = %d, want 0", len(reactions))
+	}
+}
