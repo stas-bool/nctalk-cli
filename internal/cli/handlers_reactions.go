@@ -109,7 +109,8 @@ func reactionsGetHandler(ctx context.Context, deps Deps, args []string, jsonOut 
 	reps, err := deps.Client.GetReactions(ctx, token, messageId)
 	if err != nil {
 		// Сетевые/OCS-ошибки приходят уже sanitized (без URL/userinfo) — спека §5, §9.
-		return ExitError{Code: ExitGeneric, Err: err}
+		// OCS 404 (комната или сообщение не найдены) → exit 2; прочие → exit 1.
+		return exitFromClientErr(err)
 	}
 
 	// Ветвление вывода по глобальному --json (спека §6). Пустая map:

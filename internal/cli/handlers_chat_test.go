@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -408,7 +409,7 @@ func TestChatShowLastExplicitNoWarning(t *testing.T) {
 // Name параметра (render.SubstituteParams).
 func TestChatShowSubstituteParams(t *testing.T) {
 	msg := makeChatMsg(1, "alice", "comment", "файл {file}", chatFixedNow.Unix())
-	msg.MessageParameters = map[string]client.MsgParam{
+	msg.MessageParameters = client.MsgParams{
 		"file": {Type: "file", Name: "doc.pdf"},
 	}
 	spy := &chatSpyClient{chatMsgs: []client.Message{msg}}
@@ -478,7 +479,7 @@ func TestChatShowNameSingleMatch(t *testing.T) {
 // с оригинальными полями (MessageParameters не теряется).
 func TestChatShowJSON(t *testing.T) {
 	msg := makeChatMsg(1, "alice", "comment", "текст {file}", chatFixedNow.Unix())
-	msg.MessageParameters = map[string]client.MsgParam{
+	msg.MessageParameters = client.MsgParams{
 		"file": {Type: "file", Name: "doc.pdf"},
 	}
 	spy := &chatSpyClient{chatMsgs: []client.Message{msg}}
@@ -550,6 +551,41 @@ func TestChatShowClientError(t *testing.T) {
 	}
 	if ee.Err != sentinel {
 		t.Errorf("err: got %v, want %v", ee.Err, sentinel)
+	}
+}
+
+// TestChatShowClientOCSNotFound — GetChat вернул *client.OCSError{Code:404}
+// (комната с таким token не найдена на сервере) → exit 2 (NotFound), а не 1.
+// Это ключевой кейс e2e-баги: позиционный token несуществующий → сервер OCS 404.
+// Спека §7/§9: not found = exit 2, в т.ч. OCS 404.
+func TestChatShowClientOCSNotFound(t *testing.T) {
+	spy := &chatSpyClient{
+		chatErr: &client.OCSError{Code: 404, Message: "room not found"},
+	}
+	deps := newChatDeps(spy)
+
+	ee := chatShowHandler(context.Background(), deps, []string{"НЕСУЩЕСТВУЮЩИЙ_zzz"}, false)
+	if ee.Code != ExitNotFound {
+		t.Fatalf("code: got %d, want %d (ExitNotFound для OCS 404; err=%v)", ee.Code, ExitNotFound, ee.Err)
+	}
+	// Исходная типизированная ошибка сохранена в ExitError.Err — не переупакована.
+	var oe *client.OCSError
+	if !errors.As(ee.Err, &oe) || oe.Code != 404 {
+		t.Errorf("OCSError{Code:404}: не извлечён из ee.Err=%v", ee.Err)
+	}
+}
+
+// TestChatShowClientOCSAuth — GetChat вернул *client.OCSError{Code:401}
+// (неверные креды) → exit 1 (Generic), а не 2. Регресс: различие 404 vs 401.
+func TestChatShowClientOCSAuth(t *testing.T) {
+	spy := &chatSpyClient{
+		chatErr: &client.OCSError{Code: 401, Message: "bad credentials"},
+	}
+	deps := newChatDeps(spy)
+
+	ee := chatShowHandler(context.Background(), deps, []string{"TOK"}, false)
+	if ee.Code != ExitGeneric {
+		t.Fatalf("code: got %d, want %d (ExitGeneric для OCS 401; err=%v)", ee.Code, ExitGeneric, ee.Err)
 	}
 }
 

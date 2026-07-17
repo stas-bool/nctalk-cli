@@ -2,7 +2,11 @@ package cli
 
 import (
 	"errors"
+	"fmt"
+	"net/http"
 	"testing"
+
+	"github.com/stas/nctalk/internal/client"
 )
 
 // TestExitError — table-driven проверка контракта ExitError: метод Error()
@@ -84,5 +88,117 @@ func TestExitCodesSpecSection7(t *testing.T) {
 	}
 	if ExitAmbiguous != 3 {
 		t.Errorf("ExitAmbiguous: got %d, want 3", ExitAmbiguous)
+	}
+}
+
+// TestExitFromClientErr — маппинг ошибки клиентского слоя в exit-код (контракт
+// §7/§9). Table-driven: каждый кейс — пара (входная ошибка, ожидаемый exit-код).
+//
+// Покрывает:
+//   - nil → ExitOK (для поисковых команд пустой результат уже обнулил ошибку);
+//   - *client.OCSError{Code:404} → ExitNotFound (2) — комната/сообщение/реакция
+//     не найдены (ключевой кейс e2e-баги);
+//   - *client.OCSError{Code:401/403/400/500} → ExitGeneric (1) — auth/доступ/
+//     невалидный ввод/сбой сервера;
+//   - оборачнутый через %w *OCSError тоже ловится (errors.As проходит по цепочке
+//     Unwrap) — клиенты могут добавлять контекст через fmt.Errorf("…: %w", err);
+//   - сетевая ошибка без OCS-кода (например *url.Error от transport) → exit 1.
+func TestExitFromClientErr(t *testing.T) {
+	cases := []struct {
+		name     string
+		err      error
+		wantCode int
+		// wantOCSCode: если не 0 — errors.As должен извлечь *client.OCSError с
+		// таким Code (проверяем, что типизированная ошибка сохранена, а не
+		// потеряна/переупакована при маппинге).
+		wantOCSCode int
+	}{
+		{
+			name:     "nil → ExitOK",
+			err:      nil,
+			wantCode: ExitOK,
+		},
+		{
+			name:        "OCS 404 → ExitNotFound (2) — комната/сообщение/реакция не найдены",
+			err:         &client.OCSError{Code: http.StatusNotFound, Message: "room not found"},
+			wantCode:    ExitNotFound,
+			wantOCSCode: http.StatusNotFound,
+		},
+		{
+			name:     "OCS 401 (auth) → ExitGeneric (1)",
+			err:      &client.OCSError{Code: http.StatusUnauthorized, Message: "bad credentials"},
+			wantCode: ExitGeneric,
+		},
+		{
+			name:     "OCS 403 (доступ) → ExitGeneric (1)",
+			err:      &client.OCSError{Code: http.StatusForbidden, Message: "forbidden"},
+			wantCode: ExitGeneric,
+		},
+		{
+			name:     "OCS 400 (невалидный ввод, напр. плохой replyTo) → ExitGeneric (1)",
+			err:      &client.OCSError{Code: http.StatusBadRequest, Message: "invalid replyTo"},
+			wantCode: ExitGeneric,
+		},
+		{
+			name:     "OCS 500 (сбой сервера) → ExitGeneric (1)",
+			err:      &client.OCSError{Code: http.StatusInternalServerError, Message: "internal"},
+			wantCode: ExitGeneric,
+		},
+		{
+			name:     "OCS 404 без message — код виден в тексте, exit 2",
+			err:      &client.OCSError{Code: http.StatusNotFound, Message: ""},
+			wantCode: ExitNotFound,
+		},
+		{
+			name:        "оборачнутый %w OCS 404 → ExitNotFound (errors.As проходит цепочку)",
+			err:         fmt.Errorf("GetChat: %w", &client.OCSError{Code: http.StatusNotFound, Message: "room not found"}),
+			wantCode:    ExitNotFound,
+			wantOCSCode: http.StatusNotFound,
+		},
+		{
+			name:     "сетевая ошибка (не OCS) → ExitGeneric (1)",
+			err:      errors.New("connection refused"),
+			wantCode: ExitGeneric,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ee := exitFromClientErr(tc.err)
+			if ee.Code != tc.wantCode {
+				t.Errorf("Code: got %d, want %d (err=%v)", ee.Code, tc.wantCode, tc.err)
+			}
+			// nil-кейс: ExitError{ExitOK, nil} — обе стороны nil.
+			if tc.err == nil {
+				if ee.Err != nil {
+					t.Errorf("Err: got %v, want nil", ee.Err)
+				}
+				return
+			}
+			if ee.Err == nil {
+				t.Fatalf("Err: got nil, want non-nil (потеряли ошибку при маппинге)")
+			}
+			if tc.wantOCSCode != 0 {
+				var oe *client.OCSError
+				if !errors.As(ee.Err, &oe) {
+					t.Fatalf("errors.As(*client.OCSError): не извлечён из %v", ee.Err)
+				}
+				if oe.Code != tc.wantOCSCode {
+					t.Errorf("OCSError.Code: got %d, want %d", oe.Code, tc.wantOCSCode)
+				}
+			}
+		})
+	}
+}
+
+// TestExitFromClientErr_StdLibErrors — специфичный кейс: *url.Error от net/http
+// (типичный транспортный сбой: cross-host redirect, timeout, DNS) не должен
+// falsely классифроваться как NotFound — это всегда exit 1. Регрессия на
+// гипотетическую потерю типа *OCSError при санитайзе в client.sanitizeErr.
+func TestExitFromClientErr_StdLibErrors(t *testing.T) {
+	// sanitizeErr возвращает исходный *url.Error (не оборачивая в OCSError),
+	// поэтому errors.As(*OCSError) даёт false → exit 1.
+	ee := exitFromClientErr(errors.New("Get https://host/p: dial tcp: connection refused"))
+	if ee.Code != ExitGeneric {
+		t.Errorf("Code: got %d, want %d", ee.Code, ExitGeneric)
 	}
 }

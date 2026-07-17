@@ -42,7 +42,10 @@ func ResolveRoom(ctx context.Context, client TalkClient, positional, nameFlag st
 	if nameFlag != "" {
 		rooms, err := client.FindRooms(ctx, nameFlag, "")
 		if err != nil {
-			return "", Exit(ExitGeneric, err)
+			// Сетевая/OCS-ошибка. Раньше всегда ExitGeneric; теперь 404 → exit 2,
+			// прочие → exit 1 (контракт §7/§9). На практике FindRooms зовёт
+			// ListRooms, и 404 оттуда маловероятен, но единообразие важнее.
+			return "", exitFromClientErr(err)
 		}
 		switch len(rooms) {
 		case 0:

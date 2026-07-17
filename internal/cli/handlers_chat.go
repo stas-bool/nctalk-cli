@@ -161,7 +161,8 @@ func chatShowHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 	msgs, err := deps.Client.GetChat(ctx, token, opts)
 	if err != nil {
 		// Сетевые/OCS-ошибки приходят sanitized (без URL/userinfo) — спека §5, §9.
-		return ExitError{Code: ExitGeneric, Err: err}
+		// OCS 404 (комната не найдена) → exit 2; прочие → exit 1 (спека §7/§9).
+		return exitFromClientErr(err)
 	}
 	sampleLen := len(msgs) // размер ВЫБОРКИ до локального фильтра
 
@@ -395,7 +396,8 @@ func chatSendHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 	})
 	if err != nil {
 		// OCS-error/сеть — текст уже sanitized в client-слое (спека §5, §9).
-		return ExitError{Code: ExitGeneric, Err: err}
+		// 404 → exit 2 (невалидный token), прочие OCS/сеть → exit 1.
+		return exitFromClientErr(err)
 	}
 
 	// 6. Вывод id по ветке jsonOut (спека §6).
