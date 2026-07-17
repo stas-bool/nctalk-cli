@@ -1,0 +1,27 @@
+# Compiled binaries
+/nctalk
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary / coverage
+*.test
+*.out
+coverage.txt
+
+# Go workspace
+go.work
+go.work.sum
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Local env / secrets — никогда не коммитить
+.env
+.env.*
