@@ -340,19 +340,6 @@ func TestExtractJSON(t *testing.T) {
 	}
 }
 
-// TestResolveRoomStub — пока ResolveRoom не реализован (Task 4.2), он возвращает
-// "not implemented". Фиксируем это поведение, чтобы случайно не сломать
-// сигнатуру до реализации.
-func TestResolveRoomStub(t *testing.T) {
-	token, err := ResolveRoom(context.Background(), &mockTalkClient{}, "tok", "", &bytes.Buffer{})
-	if err == nil {
-		t.Fatalf("ResolveRoom: ожидается stub-ошибка, got nil; token=%q", token)
-	}
-	if token != "" {
-		t.Fatalf("ResolveRoom: token: got %q, want empty (stub)", token)
-	}
-}
-
 // equalStrings — сравнение слайсов строк; nil и []string{} считаются равными.
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
