@@ -80,11 +80,50 @@ func TestListRooms_AllFieldsMapped(t *testing.T) {
 	if one.LastMessage.Id != 9001 {
 		t.Errorf("type=1 LastMessage.Id: got %d, want 9001", one.LastMessage.Id)
 	}
-	if one.LastMessage.Message != "привет {file}" {
-		t.Errorf("type=1 LastMessage.Message: got %q, want %q", one.LastMessage.Message, "привет {file}")
+	if one.LastMessage.Message != "привет, скинул report.pdf" {
+		t.Errorf("type=1 LastMessage.Message: got %q, want %q", one.LastMessage.Message, "привет, скинул report.pdf")
 	}
-	if mp := one.LastMessage.MessageParameters["file"]; mp.Type != "file" || mp.Name != "report.pdf" {
-		t.Errorf("type=1 LastMessage.MessageParameters[file]: got %+v, want {Type:file Name:report.pdf}", mp)
+	// Реальный формат v4/room для messageType=comment — МАССИВ (здесь []),
+	// поэтому после Unmarshal MsgParams должен быть пустым (параметров нет).
+	if got := len(one.LastMessage.MessageParameters); got != 0 {
+		t.Errorf("type=1 LastMessage.MessageParameters: got %d элементов, want 0 (comment → массив → пустая карта)",
+			got)
+	}
+}
+
+// TestListRooms_SystemMessageObjectParams проверяет, что для system-сообщений
+// в v4/room messageParameters остаётся объектом — это канонический формат для
+// подстановки плейсхолдеров. В фикстуре такая комната — "Team Chat" (type=2),
+// чьё lastMessage имеет messageType="system" с плейсхолдером {actor}.
+func TestListRooms_SystemMessageObjectParams(t *testing.T) {
+	ts := roomsTestServer(t)
+	defer ts.Close()
+
+	c := NewTalkClient(testCfg(ts.URL))
+	rooms, err := c.ListRooms(context.Background(), ListRoomsOpts{})
+	if err != nil {
+		t.Fatalf("ListRooms: %v", err)
+	}
+	var team *Room
+	for i := range rooms {
+		if rooms[i].Token == "tok-team" {
+			team = &rooms[i]
+			break
+		}
+	}
+	if team == nil {
+		t.Fatal("комната tok-team не найдена в фикстуре")
+	}
+	if team.LastMessage == nil {
+		t.Fatal("tok-team LastMessage = nil")
+	}
+	if team.LastMessage.MessageType != "system" {
+		t.Fatalf("tok-team LastMessage.MessageType: got %q, want %q",
+			team.LastMessage.MessageType, "system")
+	}
+	mp := team.LastMessage.MessageParameters["actor"]
+	if mp.Type != "user" || mp.Name != "Alice" {
+		t.Errorf("tok-team system message actor param: got %+v, want {Type:user Name:Alice}", mp)
 	}
 }
 

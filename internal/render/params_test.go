@@ -10,7 +10,7 @@ import (
 // (спека §6 «Подстановка»). Нераспознанные плейсхолдеры остаются как есть.
 func TestSubstituteParams(t *testing.T) {
 	// Фикстура параметров: ключ = имя плейсхолдера без скобок.
-	params := map[string]client.MsgParam{
+	params := client.MsgParams{
 		"file":          {Type: "file", Id: "42", Name: "report.pdf"},
 		"actor":         {Type: "user", Id: "alice", Name: "Алиса"},
 		"mention-user2": {Type: "user", Id: "user2", Name: "Борис"},

@@ -76,8 +76,8 @@ func roomsListHandler(ctx context.Context, deps Deps, args []string, jsonOut boo
 	rooms, err := deps.Client.ListRooms(ctx, opts)
 	if err != nil {
 		// Сетевые/OCS-ошибки приходят уже sanitized (без URL/userinfo) —
-		// спека §5, §9. Здесь только перенос кода.
-		return ExitError{Code: ExitGeneric, Err: err}
+		// спека §5, §9. 404 → exit 2, прочие → exit 1 (контракт §7/§9).
+		return exitFromClientErr(err)
 	}
 	if len(rooms) == 0 {
 		// Поисковая семантика: пусто → пустой stdout, exit 0 (без заголовка
@@ -134,7 +134,10 @@ func roomsFindHandler(ctx context.Context, deps Deps, args []string, jsonOut boo
 
 	rooms, err := deps.Client.FindRooms(ctx, query, actorId)
 	if err != nil {
-		return ExitError{Code: ExitGeneric, Err: err}
+		// 404 → exit 2, прочие → exit 1 (контракт §7/§9). Пустой результат
+		// FindRooms — это НЕ OCS 404 (это ListRooms 200 + 0 совпадений локально),
+		// поэтому семантика «empty = exit 0» ниже по функции сохраняется.
+		return exitFromClientErr(err)
 	}
 	if len(rooms) == 0 {
 		return ExitError{Code: ExitOK, Err: nil}
@@ -172,7 +175,7 @@ func roomsSearchHandler(ctx context.Context, deps Deps, args []string, jsonOut b
 
 	rs, err := deps.Client.SearchRooms(ctx, term, 0)
 	if err != nil {
-		return ExitError{Code: ExitGeneric, Err: err}
+		return exitFromClientErr(err)
 	}
 	if len(rs) == 0 {
 		return ExitError{Code: ExitOK, Err: nil}

@@ -189,15 +189,38 @@ func (c *TalkClient) doOCS(ctx context.Context, method, p string, query url.Valu
 	var env OCSEnvelope[json.RawMessage]
 	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
 		// HTTP-статус в тексте — диагностика не-OCS тела (HTML, 5xx) без потерь.
+		// Если HTTP 404 — это всё равно «не найдено» (например, reverse-proxy
+		// отдаёт HTML-страницу 404 вместо OCS-конверта), возвращаем типизированную
+		// ошибку с Code=404, чтобы cli-маппинг дал exit 2 (контракт §7/§9).
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, &OCSError{
+				Code:    http.StatusNotFound,
+				Message: fmt.Sprintf("HTTP 404: %s", err),
+			}
+		}
 		return nil, sanitizeErr(fmt.Errorf("client: не удалось декодировать OCS-ответ (HTTP %d): %w", resp.StatusCode, err))
 	}
 
 	if env.OCS.Meta.StatusCode >= 400 {
-		msg := env.OCS.Meta.Message
-		if msg == "" {
-			msg = fmt.Sprintf("OCS statusCode=%d", env.OCS.Meta.StatusCode)
+		// Возвращаем типизированную ошибку, чтобы вышележащий слой (cli) мог
+		// различать 404 (NotFound → exit 2) и прочие statusCode (exit 1) —
+		// спека §7/§9. Текст формируется в OCSError.Error (с тем же форматом
+		// «client: <message>» / «client: OCS statusCode=<N>», что и раньше).
+		//
+		// Особенность Nextcloud: HTTP-статус 404 может идти ВМЕСТЕ с OCS
+		// meta.statusCode=998 («Invalid query») — так сервер отвечает на запрос
+		// chat/{token}, когда token синтаксически не подходит под маршрут
+		// (например, содержит кириллицу). Для пользователя это всё равно
+		// «комната не найдена», поэтому Code нормализуем до 404 при HTTP 404.
+		// Спека §7/§9: not found = exit 2, в т.ч. «комната не найдена».
+		code := env.OCS.Meta.StatusCode
+		if resp.StatusCode == http.StatusNotFound {
+			code = http.StatusNotFound
 		}
-		return nil, errors.New("client: " + msg)
+		return nil, &OCSError{
+			Code:    code,
+			Message: env.OCS.Meta.Message,
+		}
 	}
 
 	// out может быть nil (нужен только статус) или data может отсутствовать —

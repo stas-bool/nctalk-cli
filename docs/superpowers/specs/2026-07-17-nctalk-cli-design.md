@@ -343,10 +343,26 @@ Fuzzy-поиск чатов по названию через Unified Search. Э�
   expirationTimestamp, token`.
   - `timestamp` — **секунды Unix (number, 10 цифр)**.
   - `message` может содержать плейсхолдеры вида `{file}`, `{actor}`,
-    `{mention-userN}`; реальные значения — в объекте `messageParameters`
+    `{mention-userN}`; реальные значения — в **объекте** `messageParameters`
     (ключи = имена плейсхолдеров; каждое значение имеет `type/id/name/…`).
     Подтверждён пример: `message="{file}"`,
     `messageParameters.file={type:"file", id, name, path, link, …}`.
+    **В chat-API `messageParameters` — ВСЕГДА объект** (и для comment, и для
+    system) — это канонический формат для подстановки плейсхолдеров.
+  - **ВАЖНО: `messageParameters` имеет разный формат в разных эндпоинтах**
+    (подтверждено на живом API 2026-07-17 при отладке падения `rooms list`):
+      * **chat-API** (`/ocs/v2.php/apps/spreed/api/v1/chat/{token}`) — ВСЕГДА
+        **объект** `{actor: {...}, file: {...}, mention-userN: {...}, ...}`
+        (и для comment, и для system).
+      * **`/ocs/v2.php/apps/spreed/api/v4/room` → `lastMessage.messageParameters`** —
+        для `messageType=comment` — **массив** `[]` (как правило пустой; для
+        comment `message` уже человекочитаемый текст, параметров нет), для
+        `messageType=system` — **объект** (как в chat-API).
+    Единый тип `map[string]MsgParam` не маппит массив → `rooms list` падал с
+    `cannot unmarshal array into Go struct field`. Поэтому в коде введён
+    именованный тип `MsgParams` с `UnmarshalJSON`: массив трактуется как
+    nil-карта (параметров нет), объект парсится как обычно. Логика подстановки
+    плейсхолдеров работает только для объектного случая.
   - `messageType` принимает значения `comment` и `system` (а также
     `voice-message` и др.); `systemMessage` — непустой маркер для системных
     сообщений.

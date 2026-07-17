@@ -83,7 +83,7 @@ func searchHandler(ctx context.Context, deps Deps, args []string, jsonOut bool) 
 
 	rs, err := deps.Client.SearchMessages(ctx, term, opts)
 	if err != nil {
-		return ExitError{Code: ExitGeneric, Err: err}
+		return exitFromClientErr(err)
 	}
 
 	// Пустой результат — exit 0 с пустым stdout (поисковая семантика, спека §7):

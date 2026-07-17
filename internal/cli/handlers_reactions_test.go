@@ -343,3 +343,40 @@ func TestReactionsGetHandlerClientError(t *testing.T) {
 		t.Errorf("stdout: got %q, want empty при ошибке клиента", out)
 	}
 }
+
+// TestReactionsGetHandlerOCSNotFound — GetReactions вернул *client.OCSError{404}
+// (комната или messageId не найдены на сервере) → exit 2 (NotFound), а не 1.
+// Это ключевой кейс e2e-баги: reactions get <room> <несуществующий_messageId>.
+// Спека §7/§9: OCS 404 = exit 2.
+func TestReactionsGetHandlerOCSNotFound(t *testing.T) {
+	spy := &reactionsSpyClient{
+		reactionsErr: &client.OCSError{Code: 404, Message: "message not found"},
+	}
+	deps := newReactionsDeps(spy)
+
+	ee := reactionsGetHandler(context.Background(), deps, []string{"85z9h55k", "999999999"}, false)
+	if ee.Code != ExitNotFound {
+		t.Fatalf("code: got %d, want %d (ExitNotFound для OCS 404; err=%v)", ee.Code, ExitNotFound, ee.Err)
+	}
+	var oe *client.OCSError
+	if !errors.As(ee.Err, &oe) || oe.Code != 404 {
+		t.Errorf("OCSError{Code:404}: не извлечён из ee.Err=%v", ee.Err)
+	}
+	if out := deps.Stdout.(*bytes.Buffer).String(); out != "" {
+		t.Errorf("stdout: got %q, want empty при ошибке клиента", out)
+	}
+}
+
+// TestReactionsGetHandlerOCSAuth — GetReactions вернул *client.OCSError{401}
+// → exit 1 (Generic), а не 2. Регресс: различие 404 vs 401.
+func TestReactionsGetHandlerOCSAuth(t *testing.T) {
+	spy := &reactionsSpyClient{
+		reactionsErr: &client.OCSError{Code: 401, Message: "bad credentials"},
+	}
+	deps := newReactionsDeps(spy)
+
+	ee := reactionsGetHandler(context.Background(), deps, []string{"tok", "42"}, false)
+	if ee.Code != ExitGeneric {
+		t.Fatalf("code: got %d, want %d (ExitGeneric для OCS 401; err=%v)", ee.Code, ExitGeneric, ee.Err)
+	}
+}

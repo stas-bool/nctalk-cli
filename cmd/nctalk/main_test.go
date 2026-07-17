@@ -178,3 +178,117 @@ func TestRun_PasswordDoesNotLeak_CrossHostRedirect(t *testing.T) {
 		t.Errorf("УТЕЧКА: пароль найден в stderr: %q", errOut.String())
 	}
 }
+
+// chatShowOCS404JSON — OCS-конверт с meta.statusCode=404 (room not found):
+// именно так Nextcloud Talk отвечает на запрос чата по несуществующему token.
+// HTTP-статус при этом 200 (OCS вкладывает бизнес-код в meta), поэтому doOCS
+// обязан разбирать конверт и возвращать *client.OCSError{Code:404} — а
+// cli.exitFromClientErr маппит его в exit 2 (контракт §7/§9).
+const chatShowOCS404JSON = `{
+  "ocs": {
+    "meta": {"status": "failure", "statuscode": 404, "message": "Room not found"},
+    "data": []
+  }
+}`
+
+// reactionsOCS404JSON — то же для reactions get: несуществующий messageId
+// (или token) → meta.statusCode=404.
+const reactionsOCS404JSON = `{
+  "ocs": {
+    "meta": {"status": "failure", "statuscode": 404, "message": "Message not found"},
+    "data": []
+  }
+}`
+
+// TestRun_ChatShow_OCS404_Exit2 — e2e проверка контракта exit-кодов (спека
+// §7/§9): `chat show <несуществующий_token>` → серверный OCS 404 → процесс
+// возвращает код 2 (NotFound), НЕ 1. Раньше любой OCS-error сваливался в
+// exit 1; маппинг теперь различает 404 → 2 и прочие → 1.
+//
+// Полный цикл: httptest-сервер отдаёт OCS 404 на /api/v1/chat/<token>;
+// client.doOCS распознаёт meta.statusCode>=400 и возвращает *client.OCSError
+// с Code=404; cli.exitFromClientErr маппит в ExitNotFound; run() возвращает 2.
+func TestRun_ChatShow_OCS404_Exit2(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, chatShowOCS404JSON)
+	}))
+	defer srv.Close()
+
+	setEnv(t, srv.URL)
+	var out, errOut bytes.Buffer
+	code := run([]string{"chat", "show", "НЕСУЩЕСТВУЮЩИЙ_zzz", "--last", "3"}, &out, &errOut, nil)
+	if code != 2 {
+		t.Fatalf("exit: got %d, want 2 (OCS 404 → NotFound; stderr=%q)", code, errOut.String())
+	}
+	// stdout пуст (ошибка — не результат); stderr содержит сообщение сервера.
+	if out.String() != "" {
+		t.Errorf("stdout: got %q, want empty при ошибке", out.String())
+	}
+	if !strings.Contains(errOut.String(), "Room not found") {
+		t.Errorf("stderr должен содержать сообщение OCS: %q", errOut.String())
+	}
+}
+
+// TestRun_ReactionsGet_OCS404_Exit2 — аналогично для `reactions get <room>
+// <несуществующий_messageId>`: сервер OCS 404 → exit 2.
+func TestRun_ReactionsGet_OCS404_Exit2(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, reactionsOCS404JSON)
+	}))
+	defer srv.Close()
+
+	setEnv(t, srv.URL)
+	var out, errOut bytes.Buffer
+	code := run([]string{"reactions", "get", "85z9h55k", "999999999"}, &out, &errOut, nil)
+	if code != 2 {
+		t.Fatalf("exit: got %d, want 2 (OCS 404 → NotFound; stderr=%q)", code, errOut.String())
+	}
+	if out.String() != "" {
+		t.Errorf("stdout: got %q, want empty при ошибке", out.String())
+	}
+}
+
+// TestRun_ChatShow_OCS401_Exit1 — регресс: OCS statusCode 401 (неверные креды)
+// маппится в exit 1 (Generic), а НЕ 2. Защита от гипотетической ошибки «все
+// OCS >= 400 → 2».
+func TestRun_ChatShow_OCS401_Exit1(t *testing.T) {
+	const body401 = `{"ocs":{"meta":{"status":"failure","statuscode":401,"message":"Bad credentials"},"data":[]}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, body401)
+	}))
+	defer srv.Close()
+
+	setEnv(t, srv.URL)
+	var out, errOut bytes.Buffer
+	code := run([]string{"chat", "show", "TOK"}, &out, &errOut, nil)
+	if code != 1 {
+		t.Fatalf("exit: got %d, want 1 (OCS 401 → Generic)", code)
+	}
+}
+
+// TestRun_RoomsFind_Empty_Exit0 — регресс: пустой результат поиска
+// (`rooms find <нет_совпадений>`) должен оставаться exit 0 (поисковая
+// семантика, спека §7), а не превращаться в 2 из-за нового маппинга. Сервер
+// здесь отвечает 200 с пустым data — клиент возвращает пустой []Room без
+// ошибки, и handler выходит по ветке ExitOK.
+func TestRun_RoomsFind_Empty_Exit0(t *testing.T) {
+	const emptyRooms = `{"ocs":{"meta":{"status":"ok","statuscode":200,"message":"OK"},"data":[]}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, emptyRooms)
+	}))
+	defer srv.Close()
+
+	setEnv(t, srv.URL)
+	var out, errOut bytes.Buffer
+	code := run([]string{"rooms", "find", "несуществующее_zzz"}, &out, &errOut, nil)
+	if code != 0 {
+		t.Fatalf("exit: got %d, want 0 (пустой поиск = успех, не not-found; stderr=%q)", code, errOut.String())
+	}
+	if out.String() != "" {
+		t.Errorf("stdout: got %q, want empty", out.String())
+	}
+}

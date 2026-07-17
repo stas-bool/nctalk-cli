@@ -1,5 +1,40 @@
 package client
 
+import "fmt"
+
+// OCSError — ошибка на уровне OCS-конверта: сервер вернул HTTP 200, но внутри
+// ocs.meta.statusCode >= 400 (Nextcloud так сигнализирует бизнес-ошибки —
+// комната/сообщение/реакция не найдены, нет прав, невалидный replyTo и т.п.).
+//
+// Code — это ИМЕННО ocs.meta.statusCode (НЕ HTTP-статус ответа): например 404
+// для «не найдено», 401/403 — auth/доступ, 400 — невалидный ввод. Слой cli
+// различает 404 → exit 2 (NotFound) от остальных → exit 1 (Generic) по этому
+// полю (см. cli.exitFromClientErr, спека §7/§9).
+//
+// Тип ведёт себя как обычная ошибка (реализует interface error и поддерживает
+// errors.As/Is через сравнение указателя), но дополнительно несёт структурирован-
+// ный код, который нужен вышележащему слою для выбора exit-кода.
+type OCSError struct {
+	// Code — ocs.meta.statusCode (404, 401, 403, 400, 5xx-подобные …).
+	Code int
+	// Message — ocs.meta.message; человекочитаемый текст сервера. Пустая строка
+	// заменяется в Error() на каноническую форму «OCS statusCode=<Code>», чтобы
+	// не терять код в выводе, если сервер прислал пустое message.
+	Message string
+}
+
+// Error возвращает текст ошибки с префиксом «client: » (единообразно с прочими
+// ошибками пакета). Message пусто → каноническая форма по Code.
+func (e *OCSError) Error() string {
+	if e == nil {
+		return "client: OCS error"
+	}
+	if e.Message != "" {
+		return "client: " + e.Message
+	}
+	return fmt.Sprintf("client: OCS statusCode=%d", e.Code)
+}
+
 // OCSEnvelope — стандартный конверт ответа OCS Nextcloud (спека §6).
 // Параметр-тип T определяет, во что распаковывается поле ocs.data; это даёт
 // переиспользование одной обёртки для всех эндпоинтов.

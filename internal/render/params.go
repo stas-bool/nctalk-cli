@@ -26,7 +26,7 @@ var placeholderRe = regexp.MustCompile(`\{(\w[\w-]*)\}`)
 // спека §6). В --json-режиме Link доступен через исходные MessageParameters
 // (поле messageParameters.file.link сериализуется как есть). Подмешивание ссылки
 // в текстовый вывод — осознанно отложено (спека §6 хеджит «опционально»).
-func SubstituteParams(msg string, params map[string]client.MsgParam) string {
+func SubstituteParams(msg string, params client.MsgParams) string {
 	if params == nil {
 		return msg
 	}
