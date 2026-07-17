@@ -3,8 +3,10 @@ package client
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -231,5 +233,156 @@ func TestGetChat_EmptyChat(t *testing.T) {
 	}
 	if got, want := len(msgs), 0; got != want {
 		t.Fatalf("len(msgs): got %d, want %d", got, want)
+	}
+}
+
+// chatSendReq — слепок одного POST-запроса к chat-эндпоинту, для asserts SendMessage.
+type chatSendReq struct {
+	method string
+	path   string
+	body   string
+}
+
+// chatSendReqLog — потокобезопасный лог POST-запросов к chat-эндпоинту.
+type chatSendReqLog struct {
+	mu   sync.Mutex
+	reqs []chatSendReq
+}
+
+func (l *chatSendReqLog) record(r chatSendReq) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.reqs = append(l.reqs, r)
+}
+
+func (l *chatSendReqLog) snapshot() []chatSendReq {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]chatSendReq, len(l.reqs))
+	copy(out, l.reqs)
+	return out
+}
+
+// chatSendServer поднимает httptest-сервер, отвечающий на POST chat фиксированным
+// OCS-ответом (status/msg/idResp в data.id) и логирующий тела запросов. Возвращает
+// сервер и лог для asserts. Один сервер — один сценарий (см. отдельные тесты).
+func chatSendServer(t *testing.T, status int, msg string, idResp int) (*httptest.Server, *chatSendReqLog) {
+	t.Helper()
+	log := &chatSendReqLog{}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+		}
+		log.record(chatSendReq{method: r.Method, path: r.URL.Path, body: string(body)})
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(ocsBody(t, status, msg, map[string]any{"id": idResp}))
+	})), log
+}
+
+// TestSendMessage_Success — сервер ответил 200 c data.id=12345 → функция вернула
+// 12345; тело запроса — валидный JSON с обязательными message и silent.
+// silent=true intentionally — проверяем, что флаг кодируется в теле. replyTo при
+// ReplyTo=0 НЕ должен попасть в тело (omitempty).
+func TestSendMessage_Success(t *testing.T) {
+	ts, log := chatSendServer(t, 200, "OK", 12345)
+	defer ts.Close()
+
+	c := NewTalkClient(testCfg(ts.URL))
+	id, err := c.SendMessage(context.Background(), "tok", SendMessageOpts{
+		Message: "hello",
+		Silent:  true,
+	})
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if got, want := id, 12345; got != want {
+		t.Errorf("id: got %d, want %d", got, want)
+	}
+	reqs := log.snapshot()
+	if got, want := len(reqs), 1; got != want {
+		t.Fatalf("запросов: got %d, want %d", got, want)
+	}
+	r := reqs[0]
+	if r.method != http.MethodPost {
+		t.Errorf("method: got %q, want POST", r.method)
+	}
+	const wantPath = "/ocs/v2.php/apps/spreed/api/v1/chat/tok"
+	if r.path != wantPath {
+		t.Errorf("path: got %q, want %q", r.path, wantPath)
+	}
+	// message и silent — обязательные поля тела (спека §6 chat send).
+	if !strings.Contains(r.body, `"message":"hello"`) {
+		t.Errorf("body: нет \"message\":\"hello\": %q", r.body)
+	}
+	if !strings.Contains(r.body, `"silent":true`) {
+		t.Errorf("body: нет \"silent\":true: %q", r.body)
+	}
+	// replyTo с omitempty при ReplyTo=0 должен отсутствовать.
+	if strings.Contains(r.body, `"replyTo"`) {
+		t.Errorf("body: replyTo должен отсутствовать при ReplyTo=0: %q", r.body)
+	}
+}
+
+// TestSendMessage_WithReplyTo — ReplyTo=42 → тело содержит "replyTo":42.
+// Также проверяем, что message сохраняется.
+func TestSendMessage_WithReplyTo(t *testing.T) {
+	ts, log := chatSendServer(t, 200, "OK", 99)
+	defer ts.Close()
+
+	c := NewTalkClient(testCfg(ts.URL))
+	if _, err := c.SendMessage(context.Background(), "tok", SendMessageOpts{
+		Message: "reply-please",
+		ReplyTo: 42,
+	}); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	reqs := log.snapshot()
+	if got, want := len(reqs), 1; got != want {
+		t.Fatalf("запросов: got %d, want %d", got, want)
+	}
+	body := reqs[0].body
+	if !strings.Contains(body, `"replyTo":42`) {
+		t.Errorf("body: нет \"replyTo\":42: %q", body)
+	}
+	if !strings.Contains(body, `"message":"reply-please"`) {
+		t.Errorf("body: нет message: %q", body)
+	}
+}
+
+// TestSendMessage_EmptyMessage_ClientError — пустой Message → клиентская ошибка
+// ДО сетевого вызова. Счётчик запросов на тест-сервере = 0 (сеть не дёргаем).
+func TestSendMessage_EmptyMessage_ClientError(t *testing.T) {
+	ts, log := chatSendServer(t, 200, "OK", 1)
+	defer ts.Close()
+
+	c := NewTalkClient(testCfg(ts.URL))
+	_, err := c.SendMessage(context.Background(), "tok", SendMessageOpts{Message: ""})
+	if err == nil {
+		t.Fatal("err = nil, want client error for empty Message")
+	}
+	reqs := log.snapshot()
+	if got, want := len(reqs), 0; got != want {
+		t.Errorf("запросов: got %d, want %d (пустое message → сеть не дёргаем)", got, want)
+	}
+}
+
+// TestSendMessage_OCSError — сервер вернул OCS-error (meta.statusCode=400,
+// message="invalid replyTo") → функция возвращает ошибку, содержащую этот текст.
+// Стандартная обработка doOCS (спека §9): meta.message прокидывается в err.
+func TestSendMessage_OCSError(t *testing.T) {
+	ts, _ := chatSendServer(t, 400, "invalid replyTo", 0)
+	defer ts.Close()
+
+	c := NewTalkClient(testCfg(ts.URL))
+	_, err := c.SendMessage(context.Background(), "tok", SendMessageOpts{
+		Message: "x",
+		ReplyTo: 999,
+	})
+	if err == nil {
+		t.Fatal("err = nil, want error containing 'invalid replyTo'")
+	}
+	if !strings.Contains(err.Error(), "invalid replyTo") {
+		t.Errorf("err: got %q, want contains 'invalid replyTo'", err.Error())
 	}
 }

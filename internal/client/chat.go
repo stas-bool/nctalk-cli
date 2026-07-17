@@ -1,12 +1,12 @@
 package client
 
-// chat.go — чтение истории сообщений комнаты (Task 2.5, спека §6 `chat show`,
-// §12). Содержит пагинированный GetChat (limit=200 + перебор
-// lastKnownMessageId назад) и ранний стоп по timestamp.
-//
-// SendMessage (Task 2.6) здесь НЕ реализован — отдельная задача.
+// chat.go — чтение и отправка сообщений комнаты (Task 2.5 `chat show`,
+// Task 2.6 `chat send`; спека §6, §12). Содержит пагинированный GetChat
+// (limit=200 + перебор lastKnownMessageId назад) с ранним стопом по timestamp,
+// query-aware transport doOCSGet и SendMessage (POST chat send).
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -194,4 +194,80 @@ func (c *TalkClient) doOCSGet(ctx context.Context, p string, q url.Values, out a
 		}
 	}
 	return nil
+}
+
+// SendMessageOpts — параметры SendMessage (спека §6 `chat send`).
+type SendMessageOpts struct {
+	// Message — текст сообщения, ОБЯЗАТЕЛЬНЫЙ. Пустая строка → клиентская
+	// ошибка ДО сетевого вызова (не тратим запрос).
+	Message string
+	// ReplyTo — id сообщения, на которое это является ответом; 0 = не ответ
+	// (поле replyTo в JSON не попадает через omitempty).
+	ReplyTo int
+	// Silent — отправить без уведомления получателей. Всегда сериализуется в
+	// JSON (явный true/false) — единообразно с серверным контрактом.
+	Silent bool
+	// ReferenceId — опц. клиентский UUID для client-side dedup (спека §6).
+	// Пустая строка → поле не попадает в JSON (omitempty).
+	ReferenceId string
+}
+
+// sendMessageReq — форма JSON-тела запроса chat send (спека §6).
+//
+// Теги omitempty регулируют условное включение полей:
+//   - message — всегда (обязательное);
+//   - replyTo — только при >0 (omitempty для int пропускает 0);
+//   - silent — ВСЕГДА (без omitempty): сервер получает явный true/false;
+//   - referenceId — только при непустом (omitempty для string пропускает "").
+type sendMessageReq struct {
+	Message     string `json:"message"`
+	ReplyTo     int    `json:"replyTo,omitempty"`
+	Silent      bool   `json:"silent"`
+	ReferenceId string `json:"referenceId,omitempty"`
+}
+
+// sendMessageResp — минимальная форма ocs.data ответа chat send: нужно только
+// id нового сообщения. Сервер возвращает полный объект Message, но мы
+// игнорируем лишние поля — десериализация в подмножество структур безопасна.
+type sendMessageResp struct {
+	Id int `json:"id"`
+}
+
+// SendMessage отправляет сообщение в комнату token и возвращает id нового
+// сообщения (спека §6 `chat send`, §12).
+//
+// Запрос: POST pathChat/{token}, Content-Type: application/json (mutate=true в
+// doOCS добавляет заголовок), тело — sendMessageReq.
+// Ответ: ocs.data.id → int.
+//
+// Контракт:
+//   - пустой opts.Message → клиентская ошибка ДО сетевого вызова;
+//   - при OCS-error (meta.statusCode >= 400, например невалидный replyTo)
+//     возвращается ошибка с meta.message — стандартная обработка doOCS (§9).
+func (c *TalkClient) SendMessage(ctx context.Context, token string, opts SendMessageOpts) (int, error) {
+	// Клиентская валидация: пустое сообщение не имеет смысла отправлять —
+	// отказываем сразу, не дёргая сеть.
+	if opts.Message == "" {
+		return 0, errors.New("client: SendMessage: пустое сообщение (opts.Message обязательно)")
+	}
+	body, err := json.Marshal(sendMessageReq{
+		Message:     opts.Message,
+		ReplyTo:     opts.ReplyTo,
+		Silent:      opts.Silent,
+		ReferenceId: opts.ReferenceId,
+	})
+	if err != nil {
+		// json.Marshal на этой структуре практически не может упасть, но на
+		// всякий случай пропускаем через sanitizeErr.
+		return 0, sanitizeErr(fmt.Errorf("client: не удалось собрать тело SendMessage: %w", err))
+	}
+	// pathChat — локальная константа без trailing '/'; token эскейпим как
+	// path-сегмент через url.PathEscape. doOCS соберёт полный URL через
+	// path.Join с baseURL.Path.
+	p := pathChat + "/" + url.PathEscape(token)
+	var out sendMessageResp
+	if err := c.doOCS(ctx, http.MethodPost, p, bytes.NewReader(body), true, &out); err != nil {
+		return 0, err
+	}
+	return out.Id, nil
 }
