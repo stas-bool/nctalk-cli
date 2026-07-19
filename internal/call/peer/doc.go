@@ -3,3 +3,5 @@
 // signaling, создание исходящего audio-track, подписка на входящие треки
 // (OnTrack), perfect-negotiation. Спека 2026-07-19 §7.
 package peer
+
+import _ "github.com/pion/webrtc/v4" // blank-import: фиксирует зависимость в go.mod и проверяет, что pion компилируется под CGO_ENABLED=0 (см. task 0.3)
