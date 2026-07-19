@@ -1,0 +1,33 @@
+{
+  "_comment": "SYNTHETIC fixture — assembled from public Spreed source, not captured from a real server. Verify against real traffic in Task 2.3. Represents ONE incoming 'candidate' (trickle ICE) message as delivered by the long-poll GET /ocs/v2.php/apps/spreed/api/v3/signaling/{token}. Envelope shape identical to offer/answer; payload carries a single ICE candidate. Per pion/webrtc perfect-negotiation usage (spec §7), such candidates may arrive BEFORE the offer/answer; the call/peer layer must buffer them until SetRemoteDescription. Two records are shown: a 'host' candidate (TEST-NET-3 IP 203.0.113.10) and an 'srflx' candidate (TEST-NET-3 IP 198.51.100.20 from a STUN reflex). Anonymized: sessionId -> 'SESSION_1'/'SESSION_2'; public ICE IPs -> RFC 5737 TEST-NET-1/2 (192.0.2.x / 198.51.100.x) and TEST-NET-3 (203.0.113.x); port numbers synthetic.",
+  "_source": [
+    "https://raw.githubusercontent.com/nextcloud/spreed/main/lib/Controller/SignalingController.php (sendMessages: type!=='control' is forwarded unchanged)",
+    "https://raw.githubusercontent.com/nextcloud/spreed/main/src/utils/signaling.js (sendCallMessage, _startPullingMessages)"
+  ],
+  "_outgoing_post_body_reference": "Outgoing ICE candidate POST body form-encoded as {messages:'<stringified [{ev:\"message\", fn:\"<stringified {type:\"candidate\",to:<peer>,roomType:\"video\",payload:{candidate,sdpMLineIndex,sdpMid,usernameFragment}}>\", sessionId:\"<own_sessionId>\"}]>'}.",
+  "ocs": {
+    "meta": {
+      "status": "ok",
+      "statuscode": 200,
+      "message": "OK"
+    },
+    "data": [
+      {
+        "type": "message",
+        "data": "{\"type\":\"candidate\",\"from\":\"SESSION_2\",\"to\":\"SESSION_1\",\"roomType\":\"video\",\"payload\":{\"candidate\":\"candidate:842163049 1 udp 1677729535 203.0.113.10 49152 typ host generation 0 ufrag 9aX3 network-cost 999\",\"sdpMLineIndex\":0,\"sdpMid\":\"0\",\"usernameFragment\":\"9aX3\"}}"
+      },
+      {
+        "type": "message",
+        "data": "{\"type\":\"candidate\",\"from\":\"SESSION_2\",\"to\":\"SESSION_1\",\"roomType\":\"video\",\"payload\":{\"candidate\":\"candidate:961831611 1 udp 1677739263 198.51.100.20 58734 typ srflx raddr 192.0.2.10 rport 58734 generation 0 ufrag 9aX3 network-cost 999\",\"sdpMLineIndex\":0,\"sdpMid\":\"0\",\"usernameFragment\":\"9aX3\"}}"
+      },
+      {
+        "type": "message",
+        "data": "{\"type\":\"candidate\",\"from\":\"SESSION_2\",\"to\":\"SESSION_1\",\"roomType\":\"video\",\"payload\":{\"candidate\":\"\",\"sdpMLineIndex\":0,\"sdpMid\":\"0\",\"usernameFragment\":\"9aX3\"}}"
+      },
+      {
+        "type": "usersInRoom",
+        "data": []
+      }
+    ]
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "_comment": "SYNTHETIC fixture — assembled from public Spreed source, not captured from a real server. Verify against real traffic in Task 2.3. Represents the long-poll response of GET /ocs/v2.php/apps/spreed/api/v3/signaling/{token}. Per Spreed's SignalingController::pullMessages, ocs.data is a list of signaling messages; the LAST element is always a {type:'usersInRoom', data:[...]} snapshot of current participants. Earlier elements (if any) are queued {type:'message', data:'<stringified JSON>'} records (offer/answer/candidate/control). This fixture shows a pull response that bundles an incoming offer, its ICE candidate, and the final usersInRoom snapshot for a 2-participant call. Anonymized: real sessionIds (32-hex) -> 'SESSION_1'/'SESSION_2'; actorId -> 'alice'/'bob'; actorType='users'; room token -> 'tok-test-call'. No real IPs appear in this file (ICE IPs live in the SDP/candidate fixtures).",
+  "_source": [
+    "https://raw.githubusercontent.com/nextcloud/spreed/main/lib/Controller/SignalingController.php (pullMessages, getUsersInRoom)",
+    "https://raw.githubusercontent.com/nextcloud/spreed/main/src/utils/signaling.js (Signaling.Internal._startPullingMessages)",
+    "https://raw.githubusercontent.com/nextcloud/spreed/main/src/services/signalingService.js (pullSignalingMessages)"
+  ],
+  "_spec_discrepancy": "Spec 2026-07-19-nctalk-call-design.md §7 mandates GET /ocs/v2.php/apps/spreed/api/v4/signaling/{token}, but the Spreed PHP backend hard-restricts signaling endpoints to v3 (Call API stays v4). The response body shape is identical at either version; the path version must be reconciled against a real server in Task 2.3.",
+  "ocs": {
+    "meta": {
+      "status": "ok",
+      "statuscode": 200,
+      "message": "OK"
+    },
+    "data": [
+      {
+        "type": "message",
+        "data": "{\"type\":\"offer\",\"from\":\"SESSION_2\",\"to\":\"SESSION_1\",\"roomType\":\"video\",\"payload\":{\"type\":\"offer\",\"sdp\":\"v=0\\r\\no=- 473522518 2 INET4 0.0.0.0\\r\\ns=-\\r\\nt=0 0\\r\\na=group:BUNDLE 0\\r\\na=extmap-allow-mixed\\r\\na=msid-semantic: WMS\\r\\nm=audio 9 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126\\r\\nc=IN IP4 0.0.0.0\\r\\na=rtcp:9 IN IP4 0.0.0.0\\r\\na=ice-ufrag:9aX3\\r\\na=ice-pwd:zfP7Bt2D8MhVqKsqLZqXG8kXzvE2qjLP\\r\\na=ice-options:trickle\\r\\na=fingerprint:sha-256 0F:74:A9:64:0D:3B:55:22:16:45:0D:5F:8F:93:8F:06:6A:A6:26:9F:DE:0F:7E:F1:AA:6D:FB:8E:78:E2:42:14\\r\\na=setup:actpass\\r\\na=mid:0\\r\\na=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\\r\\na=sendrecv\\r\\na=rtcp-mux\\r\\na=rtpmap:111 opus/48000/2\\r\\na=rtcp-fb:111 transport-cc\\r\\na=fmtp:111 minptime=10;useinbandfec=1\\r\\na=rtpmap:63 red/48000/2\\r\\na=fmtp:63 111/111\\r\\na=rtpmap:9 G722/8000\\r\\na=rtpmap:0 PCMU/8000\\r\\na=rtpmap:8 PCMA/8000\\r\\na=rtpmap:13 CN/8000\\r\\na=rtpmap:110 telephone-event/48000\\r\\na=rtpmap:126 telephone-event/8000\\r\\na=ssrc:3288326156 cname:SESSION_2\\r\\na=ssrc:3288326156 msid:SESSION_2 audio\\r\\na=ssrc:3288326156 mslabel:SESSION_2\\r\\na=ssrc:3288326156 label:audio\\r\\n\"}}"
+      },
+      {
+        "type": "message",
+        "data": "{\"type\":\"candidate\",\"from\":\"SESSION_2\",\"to\":\"SESSION_1\",\"roomType\":\"video\",\"payload\":{\"candidate\":\"candidate:842163049 1 udp 1677729535 203.0.113.10 49152 typ host generation 0 ufrag 9aX3 network-cost 999\",\"sdpMLineIndex\":0,\"sdpMid\":\"0\",\"usernameFragment\":\"9aX3\"}}"
+      },
+      {
+        "type": "usersInRoom",
+        "data": [
+          {
+            "userId": "alice",
+            "roomId": 1234,
+            "lastPing": 1721410000,
+            "sessionId": "SESSION_1",
+            "inCall": 3,
+            "participantPermissions": 251,
+            "actorType": "users",
+            "actorId": "alice"
+          },
+          {
+            "userId": "bob",
+            "roomId": 1234,
+            "lastPing": 1721410000,
+            "sessionId": "SESSION_2",
+            "inCall": 3,
+            "participantPermissions": 251,
+            "actorType": "users",
+            "actorId": "bob"
+          }
+        ]
+      }
+    ]
+  }
+}

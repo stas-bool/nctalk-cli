@@ -1,0 +1,40 @@
+{
+  "_comment": "SYNTHETIC fixture — assembled from public Spreed source, not captured from a real server. Verify against real traffic in Task 2.3. Represents the response of GET /ocs/v2.php/apps/spreed/api/v3/signaling/settings?token={token} (SignalingController::getSettings, apiVersion restricted to v3). This is the canonical source of STUN/TURN config in internal-signaling mode (spec §5/§7 'STUN/TURN — берётся из capability сервера'). signalingMode='internal' means Talk itself is the signaling backend (no external HPB server) — that's the only mode the spec's P2P-mesh supports. Anonymized: STUN/TURN hosts -> stun.example.org / turn.example.org (RFC 2606 reserved); TURN credentials are dummy placeholders (REDACTED-TURN-AUTH); userId -> 'alice'; server -> empty (internal mode has no external signaling server).",
+  "_source": [
+    "https://raw.githubusercontent.com/nextcloud/spreed/main/lib/Controller/SignalingController.php (getSettings builds stunservers/turnservers from talkConfig.getStunServers / getTurnSettings)"
+  ],
+  "_note_on_cloud_capabilities": "The /ocs/v2.php/cloud/capabilities endpoint also exposes a 'spreed' section (capabilities like 'call-enabled', 'broadcast', 'sip-enabled', etc.) but it does NOT carry STUN/TURN — those live exclusively in /signaling/settings per Spreed source. If Task 2.3 discovers that the deployment of interest serves STUN/TURN via cloud capabilities instead, this fixture should be split in two.",
+  "ocs": {
+    "meta": {
+      "status": "ok",
+      "statuscode": 200,
+      "message": "OK"
+    },
+    "data": {
+      "signalingMode": "internal",
+      "userId": "alice",
+      "hideWarning": false,
+      "server": "",
+      "federation": null,
+      "stunservers": [
+        {
+          "urls": [
+            "stun:stun.example.org:3478"
+          ]
+        }
+      ],
+      "turnservers": [
+        {
+          "urls": [
+            "turn:turn.example.org:3478?transport=udp",
+            "turn:turn.example.org:3478?transport=tcp",
+            "turns:turn.example.org:443?transport=tcp"
+          ],
+          "username": "1714060800:alice",
+          "credential": "REDACTED-TURN-AUTH"
+        }
+      ],
+      "sipDialinInfo": ""
+    }
+  }
+}

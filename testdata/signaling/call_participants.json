@@ -1,0 +1,40 @@
+{
+  "_comment": "SYNTHETIC fixture — assembled from public Spreed source, not captured from a real server. Verify against real traffic in Task 2.3. Represents the response of GET /ocs/v2.php/apps/spreed/api/v4/call/{token} (CallController::getPeersForCall, apiVersion restricted to v4 — note: Call API is v4 while signaling API is v3). Returns the list of peers currently in the call (different from the usersInRoom list: this one is fetched once on join, contains no inCall flags, but includes displayName). Used to seed the peer-mesh before the first signaling pull. Anonymized: sessionId -> 'SESSION_1'..'SESSION_3'; actorId -> 'alice'/'bob'/'carol'; displayName -> 'Alice'/'Bob'/'Carol'; token -> 'tok-test-call'.",
+  "_source": [
+    "https://raw.githubusercontent.com/nextcloud/spreed/main/lib/Controller/CallController.php (getPeersForCall, v4 requirement)"
+  ],
+  "_spec_alignment": "Spec 2026-07-19-nctalk-call-design.md §2 confirms GET /call/{token} returns actorType/actorId/displayName/sessionId/lastPing. Verified verbatim against source.",
+  "ocs": {
+    "meta": {
+      "status": "ok",
+      "statuscode": 200,
+      "message": "OK"
+    },
+    "data": [
+      {
+        "actorType": "users",
+        "actorId": "alice",
+        "displayName": "Alice",
+        "token": "tok-test-call",
+        "lastPing": 1721410000,
+        "sessionId": "SESSION_1"
+      },
+      {
+        "actorType": "users",
+        "actorId": "bob",
+        "displayName": "Bob",
+        "token": "tok-test-call",
+        "lastPing": 1721409998,
+        "sessionId": "SESSION_2"
+      },
+      {
+        "actorType": "users",
+        "actorId": "carol",
+        "displayName": "Carol",
+        "token": "tok-test-call",
+        "lastPing": 1721409995,
+        "sessionId": "SESSION_3"
+      }
+    ]
+  }
+}
