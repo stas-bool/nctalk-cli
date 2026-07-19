@@ -48,11 +48,16 @@ type Event struct {
 
 // User — участник signaling-комнаты. Соответствует форме записи usersInRoom
 // из Task 2.1 (фикстура usersInRoom.json, источник SignalingController::
-// getUsersInRoom). Полей больше, чем здесь — userId/roomId/lastPing/
+// getUsersInRoom). Полей больше, чем здесь — roomId/lastPing/
 // participantPermissions — но они не нужны peer-слою и сознательно опущены
 // (selective декодирование через rawUser в signaling.go).
+//
+// UserId несёт own-identification (review замечание 3): ownSessionId
+// извлекается из usersInRoom по совпадению UserId == cfg.Login (NEXTCLOUD_LOGIN)
+// — это documented Spreed-поведение (signaling.js делает так же).
 type User struct {
 	SessionId string
+	UserId    string // NEXTCLOUD_LOGIN (для self-identification)
 	ActorId   string
 	ActorType string
 	InCall    int // битмаск: 1=IN_CALL, 2=WITH_AUDIO, 4=WITH_VIDEO (Spreed-константы)

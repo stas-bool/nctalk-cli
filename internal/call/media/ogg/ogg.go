@@ -55,14 +55,22 @@ const (
 	opusHeadVersion byte = 1
 	opusChannels    byte = 1
 	opusSampleRate        = 48000
-	opusPreSkip           = uint16(312) // libopus voip default; см. спеку §8
+	// opusPreSkip — задержка input-output в сэмплах (RFC 7895 §5.1). libopus voip
+	// default = 312 при 48к (~6.5мс). review замечание 12: при encoder/decoder
+	// с разными application-mode значение отличается; рассинхрон даст смещение
+	// звука на pre-skip сэмплов. Для spike (детекция 440 Гц) незаметно, для
+	// AEC/диаризации (out of scope, спека §1) существенно.
+	// TODO review-12: парсить pre-skip из encoder-вывода (Reader уже видит
+	// OpusHead) и подставлять в Writer — отложено до production-этапа (Этап 3).
+	opusPreSkip           = uint16(312)
 	opusOutputGain        = uint16(0)
 	opusMappingFamily byte = 0
 )
 
+// Константы vorbis-comment (минимальный блок для ffmpeg `-f ogg`).
 const (
-	opusTagsMagic     = "OpusTags"
-	opusVendorString  = "nctalk" // произвольный — валиден любой непустой
+	opusTagsMagic    = "OpusTags"
+	opusVendorString = "nctalk" // произвольный — валиден любой непустой
 )
 
 // ---- CRC32 (не-reflected, полином 0x04c11db7, init 0, без XOR) ----
@@ -284,7 +292,7 @@ type Writer struct {
 // не удалось записать любую из них.
 func NewWriter(w io.Writer) (*Writer, error) {
 	// serial — произвольный; для детерминированности берём фиксированное
-	// число (наbashlich — 1). pion/ffmpeg не требуют уникальности между
+	// число (зашито — 1). pion/ffmpeg не требуют уникальности между
 	// сессиями, только в рамках одного потока.
 	wr := &Writer{w: w, serial: 1}
 

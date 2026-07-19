@@ -60,13 +60,15 @@ func main() {
 // main_test.go подменяют потоки на *bytes.Buffer и подают args напрямую).
 func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 	// 1. Парсинг флагов: <room> (позиционный, это token), --name (поиск по
-	//    DisplayName), --in/--out (пути PCM-файлов или `-` для stdin/stdout).
+	//    DisplayName), --in/--out (пути PCM-файлов или `-` для stdin/stdout),
+	//    --recvonly (listening-only, спека §6).
 	fs := flag.NewFlagSet("nctalk-call", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var (
-		name    = fs.String("name", "", "искать комнату по имени (case-insensitive подстрока DisplayName)")
-		inPath  = fs.String("in", "-", "PCM s16le/48к/моно для отправки: путь файла или `-` для stdin")
-		outPath = fs.String("out", "-", "куда писать входящий PCM: путь файла или `-` для stdout")
+		name     = fs.String("name", "", "искать комнату по имени (case-insensitive подстрока DisplayName)")
+		inPath   = fs.String("in", "-", "PCM s16le/48к/моно для отправки: путь файла или `-` для stdin")
+		outPath  = fs.String("out", "-", "куда писать входящий PCM: путь файла или `-` для stdout")
+		recvOnly = fs.Bool("recvonly", false, "только приём чужого аудио (своего не отправлять); InFlags=1 (спека §6)")
 	)
 	if err := fs.Parse(args); err != nil {
 		return 1
@@ -106,9 +108,9 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 
 	result, err := room.ResolveRoom(ctx, talkClient, positional, *name)
 	if err != nil {
-		// FromClientErr возвращает *exit.ExitError (404 → 2, прочее → 1).
+		// FromClientErr возвращает exit.ExitError-value (404 → 2, прочее → 1).
 		mapped := exit.FromClientErr(err)
-		var ee *exit.ExitError
+		var ee exit.ExitError
 		if errors.As(mapped, &ee) {
 			fmt.Fprintln(stderr, "nctalk-call: "+err.Error())
 			return ee.Code
@@ -149,14 +151,20 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 
 	// 6. InFlags и --in источник.
 	//
-	// Семантика pipe-режима (спека §6): по умолчанию sendrecv — stdin
-	// подключён к PCM-источнику (pipe), stdout — к PCM-приёмнику. Пользователь
-	// может явно открыть файл через --in <path>; "-" означает stdin (default).
+	// Семантика pipe-режима (спека §6):
+	//   - По умолчанию sendrecv: stdin подключён к PCM-источнику, stdout — к
+	//     PCM-приёмнику.
+	//   - --in <path>: открыть файл как источник PCM (вместо stdin).
+	//   - --recvonly: listening-only. InFlags=1 (IN_CALL без WITH_AUDIO), SDP
+	//     несёт только recvonly m-line аудио. Полезно для записи чужого аудио
+	//     без отправки своего (спека §6 пример «nctalk-call <room> --out rec.pcm»).
 	//
-	// recvonly (InFlags=1) сейчас не доступен отдельным флагом — pipe-режим
-	// агента по умолчанию sendrecv (stdin подключён). TODO Task 3.x: добавить
-	// --recvonly для случая «только запись чужого аудио, без отправки своего»
-	// (полезно для one-way мониторинга). На spike это не требуется.
+	// InFlags выбирается так:
+	//   - --recvonly → 1 (recvonly);
+	//   - иначе → 3 (sendrecv) с PCM-источником из stdin/--in.
+	//
+	// Контракт §6: «только --out → flags = IN_CALL без WITH_AUDIO». Флаг
+	// --recvonly делает этот режим явным (и не требует пустого --in).
 	var pcmIn io.Reader = stdin // default: stdin (pipe-mode)
 	if *inPath != "" && *inPath != "-" {
 		f, err := os.Open(*inPath)
@@ -167,7 +175,14 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 		defer f.Close()
 		pcmIn = f
 	}
-	inFlags := inFlagSendRecv
+	var inFlags int
+	switch {
+	case *recvOnly:
+		inFlags = inFlagRecvOnly
+		pcmIn = nil // не нужно — encoder не запустится
+	default:
+		inFlags = inFlagSendRecv
+	}
 
 	// 7. --out: путь файла или `-` (default) для stdout.
 	var pcmOut io.Writer = stdout
@@ -181,11 +196,13 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 		pcmOut = f
 	}
 
-	// 8. Signaling-клиент. SetSessionId НЕ зовём — ownSessionId остаётся ""
-	// (фильтр own-session в agent'е работает по sessionId из signaling-ответа;
-	// для spike-режима фильтр не критичен, сервер всё равно сообщает всем).
-	// TODO Task 3.x: вытащить ownSessionId из signaling-settings / первого
-	// usersInRoom и выставить до agent.Run.
+	// 8. Signaling-клиент.
+	//
+	// OwnUserId передаём в agent для извлечения ownSessionId из usersInRoom
+	// (review замечание 3): Spreed signaling.js идентифицирует собственную
+	// сессию по совпадению user.userId === own login. Раньше ownSessionId
+	// оставался "" — фильтр в reconcile не срабатывал, и агент мог попытаться
+	// создать PeerConnection на свой собственный sessionId (loopback ICE).
 	sigClient := signaling.New(auth, httpClient)
 
 	// 9. Контекст с signal.NotifyContext (SIGINT, SIGTERM). На сигнале ctx
@@ -194,7 +211,7 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// 10. agent.Run. ownSessionId="" — spike-допустимо (см. TODO выше).
+	// 10. agent.Run.
 	agentErr := agent.Run(sigCtx, agent.Config{
 		Signaling:    sigClient,
 		Token:        result.Token,
@@ -203,14 +220,14 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 		Stdin:        pcmIn,
 		Stdout:       pcmOut,
 		Stderr:       stderr,
-		OwnSessionId: "",
+		OwnUserId:    cfg.Login,
 	})
 
-	// 11. Маппинг ошибки. nil → 0; *exit.ExitError → Code; прочее → 1.
+	// 11. Маппинг ошибки. nil → 0; exit.ExitError-value → Code; прочее → 1.
 	if agentErr == nil {
 		return 0
 	}
-	var ee *exit.ExitError
+	var ee exit.ExitError
 	if errors.As(agentErr, &ee) {
 		fmt.Fprintln(stderr, "nctalk-call: "+agentErr.Error())
 		return ee.Code

@@ -324,6 +324,7 @@ func decodeUsers(data json.RawMessage) ([]User, bool) {
 	for _, r := range raw {
 		users = append(users, User{
 			SessionId: r.SessionId,
+			UserId:    r.UserId,
 			ActorId:   r.ActorId,
 			ActorType: r.ActorType,
 			InCall:    r.InCall,
