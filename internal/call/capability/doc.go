@@ -1,3 +1,3 @@
-// Package capability читает STUN/TURN-конфигурацию из capability/endpoint
-// сервера Nextcloud Talk (не из env пользователя). Спека 2026-07-19 §5.
+// Файл-маркер пакета capability. Полный пакетный doc — в capability.go
+// (чтобы не дублировать и не рассинхронизировать два комментария).
 package capability
