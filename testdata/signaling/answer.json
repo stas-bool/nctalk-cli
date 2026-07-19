@@ -1,0 +1,25 @@
+{
+  "_comment": "SYNTHETIC fixture — assembled from public Spreed source, not captured from a real server. Verify against real traffic in Task 2.3. Represents ONE incoming 'answer' message as delivered by the long-poll GET /ocs/v2.php/apps/spreed/api/v3/signaling/{token}. Same envelope shape as offer.json; differs only in payload.type='answer' and SDP a=setup:active (responder side). Anonymized: sessionId -> 'SESSION_1'/'SESSION_2'; ICE IP in SDP -> 203.0.113.10 (RFC 5737 TEST-NET-3).",
+  "_source": [
+    "https://raw.githubusercontent.com/nextcloud/spreed/main/lib/Controller/SignalingController.php (sendMessages -> messages.addMessage with json_encode)",
+    "https://raw.githubusercontent.com/nextcloud/spreed/main/src/utils/signaling.js (sendCallMessage, _startPullingMessages case 'message')"
+  ],
+  "_outgoing_post_body_reference": "See offer.json. The 'to' field flips to the original offerer's sessionId.",
+  "ocs": {
+    "meta": {
+      "status": "ok",
+      "statuscode": 200,
+      "message": "OK"
+    },
+    "data": [
+      {
+        "type": "message",
+        "data": "{\"type\":\"answer\",\"from\":\"SESSION_1\",\"to\":\"SESSION_2\",\"roomType\":\"video\",\"payload\":{\"type\":\"answer\",\"sdp\":\"v=0\\r\\no=- 671191155 2 INET4 0.0.0.0\\r\\ns=-\\r\\nt=0 0\\r\\na=group:BUNDLE 0\\r\\na=extmap-allow-mixed\\r\\na=msid-semantic: WMS\\r\\nm=audio 9 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126\\r\\nc=IN IP4 0.0.0.0\\r\\na=rtcp:9 IN IP4 0.0.0.0\\r\\na=ice-ufrag:4FpL\\r\\na=ice-pwd:hQ7eVwY9bNxYQmFqPb8tZsK1rJt3XnWm\\r\\na=ice-options:trickle\\r\\na=fingerprint:sha-256 1A:85:E5:75:1E:4C:66:33:27:56:1E:6A:0F:04:9F:17:7B:7E:8A:53:2C:5D:11:18:39:42:6B:8D:9C:A1:22:25\\r\\na=setup:active\\r\\na=mid:0\\r\\na=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\\r\\na=sendrecv\\r\\na=rtcp-mux\\r\\na=rtpmap:111 opus/48000/2\\r\\na=rtcp-fb:111 transport-cc\\r\\na=fmtp:111 minptime=10;useinbandfec=1\\r\\na=rtpmap:63 red/48000/2\\r\\na=fmtp:63 111/111\\r\\na=rtpmap:9 G722/8000\\r\\na=rtpmap:0 PCMU/8000\\r\\na=rtpmap:8 PCMA/8000\\r\\na=rtpmap:13 CN/8000\\r\\na=rtpmap:110 telephone-event/48000\\r\\na=rtpmap:126 telephone-event/8000\\r\\na=ssrc:1824743522 cname:SESSION_1\\r\\na=ssrc:1824743522 msid:SESSION_1 audio\\r\\na=ssrc:1824743522 mslabel:SESSION_1\\r\\na=ssrc:1824743522 label:audio\\r\\n\"}}"
+      },
+      {
+        "type": "usersInRoom",
+        "data": []
+      }
+    ]
+  }
+}
