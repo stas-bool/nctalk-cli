@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pion/webrtc/v4"
 	"github.com/stas/nctalk/internal/call/media"
 	"github.com/stas/nctalk/internal/call/peer"
 	"github.com/stas/nctalk/internal/call/signaling"
@@ -51,8 +52,8 @@ type fakePeer struct {
 	handleEvMu sync.Mutex
 	handleEvents []signaling.Event // запись всех HandleEvent-вызовов
 
-	attachedSrc media.AudioSource
-	onSink      media.AudioSink
+	attachedTrack *webrtc.TrackLocalStaticSample // review замечание 1: track вместо src
+	onSink        media.AudioSink
 
 	closeMu  sync.Mutex
 	closed   bool
@@ -78,8 +79,8 @@ func (p *fakePeer) Outgoing() <-chan signaling.Message { return p.outgoing }
 func (p *fakePeer) Done() <-chan struct{}              { return p.done }
 func (p *fakePeer) Failed() <-chan error               { return p.failed }
 
-func (p *fakePeer) AttachOutgoingAudio(src media.AudioSource) error {
-	p.attachedSrc = src
+func (p *fakePeer) AttachOutgoingTrack(track *webrtc.TrackLocalStaticSample) error {
+	p.attachedTrack = track
 	return nil
 }
 
@@ -180,19 +181,30 @@ func (s *fakeSignaling) sentMessages() []signaling.Message {
 
 // ---- fakeEncoder / fakeDecoder — простые моки media.AudioSource / AudioSink ----
 
-// fakeEncoder ведёт себя как исчерпанный источник: ReadSample сразу EOF.
-// peer.AttachOutgoingAudio запускает encodeLoop, который на EOF выходит тихо —
-// для теста это нормально (нам не нужно отправлять реальный звук).
+// fakeEncoder имитирует «живой» encoder: ReadSample блокирует до Close —
+// потом возвращает io.EOF. Это нужно, чтобы agentEncodeLoop (один на звонок,
+// review замечание 1) НЕ завершался преждевременно в тестах и не уводил Run
+// из main-loop раньше, чем отработает reconcile и создаст peers.
 type fakeEncoder struct {
 	closeCnt int32
+	closed   atomic.Bool
+	unblock  chan struct{}
+}
+
+func newFakeEncoder() *fakeEncoder {
+	return &fakeEncoder{unblock: make(chan struct{})}
 }
 
 func (e *fakeEncoder) ReadSample() ([]byte, time.Duration, error) {
+	<-e.unblock // блок до Close
 	return nil, 0, io.EOF
 }
 
 func (e *fakeEncoder) Close() error {
 	atomic.AddInt32(&e.closeCnt, 1)
+	if e.closed.CompareAndSwap(false, true) {
+		close(e.unblock)
+	}
 	return nil
 }
 
@@ -257,7 +269,7 @@ func (c *testCounters) buildConfig(fs *fakeSignaling, inFlags int, out io.Writer
 		},
 		NewEncoder: func(io.Reader) (media.AudioSource, error) {
 			atomic.AddInt32(&c.encoderCreated, 1)
-			return &fakeEncoder{}, nil
+			return newFakeEncoder(), nil
 		},
 		NewDecoder: func(w io.Writer) (media.AudioSink, error) {
 			atomic.AddInt32(&c.decoderCreated, 1)
@@ -386,12 +398,13 @@ func TestRun_SendRecv(t *testing.T) {
 		t.Errorf("peer created = %d, want 1", got)
 	}
 
-	// Проверяем, что к созданному peer подключён encoder (AttachOutgoingAudio).
+	// Проверяем, что к созданному peer подключён общий audioTrack
+	// (AttachOutgoingTrack — review замечание 1).
 	// peerCh буферизован — забираем первый (и единственный) fakePeer.
 	select {
 	case p := <-counters.peerCh:
-		if p.attachedSrc == nil {
-			t.Error("AttachOutgoingAudio не вызван на peer (encoder не подключён)")
+		if p.attachedTrack == nil {
+			t.Error("AttachOutgoingTrack не вызван на peer (audioTrack не подключён)")
 		}
 	default:
 		t.Error("peerCh пуст — peer не создан")
@@ -472,19 +485,20 @@ func TestRun_MixerDrains(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		mixerTick <- time.Now()
 	}
+	// Закрываем tick — drain обработает buffered-тики и выйдет по ok=false.
+	close(mixerTick)
 
-	// Даём drain-горутине время отработать.
-	time.Sleep(50 * time.Millisecond)
-
-	// Stdout должен содержать ненулевые байты (mixer.Mix вернул кадр).
-	if stdout.Len() == 0 {
-		t.Error("Stdout пуст — mixer-drain ничего не записал")
-	}
-
-	// Завершаем Run.
+	// Завершаем Run: cancel → финализация дождётся выхода drain (через drainDone).
 	cancel()
 	if err := <-runDone; err != nil {
 		t.Fatalf("Run err = %v, want nil", err)
+	}
+
+	// После <-runDone drain гарантированно вышел (happens-before через drainDone) —
+	// никто не пишет в Stdout, проверка без data race.
+	// Stdout должен содержать ненулевые байты (mixer.Mix вернул кадр).
+	if stdout.Len() == 0 {
+		t.Error("Stdout пуст — mixer-drain ничего не записал")
 	}
 }
 
@@ -669,13 +683,13 @@ func TestRun_EvError_Exits(t *testing.T) {
 
 	err := Run(ctx, cfg)
 	if err == nil {
-		t.Fatal("Run err = nil, want *exit.ExitError")
+		t.Fatal("Run err = nil, want exit.ExitError")
 	}
 
-	// Проверяем, что это именно *exit.ExitError с правильным кодом.
-	var ee *exit.ExitError
+	// Проверяем, что это именно exit.ExitError (value-тип) с правильным кодом.
+	var ee exit.ExitError
 	if !errors.As(err, &ee) {
-		t.Fatalf("Run err тип = %T, want *exit.ExitError", err)
+		t.Fatalf("Run err тип = %T, want exit.ExitError", err)
 	}
 	if ee.Code != exit.ExitGeneric {
 		t.Errorf("ExitError.Code = %d, want %d", ee.Code, exit.ExitGeneric)

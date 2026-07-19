@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pion/webrtc/v4"
+	pionmedia "github.com/pion/webrtc/v4/pkg/media"
+	"github.com/stas/nctalk/internal/call/media"
 	"github.com/stas/nctalk/internal/call/signaling"
 )
 
@@ -93,6 +96,26 @@ func bytesEqual(a, b []byte) bool {
 		}
 	}
 	return true
+}
+
+// pumpSourceToTrack — тестовый аналог agentEncodeLoop (review замечание 1):
+// читает samples из src и пишёт в общий track, пока не закроют stop или src
+// не вернёт EOF. Запускается вручную в тестах — раньше encodeLoop жил в Peer.
+func pumpSourceToTrack(src media.AudioSource, track *webrtc.TrackLocalStaticSample, stop <-chan struct{}) {
+	for {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		payload, dur, err := src.ReadSample()
+		if err != nil {
+			return
+		}
+		if err := track.WriteSample(pionmedia.Sample{Data: payload, Duration: dur}); err != nil {
+			return
+		}
+	}
 }
 
 // ---- Helper: цикл перекачки Outgoing() одного peer в HandleEvent другого ----
@@ -211,9 +234,22 @@ func TestPeerLoop_NoGlare(t *testing.T) {
 	defer src.Close()
 	sink := &collectSink{}
 
-	if err := p1.AttachOutgoingAudio(src); err != nil {
-		t.Fatalf("AttachOutgoingAudio p1: %v", err)
+	// Создаём общий audio-track и подключаем к p1 (как делает agent —
+	// review замечание 1: encodeLoop теперь ВНЕ peer, тест pump'ит сам).
+	track, err := webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus},
+		"audio", "nctalk",
+	)
+	if err != nil {
+		t.Fatalf("NewTrackLocalStaticSample: %v", err)
 	}
+	if err := p1.AttachOutgoingTrack(track); err != nil {
+		t.Fatalf("AttachOutgoingTrack p1: %v", err)
+	}
+	pumpStop := make(chan struct{})
+	defer close(pumpStop)
+	go pumpSourceToTrack(src, track, pumpStop)
+
 	p2.OnIncomingAudio(sink)
 
 	// Запускает SDP/ICE exchange: p1 создаёт offer → pump → p2.HandleEvent →
@@ -310,8 +346,17 @@ func TestPeer_ICEBuffering(t *testing.T) {
 	}
 	defer offerer.Close()
 	// Track нужен, чтобы в SDP была m-line — без неё ICE-candidate не привяжется.
-	if err := offerer.AttachOutgoingAudio(&loopSource{payload: []byte{0x01}, interval: 50 * time.Millisecond}); err != nil {
-		t.Fatalf("AttachOutgoingAudio offerer: %v", err)
+	// encodeLoop не запускаем — для ICE-buffering теста отправка аудио не нужна,
+	// только m-line в SDP.
+	track, err := webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus},
+		"audio", "nctalk",
+	)
+	if err != nil {
+		t.Fatalf("NewTrackLocalStaticSample: %v", err)
+	}
+	if err := offerer.AttachOutgoingTrack(track); err != nil {
+		t.Fatalf("AttachOutgoingTrack offerer: %v", err)
 	}
 	offerSDP, err := createOfferSDP(offerer)
 	if err != nil {

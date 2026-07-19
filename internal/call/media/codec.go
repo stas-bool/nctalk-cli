@@ -81,6 +81,11 @@ type FFmpegEncoder struct {
 	err     error // первая фатальная ошибка pump'а (для ReadSample после закрытия)
 
 	closeOnce sync.Once
+	// waitOnce гарантирует единственный cmd.Wait() (гоночная безопасность
+	// между pump и Close, review замечание 4). exec.Cmd.Wait в принципе
+	// идемпотентен, но явный Once делает инвариант очевидным.
+	waitOnce sync.Once
+	waitErr  error
 }
 
 // NewFFmpegEncoder запускает ffmpeg с параметрами encode (спека §8).
@@ -136,6 +141,16 @@ func NewFFmpegEncoder(stdin io.Reader) (*FFmpegEncoder, error) {
 // pump читает OGG из stdout ffmpeg через ogg.Reader, кладёт raw Opus-пакеты
 // в канал. Завершается при io.EOF от Reader'а (ffmpeg закрыл stdout) или
 // при ctx.Cancel (вызывая тем самым блокировку select'а).
+//
+// Контракт диагностики (review замечание 4, спека §10 «ffmpeg/sox упали →
+// exit 1»): io.EOF от Reader'а означает «ffmpeg закрыл stdout». Это может быть
+//   - нормальный конец входа (stdin EOF → ffmpeg финишировал, exit 0),
+//   - наш shutdown (Close вызвал cancel → Kill → stdout закрыт),
+//   - авария (OOM, нет libopus, битый вход — exit != 0).
+//
+// Различаем по коду выхода: cmd.Wait() после io.EOF возвращает код, по нему
+// судим. exec.Cmd.Wait идемпотентен; для надёжности обёрнут в waitOnce —
+// pump и Close могут звать Wait конкурентно.
 func (e *FFmpegEncoder) pump() {
 	defer close(e.packets)
 	r := ogg.NewReader(e.stdout)
@@ -143,7 +158,21 @@ func (e *FFmpegEncoder) pump() {
 		pkt, err := r.NextPacket()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				e.done <- nil
+				if e.ctx.Err() != nil {
+					// Наш shutdown (cancel уже сработал) — штатно.
+					e.done <- nil
+					return
+				}
+				// ctx НЕ отменён, но stdout закрыт. ffmpeg либо закончил
+				// обработку stdin (exit 0), либо упал (exit != 0). Различаем
+				// по коду ожидания — это критично для диагностики §10
+				// («упали → exit 1 с указанием backend'а»).
+				waitErr := e.waitAndGetErr()
+				if waitErr == nil {
+					e.done <- nil
+				} else {
+					e.done <- fmt.Errorf("media: ffmpeg-encode упал: %w", waitErr)
+				}
 				return
 			}
 			e.done <- err
@@ -158,6 +187,15 @@ func (e *FFmpegEncoder) pump() {
 			return
 		}
 	}
+}
+
+// waitAndGetErr возвращает результат cmd.Wait, вызывается ровно один раз
+// (sync.Once). Безопасно для конкурентного вызова из pump и Close.
+func (e *FFmpegEncoder) waitAndGetErr() error {
+	e.waitOnce.Do(func() {
+		e.waitErr = e.cmd.Wait()
+	})
+	return e.waitErr
 }
 
 // ReadSample возвращает следующий raw Opus-пакет. Блокирует до прибытия
@@ -187,12 +225,13 @@ func (e *FFmpegEncoder) ReadSample() ([]byte, time.Duration, error) {
 }
 
 // Close отменяет контекст субпроцесса (Kill) и ждёт cmd.Wait. Безопасен
-// для повторного вызова.
+// для повторного вызова. Wait обёрнут в waitOnce — безопасно, даже если pump
+// уже дождался процесса (см. waitAndGetErr, review замечание 4).
 func (e *FFmpegEncoder) Close() error {
 	var waitErr error
 	e.closeOnce.Do(func() {
 		e.cancel()
-		waitErr = e.cmd.Wait()
+		waitErr = e.waitAndGetErr()
 	})
 	return waitErr
 }
@@ -217,6 +256,15 @@ type FFmpegDecoder struct {
 	stdin     io.WriteCloser
 	writer    *ogg.Writer
 	closeOnce sync.Once
+
+	// mu сериализует WriteSample и Close (review замечание 2). Без мьютекса
+	// параллельные WriteSample (из peer.decodeLoop, пока pion RTPReceiver ещё
+	// не остановлен) и Close (из agent.removePeer/reconcile) дают race на
+	// внутреннем состоянии ogg.Writer (granule/pageSeq) и интерливинг байтов
+	// в stdin-pipe ffmpeg. peer.Close() не дожидается выхода decodeLoop
+	// (pion останавливает RTPReceiver асинхронно после pc.Close) — без этой
+	// защиты корректность shutdown'а зависит от таймингов pion.
+	mu sync.Mutex
 }
 
 // NewFFmpegDecoder запускает ffmpeg-decode (спека §8). pcmW — приёмник PCM
@@ -274,15 +322,21 @@ func NewFFmpegDecoder(pcmW io.Writer) (*FFmpegDecoder, error) {
 }
 
 // WriteSample оборачивает payload в OGG-страницу и пишет в ffmpeg-stdin.
+// Под мьютексом — чтобы избежать race с параллельным Close (review замечание 2).
 func (d *FFmpegDecoder) WriteSample(payload []byte, duration time.Duration) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	return d.writer.WritePacket(payload)
 }
 
 // Close пишет EOS-страницу (Flush), закрывает stdin → ffmpeg финиширует,
-// ждёт cmd.Wait. Безопасен для повторного вызова.
+// ждёт cmd.Wait. Безопасен для повторного вызова. Берёт тот же мьютекс, что
+// WriteSample — in-flight WriteSample завершится до того, как stdin закроется.
 func (d *FFmpegDecoder) Close() error {
 	var waitErr error
 	d.closeOnce.Do(func() {
+		d.mu.Lock()
+		defer d.mu.Unlock()
 		// Пытаемся мягко закрыть: EOS + close-stdin → ffmpeg финиширует сам.
 		// При ошибке — отменяем (Kill).
 		if err := d.writer.Flush(); err != nil {

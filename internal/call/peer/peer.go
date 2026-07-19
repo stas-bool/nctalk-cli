@@ -17,7 +17,6 @@
 package peer
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,24 +42,28 @@ type Config struct {
 
 // Peer — одна PeerConnection на одного удалённого участника. Создаётся через
 // New, обменивается SDP/ICE через HandleEvent (входящие) и Outgoing (исходящие),
-// подключает аудио через AttachOutgoingAudio / OnIncomingAudio.
+// подключает аудио через AttachOutgoingTrack / OnIncomingAudio.
 //
-// Жизненный цикл: New → (AttachOutgoingAudio / OnIncomingAudio) → HandleEvent
+// Жизненный цикл: New → (AttachOutgoingTrack / OnIncomingAudio) → HandleEvent
 // по событиям signaling → Close. После Close Peer непригоден.
 //
-// Потоки: encodeLoop (отправка Opus из AudioSource) и decodeLoop (приём Opus в
-// AudioSink) — внутренние goroutine'ы, завершаются по Close() (close(p.closed)
-// + srcCancel + pc.Close). Failed() срабатывает на DTLS/ICE-fail — вышележащий
-// слой зовёт Close и удаляет Peer из активного набора, ПРОДОЛЖАЯ работу с
-// оставшимися (mesh переживёт отказ одного пира — спека §10).
+// Потоки: ОДИН encodeLoop живёт в agent'е (НЕ в peer'е) и пишет в общий
+// audio-track, расшаренный между всеми PeerConnection'ами через AttachOutgoingTrack
+// (pion сам размножает отправку через RTPSender'ы внутри каждой PC — fanout на
+// стороне pion, review замечание 1). decodeLoop (приём Opus в AudioSink) —
+// внутренняя горутина Peer'а, завершается по Close() (close(p.closed) + pc.Close).
+// Failed() срабатывает на DTLS/ICE-fail — вышележащий слой зовёт Close и
+// удаляет Peer из активного набора, ПРОДОЛЖАЯ работу с оставшимися (mesh
+// переживёт отказ одного пира — спека §10).
 type Peer struct {
 	pc *webrtc.PeerConnection
 
-	// Исходящий audio-track. nil до AttachOutgoingAudio. После AddTrack
-	// RTP-поток отправляется pion'ом автоматически (peer не пишет RTP сам —
-	// только Opus-фреймы через WriteSample).
-	outTrack       *webrtc.TrackLocalStaticSample
-	outTrackSender *webrtc.RTPSender
+	// outTrack — общий TrackLocalStaticSample, добавленный в эту PC через
+	// AddTrack в AttachOutgoingTrack. nil до вызова AttachOutgoingTrack.
+	// Сам track создаётся ВЫШЕСТОЯЩИМ слоем (agent) — один на звонок, добавляется
+	// в каждую PC; pion внутри каждой PC строит отдельный RTPSender и
+	// пакует samples в RTP независимо. Это и есть fanout — без N encodeLoop'ов.
+	outTrack *webrtc.TrackLocalStaticSample
 
 	// outCh — исходящие signaling-сообщения (offer/answer/candidate).
 	// Буфер 64: normal exchange = 1 offer + 1 answer + ~5 candidates = 7
@@ -89,13 +92,8 @@ type Peer struct {
 	sinkMu sync.RWMutex
 	sink   media.AudioSink // nil до OnIncomingAudio
 
-	// srcCtx/srcCancel — контекст encodeLoop. Close() отменяет его, чтобы
-	// корректно выйти даже если AudioSource.ReadSample блокирует навсегда.
-	srcCtx    context.Context
-	srcCancel context.CancelFunc
-
 	// closeOnce — идемпотентный Close. closed — канал-сигнал завершения
-	// (закрывается первым в Close), используется в sendOut/encodeLoop для
+	// (закрывается первым в Close), используется в sendOut/decodeLoop для
 	// неблокирующего выхода.
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -121,7 +119,6 @@ func New(cfg Config) (*Peer, error) {
 		failedCh: make(chan error, 1),
 		closed:   make(chan struct{}),
 	}
-	p.srcCtx, p.srcCancel = context.WithCancel(context.Background())
 
 	// Локальные ICE-candidates → outCh как signaling.Message{Type:"candidate"}.
 	// c == nil означает end-of-candidates marker (pion собрал все локальные
@@ -254,32 +251,24 @@ func (p *Peer) Done() <-chan struct{} { return p.closed }
 // если никто не читает (например, во время shutdown).
 func (p *Peer) Failed() <-chan error { return p.failedCh }
 
-// AttachOutgoingAudio связывает исходящий audio-track с media.AudioSource.
-// Создаёт TrackLocalStaticSample с кодеком audio/opus, добавляет его в PC
-// (через AddTrack — pion создаёт RTPSender автоматически), запускает encodeLoop
-// (goroutine: ReadSample → WriteSample).
+// AttachOutgoingTrack подключает ОБЩИЙ исходящий audio-track к этой PC (review
+// замечание 1). Track создаётся ВЫШЕСТОЯЩИМ слоем (agent) — один на звонок,
+// передаётся во все Peer'ы; pion сам размножает отправку через RTPSender'ы
+// внутри каждой PC. Запускать encodeLoop на каждый peer НЕЛЬЗЯ — N горутин
+// читали бы общий AudioSource.ReadSample round-robin и каждый peer получал
+// 1/N пакетов (старый баг fanout'а). encodeLoop живёт в agent'е и пишёт в
+// общий track — pion внутри каждой PC делает свой RTPSender и packets.
 //
 // Вызывать ДО CreateOffer/HandleEvent(EvOffer): m-line для audio-track'а должна
 // попасть в SDP. Повторный вызов не поддерживается (вернёт ошибку).
-func (p *Peer) AttachOutgoingAudio(src media.AudioSource) error {
+func (p *Peer) AttachOutgoingTrack(track *webrtc.TrackLocalStaticSample) error {
 	if p.outTrack != nil {
-		return errors.New("peer: AttachOutgoingAudio уже вызван (один track на peer)")
+		return errors.New("peer: AttachOutgoingTrack уже вызван (один track на peer)")
 	}
-	track, err := webrtc.NewTrackLocalStaticSample(
-		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus},
-		"audio", "nctalk",
-	)
-	if err != nil {
-		return fmt.Errorf("peer: NewTrackLocalStaticSample: %w", err)
-	}
-	sender, err := p.pc.AddTrack(track)
-	if err != nil {
+	if _, err := p.pc.AddTrack(track); err != nil {
 		return fmt.Errorf("peer: AddTrack: %w", err)
 	}
 	p.outTrack = track
-	p.outTrackSender = sender
-
-	go p.encodeLoop(src)
 	return nil
 }
 
@@ -322,14 +311,15 @@ func (p *Peer) CreateOffer() error {
 // GracefulClose не используем). Безопасен для вызова из горутины мониторинга
 // при Failed().
 //
-// НЕ закрывает AudioSource/AudioSink — ими владеет вышестоящий слой (agent).
-// Возвращает ошибку от pc.Close() (обычно nil).
+// НЕ закрывает AudioSource/AudioSink и НЕ отменяет общий encodeLoop — ими
+// владеет вышестоящий слой (agent). pc.Close() асинхронно останавливает
+// RTPReceiver → decodeLoop выйдет по ошибке track.ReadRTP.
+//
+// Гонка decoder.Close ∥ WriteSample защищена отдельно (mutex в FFmpegDecoder,
+// review замечание 2) — peer.Close НЕ ждёт выхода decodeLoop.
 func (p *Peer) Close() error {
 	p.closeOnce.Do(func() {
-		close(p.closed) // сигнал encodeLoop/sendOut выйти
-		if p.srcCancel != nil {
-			p.srcCancel() // отмена ctx encodeLoop'а
-		}
+		close(p.closed) // сигнал decodeLoop/sendOut выйти
 		p.closeErr = p.pc.Close()
 	})
 	return p.closeErr

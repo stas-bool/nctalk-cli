@@ -1,36 +1,42 @@
 // agent.go — реализация pipe-режима (Task 2.8 спеки 2026-07-19).
 //
 // Agent связывает signaling/peer/media в единый pipe-режим: PCM s16le из stdin
-// → единственный FFmpegEncoder → AttachOutgoingAudio на каждого remote-пира;
-// входящий Opus от каждого пира → собственный FFmpegDecoder (decoder-per-peer)
-// → pcmMixerWriter → media.Mixer → сводный PCM s16le в stdout.
+// → единственный FFmpegEncoder → единственный encodeLoop, пишущий в общий
+// TrackLocalStaticSample; track добавляется в каждую PC через
+// AttachOutgoingTrack (pion внутри каждой PC строит свой RTPSender — fanout
+// на стороне pion, review замечание 1). Входящий Opus от каждого пира →
+// собственный FFmpegDecoder (decoder-per-peer) → pcmMixerWriter → media.Mixer
+// → сводный PCM s16le в stdout.
 //
 // Диаграмма потоков (спека §6/§9):
 //
-//	stdin ──PCM──▶ FFmpegEncoder ──Opus──▶ AttachOutgoingAudio ──▶ peer*N ──▶ signaling
-//	                                                  ▲
-//	                                                  └── (один encoder на звонок)
+//	stdin ──PCM──▶ FFmpegEncoder ──Opus──▶ encodeLoop ──▶ audioTrack ──▶ peer*N ──▶ signaling
+//	                                                   (один encoder + один encodeLoop + один track на звонок)
 //
 //	signaling ──▶ peer*N ──Opus──▶ FFmpegDecoder*N ──PCM──▶ pcmMixerWriter*N
 //		                                                  └──▶ Mixer ──PCM──▶ stdout
 //		                                                  (один mixer на звонок)
 //
-// Главный инвариант: ОДИН encoder (если sendrecv), per-peer decoder, shared
-// Mixer с фиксированным числом слотов (maxPeers). Single-peer failure (спека
-// §10): при Failed() одного пира — Close + decoder.Close + mixer.Push(idx,nil),
-// продолжаем работу с оставшимися. Выход только по ctx.Done или EvError.
+// Главный инвариант: ОДИН encoder (если sendrecv) + ОДИН encodeLoop + ОДИН
+// audioTrack на звонок; per-peer decoder; shared Mixer с фиксированным числом
+// слотов (maxPeers). Single-peer failure (спека §10): при Failed() одного
+// пира — Close + decoder.Close + mixer.Push(idx,nil), продолжаем работу с
+// оставшимися. Выход только по ctx.Done, EvError или завершению encodeLoop
+// (EOF на stdin / crash ffmpeg).
 
 package agent
 
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
 	"time"
 
 	"github.com/pion/webrtc/v4"
+	pionmedia "github.com/pion/webrtc/v4/pkg/media"
 	"github.com/stas/nctalk/internal/call/media"
 	"github.com/stas/nctalk/internal/call/peer"
 	"github.com/stas/nctalk/internal/call/signaling"
@@ -51,7 +57,10 @@ type peerConn interface {
 	Outgoing() <-chan signaling.Message
 	Done() <-chan struct{}
 	Failed() <-chan error
-	AttachOutgoingAudio(media.AudioSource) error
+	// AttachOutgoingTrack подключает общий audio-track к этой PC. Track
+	// создаётся в agent'е (один на звонок) — fanout делается через pion,
+	// не через N encodeLoop'ов (review замечание 1).
+	AttachOutgoingTrack(*webrtc.TrackLocalStaticSample) error
 	OnIncomingAudio(media.AudioSink)
 	Close() error
 }
@@ -102,7 +111,8 @@ const (
 	// сервер должен получить DELETE — иначе we hang on the call list серверно.
 	leaveCallTimeout = 3 * time.Second
 	// inFlagSendRecv — битмаск InCall: 1=IN_CALL, 3=IN_CALL|WITH_AUDIO (спека §6).
-	// При InFlags==3 запускаем encoder и AttachOutgoingAudio на каждого пира.
+	// При InFlags==3 запускаем encoder + encodeLoop + создаём общий audioTrack
+	// (один на звонок), подключаемый в каждую PC через AttachOutgoingTrack.
 	inFlagSendRecv = 3
 	// inFlagWithAudio — бит WITH_AUDIO в InCall-флаге юзера (для фильтрации
 	// users: подключаемся только к тем, у кого есть аудио).
@@ -115,7 +125,8 @@ type Config struct {
 	Signaling    sigClient        // уже готовый (вне agent: сборка из transport.Auth)
 	Token        string           // room token (уже ResolveRoom'ом)
 	InFlags      int              // 1=recvonly, 3=sendrecv (спека §6)
-	OwnSessionId string           // собственный sessionId — фильтр из users
+	OwnSessionId string           // собственный sessionId — статический фильтр (если известен заранее)
+	OwnUserId    string           // NEXTCLOUD_LOGIN: для извлечения ownSessionId из usersInRoom (review замечание 3)
 	ICEServers   []webrtc.ICEServer // из capability (Task 2.10)
 	Stdin        io.Reader        // PCM на отправку (nil если InFlags==1)
 	Stdout       io.Writer        // PCM приём: Mixer → stdout
@@ -188,9 +199,14 @@ func Run(ctx context.Context, cfg Config) error {
 		return exit.FromClientErr(err)
 	}
 
-	// Step 2: encoder ТОЛЬКО для sendrecv. Один на весь звонок — AttachOutgoingAudio
-	// на каждого пира (pion сам размножает отправку через RTPSender'ы).
+	// Step 2: encoder + общий audioTrack (если sendrecv). encodeLoop ОДИН на
+	// звонок — пишёт в общий track; pion внутри каждой PC строит свой RTPSender
+	// и сам делает fanout (review замечание 1). Раньше encodeLoop запускался
+	// per-peer и читал общий AudioSource.ReadSample — N горутин делили пакеты
+	// round-robin, каждый peer получал 1/N (звонок для mesh был неработоспособен).
 	var encoder media.AudioSource
+	var audioTrack *webrtc.TrackLocalStaticSample
+	var encodeDone chan error
 	if cfg.InFlags == inFlagSendRecv {
 		enc, err := cfg.NewEncoder(cfg.Stdin)
 		if err != nil {
@@ -198,6 +214,18 @@ func Run(ctx context.Context, cfg Config) error {
 			return fmt.Errorf("agent: encoder: %w", err)
 		}
 		encoder = enc
+		track, err := webrtc.NewTrackLocalStaticSample(
+			webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus},
+			"audio", "nctalk",
+		)
+		if err != nil {
+			_ = encoder.Close()
+			leaveBestEffort(cfg.Signaling, cfg.Token)
+			return fmt.Errorf("agent: audio track: %w", err)
+		}
+		audioTrack = track
+		encodeDone = make(chan error, 1)
+		go agentEncodeLoop(encoder, audioTrack, encodeDone)
 	}
 
 	// Step 3: Mixer + drain-горутина. Тикер инъектируется (тесты) или создаётся
@@ -220,17 +248,26 @@ func Run(ctx context.Context, cfg Config) error {
 	pollDone := make(chan error, 1)
 	go func() {
 		err := cfg.Signaling.PollLoop(ctx, cfg.Token, events)
-		close(events)
+		// ПОРЯДОК ВАЖЕН (review замечание 6): pollDone<-err ДО close(events).
+		// Main-loop при `ok=false` из events делает select { case pollErr =
+		// <-pollDone: default: }. close(events) выступает memory-barrier'ом:
+		// после того как main увидел close, pollDone-send уже гарантированно
+		// виден — default-ветка не сработает, ошибка не теряется. Обратный
+		// порядок (close первой) давал race: main видел close, но select-default
+		// уходил в пустую ветку до того, как pollDone-send публикуется в буфер.
 		pollDone <- err
+		close(events)
 	}()
 
 	// agentState — разделяемое состояние main loop'а и per-peer горутин.
 	a := &agentState{
-		cfg:     cfg,
-		ctx:     ctx,
-		mixer:   mixer,
-		encoder: encoder,
-		peers:   make(map[string]*peerBundle),
+		cfg:           cfg,
+		ctx:           ctx,
+		mixer:         mixer,
+		encoder:       encoder,
+		audioTrack:    audioTrack,
+		peers:         make(map[string]*peerBundle),
+		ownSessionId:  cfg.OwnSessionId, // может быть пустым — извлечём из EvUsersUpdated
 	}
 
 	// Step 5-8: main select.
@@ -267,6 +304,14 @@ mainLoop:
 				pollErr = ev.Err
 				break mainLoop
 			}
+		case err, ok := <-encodeDoneCh(encodeDone):
+			// encodeLoop вышел. nil — stdin EOF / shutdown; non-nil — ffmpeg-crash
+			// (review замечание 4, спека §10). В любом случае audio-pipe кончился —
+			// выходим из main loop; leaveCall/peer-cleanup — в finalization.
+			if ok && err != nil {
+				pollErr = err
+			}
+			break mainLoop
 		}
 	}
 
@@ -289,6 +334,50 @@ mainLoop:
 	return pollErr
 }
 
+// encodeDoneCh возвращает канал encodeDone или nil-канал (если encodeLoop не
+// запускался — recvonly). nil-канал в select'е никогда не срабатывает —
+// идиома Go для «не выбирать эту ветку».
+func encodeDoneCh(ch chan error) <-chan error {
+	if ch == nil {
+		return nil
+	}
+	return ch
+}
+
+// agentEncodeLoop — ОДИН encodeLoop на звонок (review замечание 1). Читает
+// Opus-сэмплы из src (encoder), пишёт в общий audioTrack, который расшарен
+// между всеми PeerConnection'ами через AttachOutgoingTrack. pion внутри каждой
+// PC строит отдельный RTPSender и пакует samples в RTP независимо — fanout
+// делается на стороне pion, без нашего вмешательства.
+//
+// Завершение:
+//   - io.EOF / ctx.Canceled / ctx.DeadlineExceeded — штатный конец (stdin EOF,
+//     encoder.Close). Сигналим done<-nil.
+//   - прочая ошибка src.ReadSample (ffmpeg crash, review замечание 4) —
+//     done<-err, агент выйдет с этим кодом.
+//   - track.WriteSample ошибка (все PC закрылись) — done<-nil (не фатал).
+func agentEncodeLoop(src media.AudioSource, track *webrtc.TrackLocalStaticSample, done chan<- error) {
+	for {
+		payload, dur, err := src.ReadSample()
+		if err != nil {
+			if errors.Is(err, io.EOF) ||
+				errors.Is(err, context.Canceled) ||
+				errors.Is(err, context.DeadlineExceeded) {
+				done <- nil
+				return
+			}
+			done <- fmt.Errorf("agent: encodeLoop: %w", err)
+			return
+		}
+		if err := track.WriteSample(pionmedia.Sample{Data: payload, Duration: dur}); err != nil {
+			// Все RTPSender'ы отвалились — кодировать некому. Не фатал для звонка
+			// (могут ещё приходить новые пиры), но и кодить впустую нет смысла.
+			done <- nil
+			return
+		}
+	}
+}
+
 // ---- agentState: разделяемое состояние ----
 
 // agentState инкапсулирует peers-map и счетчик idx. Защищён мьютексом для
@@ -300,9 +389,25 @@ type agentState struct {
 	mixer   *media.Mixer
 	encoder media.AudioSource
 
+	// audioTrack — общий TrackLocalStaticSample для отправки своего аудио во
+	// все PC (review замечание 1). nil в recvonly-режиме или до создания.
+	audioTrack *webrtc.TrackLocalStaticSample
+
 	mu      sync.Mutex
 	peers   map[string]*peerBundle
-	nextIdx int // монотонный, не переиспользуется (Mixer игнорирует inactive слоты)
+	nextIdx int // монотонная верхняя граница занятых слотов Mixer'а
+	// freeIdx — стек освободившихся idx (review замечание 9: без переиспользования
+	// долгий звонок с churn'ом участников заблокирует новых после 8 суммарных
+	// пиров). addPeer сначала берёт из freeIdx, потом — из nextIdx.
+	freeIdx []int
+
+	// ownSessionIdMu защищает ownSessionId (извлекается лениво из первого
+	// EvUsersUpdated по совпадению UserId == cfg.OwnUserId, review замечание 3).
+	// Если cfg.OwnSessionId задан статически — используется без поиска.
+	// ownUserIdFound защищает от повторного лога «не нашли себя» на каждом EvUsersUpdated.
+	ownSessionIdMu   sync.Mutex
+	ownSessionId     string
+	ownUserIdChecked bool
 }
 
 // peerBundle — связка «peer + decoder + idx в Mixer'е» для одного remote-пира.
@@ -328,14 +433,23 @@ type peerBundle struct {
 // НЕ переиспользуем idx ушедших пиров — Mixer игнорирует inactive слоты, а
 // переиспользование усложнило бы семантику (гонки с push от только что закрытого
 // decoder'а). Cap N = maxPeers — лишних просто не добавляем (с логом).
+//
+// OwnSessionId (review замечание 3): если cfg.OwnSessionId пуст, а cfg.OwnUserId
+// задан — пытаемся извлечь ownSessionId из users по совпадению UserId. Spreed
+// signalling.js использует тот же механизм (session identification по userId).
 func (a *agentState) reconcile(users []signaling.User) {
+	// Ленивое извлечение ownSessionId (если ещё не известно).
+	a.resolveOwnSessionId(users)
+
+	ownSid := a.ownSessionIdLocked()
+
 	// Фильтр пользователей: только sendrecv-участники, не мы, с непустым sid.
 	wanted := make(map[string]struct{}, len(users))
 	for _, u := range users {
 		if u.SessionId == "" {
 			continue
 		}
-		if u.SessionId == a.cfg.OwnSessionId {
+		if u.SessionId == ownSid {
 			continue
 		}
 		if u.InCall&inFlagWithAudio == 0 {
@@ -369,6 +483,7 @@ func (a *agentState) reconcile(users []signaling.User) {
 		_ = b.peer.Close()
 		_ = b.decoder.Close()
 		a.mixer.Push(b.idx, nil)
+		a.releaseIdx(b.idx)
 		fmt.Fprintf(a.cfg.Stderr, "nctalk: peer %s покинул звонок\n", b.sid)
 	}
 
@@ -390,7 +505,7 @@ func (a *agentState) reconcile(users []signaling.User) {
 //  3. Создать peer через NewPeer(peer.Config{ICEServers, IsPolite:false}).
 //     IsPolite=false: glare-handling — Task 2.6, пока не реализован.
 //  4. OnIncomingAudio(decoder) — ДО HandleEvent (pion OnTrack асинхронен).
-//  5. AttachOutgoingAudio(encoder) если sendrecv — ДО SDP (m-line в SDP).
+//  5. AttachOutgoingTrack(a.audioTrack) если sendrecv — ДО SDP (m-line в SDP).
 //  6. Зарегистрировать bundle в map (ДО запуска горутин — watcher должен видеть
 //     sid в map, иначе removePeer станет no-op при мгновенном Failed).
 //  7. Запустить watcher и send-горутину.
@@ -399,12 +514,22 @@ func (a *agentState) reconcile(users []signaling.User) {
 // (perfect-negotiation: один из пиров impolite, другой polite).
 func (a *agentState) addPeer(sid string) error {
 	a.mu.Lock()
-	if a.nextIdx >= maxPeers {
+	// Slot allocation (review замечание 9): сначала переиспользуем освободившиеся
+	// idx из freeIdx, потом — следующие номера. Лимит maxPeers считается по
+	// текущему числу занятых слотов (len(peers)), а не по суммарно выданных —
+	// долгий звонок с churn'ом участников не заблокирует новых.
+	if len(a.peers) >= maxPeers {
 		a.mu.Unlock()
 		return fmt.Errorf("достигнут лимит пиров (%d)", maxPeers)
 	}
-	idx := a.nextIdx
-	a.nextIdx++
+	var idx int
+	if n := len(a.freeIdx); n > 0 {
+		idx = a.freeIdx[n-1]
+		a.freeIdx = a.freeIdx[:n-1]
+	} else {
+		idx = a.nextIdx
+		a.nextIdx++
+	}
 	a.mu.Unlock()
 
 	// 1. Decoder с writer-адаптером в Mixer[idx].
@@ -430,8 +555,8 @@ func (a *agentState) addPeer(sid string) error {
 
 	// 3. Wire audio. OnIncomingAudio — до любого HandleEvent/OnTrack.
 	p.OnIncomingAudio(decoder)
-	if a.encoder != nil {
-		if err := p.AttachOutgoingAudio(a.encoder); err != nil {
+	if a.audioTrack != nil {
+		if err := p.AttachOutgoingTrack(a.audioTrack); err != nil {
 			_ = p.Close()
 			_ = decoder.Close()
 			return fmt.Errorf("attach outgoing: %w", err)
@@ -472,7 +597,18 @@ func (a *agentState) removePeer(sid string, reason string) {
 	_ = b.peer.Close()
 	_ = b.decoder.Close()
 	a.mixer.Push(b.idx, nil)
+	a.releaseIdx(b.idx)
 	fmt.Fprintf(a.cfg.Stderr, "nctalk: peer %s отключён (%s)\n", sid, reason)
+}
+
+// releaseIdx возвращает idx в пул свободных слотов (под локом agentState.mu).
+// Используется в removePeer / reconcile-cleanup для переиспользования
+// (review замечание 9). closeAllPeers не возвращает — shutdown идёт, индексы
+// больше не нужны.
+func (a *agentState) releaseIdx(idx int) {
+	a.mu.Lock()
+	a.freeIdx = append(a.freeIdx, idx)
+	a.mu.Unlock()
 }
 
 // peerBySid — снапшот-чтение из map под локом. Возвращает bundle и флаг наличия.
@@ -481,6 +617,41 @@ func (a *agentState) peerBySid(sid string) (*peerBundle, bool) {
 	defer a.mu.Unlock()
 	b, ok := a.peers[sid]
 	return b, ok
+}
+
+// resolveOwnSessionId извлекает ownSessionId из users по совпадению
+// u.UserId == cfg.OwnUserId (review замечание 3). Если ownSessionId уже
+// установлен статически (cfg.OwnSessionId) или найден ранее — no-op.
+// Логирует один раз, если ownUserId задан, но не найден в users — это
+// диагностика, что агент потенциально попытается звонить самому себе.
+func (a *agentState) resolveOwnSessionId(users []signaling.User) {
+	a.ownSessionIdMu.Lock()
+	defer a.ownSessionIdMu.Unlock()
+	if a.ownSessionId != "" || a.cfg.OwnUserId == "" || a.ownUserIdChecked {
+		return
+	}
+	for _, u := range users {
+		if u.UserId == a.cfg.OwnUserId && u.SessionId != "" {
+			a.ownSessionId = u.SessionId
+			break
+		}
+	}
+	a.ownUserIdChecked = true
+	if a.ownSessionId == "" {
+		fmt.Fprintf(a.cfg.Stderr,
+			"nctalk: WARNING: ownSessionId не извлечён из usersInRoom по userId=%q — "+
+				"агент может попытаться позвонить самому себе. Сообщите серверу/вендору, "+
+				"если reproducible.\n", a.cfg.OwnUserId)
+	} else {
+		fmt.Fprintf(a.cfg.Stderr, "nctalk: ownSessionId извлечён из usersInRoom (%s)\n", a.cfg.OwnUserId)
+	}
+}
+
+// ownSessionIdLocked возвращает текущий ownSessionId (потокобезопасно).
+func (a *agentState) ownSessionIdLocked() string {
+	a.ownSessionIdMu.Lock()
+	defer a.ownSessionIdMu.Unlock()
+	return a.ownSessionId
 }
 
 // closeAllPeers — shutdown-версия removePeer для всех: под локом собираем
@@ -532,12 +703,20 @@ func (a *agentState) watchPeer(b *peerBundle) {
 //
 // ctx: используется a.ctx (основной ctx Run) — это гарантирует, что на shutdown
 // отменится и in-flight Send, а не только ожидание следующего сообщения.
+//
+// review замечание 11: peer не знает sessionId удалённой стороны и не может
+// проставить Message.To — но agent знает (peerBundle.sid). Ставим To перед
+// Send, иначе сервер Spreed бродкастит сообщение всем участникам, и в mesh
+// ответ A→B попадает и к C (лишний трафик, spam-ошибки в pion-логах C).
 func (a *agentState) sendPeer(b *peerBundle) {
 	for {
 		select {
 		case msg, ok := <-b.peer.Outgoing():
 			if !ok {
 				return // канал закрыт (в тек. реализации peer не закрывает outCh — defensive)
+			}
+			if msg.To == "" {
+				msg.To = b.sid
 			}
 			_ = a.cfg.Signaling.Send(a.ctx, a.cfg.Token, msg)
 		case <-b.peer.Done():
