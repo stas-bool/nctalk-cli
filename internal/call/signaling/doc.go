@@ -1,4 +1,3 @@
-// Package signaling реализует OCS-polling signaling-клиент Nextcloud Talk
-// (long-poll /signaling/{token}, разбор usersInRoom/offer/answer/candidate).
-// Спека 2026-07-19 §7.
+// Файл-маркер пакета signaling. Полный пакетный doc — в signaling.go
+// (чтобы не дублировать и не рассинхронизировать два комментария).
 package signaling
