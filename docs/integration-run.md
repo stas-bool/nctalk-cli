@@ -95,3 +95,177 @@ CGO_ENABLED=0 go test ./...   # без -tags=integration
 | `TestIntegration_SearchMessages` | Unified `talk-message`                     | Безошибочный ответ; `Attributes.Timestamp` — валидный int64 (`>= 0`). |
 | `TestIntegration_GetReactions` | `/ocs/v2.php/apps/spreed/api/v1/reaction/{token}/{id}` | Non-nil map; если реакции есть — у каждой есть актёры.      |
 | `TestIntegration_SendMessage` | POST `/chat/{token}`                          | Возвращает `id > 0`. Мутация — под флагом.                            |
+
+## Signaling integration (Task 2.3)
+
+Отдельный интеграционный тест signaling-протокола P2P-звонков:
+`internal/call/signaling/integration_test.go` (build-tag `integration`).
+
+В отличие от читающих сценариев `client/`, этот тест **мутационный**:
+`JoinCall` меняет состояние сервера (добавляет нас в список участников
+звонка). Поэтому он защищён двухслойной защитой, как `SendMessage` —
+флаг `NCTALK_INTEGRATION_CALL=1` + token `NCTALK_INTEGRATION_ROOM`.
+
+Сценарий (спека 2026-07-19 §7):
+
+1. `JoinCall(token, flags=3)` — войти в звонок (sendrecv).
+2. `PollLoop` крутится 5 секунд в goroutine'е.
+3. Логируется каждое событие, полученное из signaling-канала.
+4. `LeaveCall(token)` — отписаться (deferred).
+
+Тест НЕ проверяет полный WebRTC-обмен (нужен браузерный собеседник для
+offer/answer/candidate). Цель — подтвердить:
+
+- **Путь signaling-эндпоинта** (v3 или v4) отвечает на боевом.
+- **Формат `usersInRoom`** (фикстура `testdata/signaling/usersInRoom.json`)
+  совпадает с реальным ответом.
+- **Формат `message.data`** — это JSON-строка (не объект); парсер Task 2.2
+  делает двойной unmarshal и должен корректно разбирать реальный трафик.
+- **Флаги `inCall`** приходят с ожидаемой битмаской (1=IN_CALL, 2=WITH_AUDIO,
+  4=WITH_VIDEO).
+
+### Обязательное окружение
+
+Те же базовые переменные, что и для остальных integration-тестов, плюс
+две дополнительные для gate'а мутации:
+
+| Переменная                | Назначение                                                       |
+| ------------------------- | ---------------------------------------------------------------- |
+| `NEXTCLOUD_URL`           | База сервера (см. общие требования выше).                        |
+| `NEXTCLOUD_LOGIN`         | Логин пользователя Nextcloud.                                    |
+| `NEXTCLOUD_PASS`          | App-password (НЕ основной пароль).                               |
+| `NCTALK_INTEGRATION_ROOM` | Token комнаты, в которой пойдёт звонок. Должна существовать и быть доступной пользователю. |
+| `NCTALK_INTEGRATION_CALL` | `1` — явный opt-in для мутационного signaling-теста.             |
+
+При отсутствии любого из них тест **скипается** через `t.Skip` (не падает).
+
+> Комнату для теста лучше создать заранее — например, групповой звонок
+> `test-call` с одним участником (тестовым пользователем). Запускать
+> предпочтительно в комнате **без других активных участников**, чтобы
+> не мешать реальным звонкам. Если в комнате есть другой участник с
+> браузером — можно заодно проверить полный SDP/ICE-обмен, но это не
+> обязательно для базового smoke-теста.
+
+### Запуск
+
+```sh
+NCTALK_INTEGRATION_ROOM='<token-комнаты-для-звонка>' \
+NCTALK_INTEGRATION_CALL=1 \
+CGO_ENABLED=0 go test -tags=integration ./internal/call/signaling/... \
+  -run TestSignalingPollLoop -v
+```
+
+Команда завершится за ~5 секунд (столько живёт poll-контекст в тесте)
+плюс сетевые задержки на `JoinCall`/`LeaveCall` (по ~30с потолок).
+
+### Что смотреть в выводе
+
+Тест логирует каждый наблюдённый `Event`:
+
+```
+Event[0]: Kind=EvUsersUpdated
+  usersInRoom: 1 participant(s)
+  user[0]: sessionId=... actorType=users actorId=... inCall=3
+```
+
+Если первый Event — `EvError`, тест упадёт на assert'е протокола; в логе
+будет `ExitError.Code`:
+
+- `code=1` — общая ошибка / 401 / 403 (креды или права).
+- `code=2` — 404 (комната или signaling-эндпоинт не найден; см. ниже
+  «Открытые вопросы»).
+
+### Открытые вопросы для разрешения при первом прогоне
+
+Эти вопросы выявлены при разработке (Task 2.1, 2.2), но не могут быть
+закрыты без прогона на реальном сервере. Финальное решение принимает
+человек по результатам этого теста.
+
+1. **Версия эндпоинта signaling'а: `v3` или `v4`.**
+
+   Спека `docs/superpowers/specs/2026-07-19-nctalk-call-design.md` §7
+   требует `GET /ocs/v2.php/apps/spreed/api/v4/signaling/{token}`.
+   PHP-бэкенд Spreed, по данным Task 2.1, hard-restrictит signaling к
+   `v3` (см. `testdata/signaling/README.md` §«Расхождение со спекой»).
+
+   Реализация в `internal/call/signaling/types.go` идёт по спеке (`v4`).
+   **Если тест падает с `EvError code=2` (404)** — заменить константу
+   `pathSignalingFmt` в `types.go` на `v3` и перезапустить. Структура
+   тела ответа от версии пути НЕ зависит — фикстуры корректны для обеих.
+
+2. **STUN/TURN-серверы: где их брать.**
+
+   Task 2.1 нашёл, что в Spreed STUN/TURN-конфиг приходит с
+   `GET /api/v3/signaling/settings?token=...` (фикстура
+   `testdata/signaling/capability.json`). Task 2.10 (capability-клиент)
+   будет это разбирать; для signaling-теста (Task 2.3) не критично, но
+   на первом прогоне стоит параллельно дёрнуть:
+
+   ```sh
+   curl -s -u "$NEXTCLOUD_LOGIN:$NEXTCLOUD_PASS" \
+     -H 'OCS-APIRequest: true' -H 'Accept: application/json' \
+     "$NEXTCLOUD_URL/ocs/v2.php/apps/spreed/api/v3/signaling/settings?token=$NCTALK_INTEGRATION_ROOM" \
+     | python3 -m json.tool
+   ```
+
+   Зафиксировать для peer-слоя (Task 2.4+): какие именно STUN/TURN
+   сервера отдаёт бой, есть ли TURN-credentials, какой `signalingMode`
+   (`internal` / `external` / `hpb`). Если `hpb` — internal-signaling
+   **не работает**, нужен другой подход (внешний signaling-сервер).
+
+3. **`message.data` — JSON-строка или объект?**
+
+   Парсер `decodeInnerMessage` делает двойной unmarshal: сначала в
+   `string`, потом в `innerMessage`. Это предположение основано на
+   PHP-бэкенде (`SignalingController::pullMessages` складирует через
+   `json_encode($decodedMessage)`). Если на реальном трафике `data`
+   идёт как объект — парсер пропустит все `message`-события (silent
+   skip, см. `TestParse_MalformedData_SilentSkip` в Task 2.2).
+
+   **Признак проблемы** — в логе теста есть только `EvUsersUpdated`,
+   а `EvOffer`/`EvCandidate` отсутствуют, при том что собеседник
+   точно делал offer (можно проверить через браузер DevTools параллельно).
+   В этом случае убрать первый unmarshal в `decodeInnerMessage`.
+
+### Как снять реальный трафик для обновления фикстур
+
+Если зафиксировано расхождение с фикстурами Task 2.1 — обновить
+`testdata/signaling/*.json` с боевого сервера. Способы (в порядке
+предпочтения):
+
+1. **DevTools браузера** (самый надёжный). Открыть Nextcloud Talk в
+   Chrome/Firefox → F12 → Network → отфильтровать по `signaling` →
+   совершить звонок с собеседником → для каждого запроса:
+   - **Copy as cURL** (контекстное меню) — получить полный запрос;
+   - или **Response → Copy** — тело ответа.
+
+   Затем обезличить (см. `testdata/signaling/README.md` §«Обезличивание»):
+   `sessionId` → `SESSION_N`, `actorId` → `alice/bob`, IP в ICE → RFC 5737
+   TEST-NET (`192.0.2.x`/`198.51.100.x`/`203.0.113.x`), DTLS-fingerprint'ы
+   → синтетика, room-token → `tok-test-call`.
+
+2. **mitmproxy** с декодированием HTTPS — если нужен весь поток под рукой.
+   Внимание: креды в `Authorization` будут видны в mitm'е — запускать на
+   изолированной машине и **не сохранять дамп** в репо.
+
+3. **Логи Nextcloud** (`data/nextcloud.log` на сервере с уровнем DEBUG
+   для `spreed`) — для верификации структуры server-side; не для фиксации
+   wire-формата (там его нет).
+
+> **БЕЗОПАСНОСТЬ:** никогда не коммитьте в репо реальные креды, IP или
+> PII. Все фикстуры должны быть обезличены (см. раздел «Обезличивание»
+> в `testdata/signaling/README.md`). Перед коммитом проверить:
+>
+> ```sh
+> # Маркерная проверка на триггерные слова в testdata/ (Task 2.1 DoD):
+> grep -REn 'password|secret|token=[a-f0-9]{20,}|[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' \
+>   testdata/signaling/ | grep -vE '(example\.org|test-net|candidate:|0\.0\.0\.0|127\.0\.0\.1|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.|SESSION_|alice|bob|carol)'
+> ```
+>
+> Должен быть пустым. Если нет — добить обезличивание.
+
+### Что проверяет signaling-тест
+
+| Тест                                  | Эндпоинт                                        | Контракт                                                              |
+| ------------------------------------- | ----------------------------------------------- | --------------------------------------------------------------------- |
+| `TestSignalingPollLoop_JoinGetOneEventLeave` | `POST /call/{token}` + `GET /signaling/{token}` + `DELETE /call/{token}` | `JoinCall` без ошибки; за 5с получен хотя бы один Event (EvUsersUpdated или EvError). |
