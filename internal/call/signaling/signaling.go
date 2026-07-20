@@ -107,6 +107,24 @@ func (c *Client) LeaveCall(ctx context.Context, token string) error {
 	return err
 }
 
+// JoinRoom выполняет POST /api/v4/room/{token}/participants/active (joinRoom,
+// баг #3): создаёт participant session на сервере — без неё signaling pull даёт
+// 404 (CallController требует session). Возвращает собственный sessionId из
+// ocs.data.sessionId — он нужен для SetSessionId (исходящий POST signaling) и для
+// ownSessionId-фильтра в agent (не звонить самому себе). Вызывать ПЕРЕД JoinCall/
+// PollLoop. Canonical flow: web-login → JoinRoom → pull → JoinCall (спека §7,
+// подтверждено spike-gate 2026-07-20; порядок pull/JoinCall некритичен — оба 200).
+func (c *Client) JoinRoom(ctx context.Context, token string) (string, error) {
+	p := fmt.Sprintf(pathJoinRoomFmt, token)
+	var data struct {
+		SessionId string `json:"sessionId"`
+	}
+	if _, err := transport.DoOCS(ctx, c.doer, c.auth, http.MethodPost, p, nil, nil, true, &data); err != nil {
+		return "", err
+	}
+	return data.SessionId, nil
+}
+
 // PollLoop крутит long-poll GET /signaling/{token} (спека §7). Каждое событие
 // из ответа (usersInRoom/offer/answer/candidate) отправляется в ch. Выходит:
 //   - при ctx.Done() — штатный leave (вызывающий делает LeaveCall отдельно);

@@ -117,14 +117,15 @@ func TestSettings_FullResponse_Fixture(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL, "secret")
-	servers, err := c.Settings(context.Background(), "tok-test")
+	servers, err := c.Settings(context.Background())
 	if err != nil {
 		t.Fatalf("Settings: got err=%v, want nil", err)
 	}
 
-	// Путь — v3 signaling-settings (НЕ v4 — расхождение со спекой зафиксировано
-	// в testdata/signaling/README.md и в комментарии к pathSignalingSettingsFmt).
-	if want := "/ocs/v2.php/apps/spreed/api/v3/signaling/settings/tok-test"; capturedPath != want {
+	// Путь — v3 signaling-settings БЕЗ token (Spreed route Signaling#getSettings
+	// без {token}; curl с token → 404, без token → 200 — баг #2). Token в path
+	// НЕ подставляется — настройки signaling глобальны, не per-room.
+	if want := "/ocs/v2.php/apps/spreed/api/v3/signaling/settings"; capturedPath != want {
 		t.Errorf("URL.Path: got %q, want %q", capturedPath, want)
 	}
 	if capturedMethod != http.MethodGet {
@@ -198,7 +199,7 @@ func TestSettings_OnlySTUN_EmptyTurn(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL, "secret")
-	servers, err := c.Settings(context.Background(), "tok-test")
+	servers, err := c.Settings(context.Background())
 	if err != nil {
 		t.Fatalf("Settings: %v", err)
 	}
@@ -229,7 +230,7 @@ func TestSettings_OnlySTUN_FieldMissing(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL, "secret")
-	servers, err := c.Settings(context.Background(), "tok-test")
+	servers, err := c.Settings(context.Background())
 	if err != nil {
 		t.Fatalf("Settings: %v", err)
 	}
@@ -256,7 +257,7 @@ func TestSettings_Empty_BothEmpty(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL, "secret")
-	servers, err := c.Settings(context.Background(), "tok-test")
+	servers, err := c.Settings(context.Background())
 	if err != nil {
 		t.Fatalf("Settings: got err=%v, want nil (пустой STUN/TURN — НЕ ошибка)", err)
 	}
@@ -280,7 +281,7 @@ func TestSettings_Empty_FieldsMissing(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL, "secret")
-	servers, err := c.Settings(context.Background(), "tok-test")
+	servers, err := c.Settings(context.Background())
 	if err != nil {
 		t.Fatalf("Settings: %v", err)
 	}
@@ -301,7 +302,7 @@ func TestSettings_OCSError401(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL, "secret")
-	_, err := c.Settings(context.Background(), "tok-test")
+	_, err := c.Settings(context.Background())
 	if err == nil {
 		t.Fatal("Settings: got nil, want error on OCS 401")
 	}
@@ -326,7 +327,7 @@ func TestSettings_HTTP404_NonOCSBody(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL, "secret")
-	_, err := c.Settings(context.Background(), "tok-test")
+	_, err := c.Settings(context.Background())
 	if err == nil {
 		t.Fatal("Settings: got nil, want error on HTTP 404")
 	}
@@ -350,7 +351,7 @@ func TestSettings_HTTP404_OCSBody(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL, "secret")
-	_, err := c.Settings(context.Background(), "tok-test")
+	_, err := c.Settings(context.Background())
 	if err == nil {
 		t.Fatal("Settings: got nil, want error on OCS 404")
 	}
@@ -381,7 +382,7 @@ func TestSettings_RedactPasswordInNetworkError(t *testing.T) {
 	srv.Close() // закрываем ДО запроса — следующий Do упадёт с network error
 
 	c := newClient(srv.URL, "SECRET_MARKER")
-	_, err := c.Settings(context.Background(), "tok-test")
+	_, err := c.Settings(context.Background())
 	if err == nil {
 		t.Fatal("Settings: got nil, want network error от закрытого сервера")
 	}
@@ -403,7 +404,7 @@ func TestSettings_RequestHeaders(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL, "secret")
-	_, _ = c.Settings(context.Background(), "tok-test")
+	_, _ = c.Settings(context.Background())
 
 	if got.Get("OCS-APIRequest") != "true" {
 		t.Errorf("OCS-APIRequest header: got %q, want \"true\"", got.Get("OCS-APIRequest"))
@@ -416,10 +417,10 @@ func TestSettings_RequestHeaders(t *testing.T) {
 	}
 }
 
-// TestSettings_TokenSubstitutedInPath — разные token'ы подставляются в path, а
-// не в query (соответствует маршруту Spreed Controller/*signaling* — path-param,
-// не query). Защита от случайной регрессии на query-параметр.
-func TestSettings_TokenSubstitutedInPath(t *testing.T) {
+// TestSettings_PathHasNoToken — signaling-settings БЕЗ token (баг #2): Spreed
+// route Signaling#getSettings не принимает {token}, settings глобальны. Path
+// заканчивается на /settings, без подставленного token; query тоже пуст.
+func TestSettings_PathHasNoToken(t *testing.T) {
 	var capturedPath, capturedRawQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedPath = r.URL.Path
@@ -430,13 +431,13 @@ func TestSettings_TokenSubstitutedInPath(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL, "secret")
-	if _, err := c.Settings(context.Background(), "ROOMXYZ123"); err != nil {
+	if _, err := c.Settings(context.Background()); err != nil {
 		t.Fatalf("Settings: %v", err)
 	}
-	if want := "/ocs/v2.php/apps/spreed/api/v3/signaling/settings/ROOMXYZ123"; capturedPath != want {
-		t.Errorf("URL.Path: got %q, want %q", capturedPath, want)
+	if want := "/ocs/v2.php/apps/spreed/api/v3/signaling/settings"; capturedPath != want {
+		t.Errorf("URL.Path: got %q, want %q (БЕЗ token)", capturedPath, want)
 	}
 	if capturedRawQuery != "" {
-		t.Errorf("URL.RawQuery: got %q, want empty (token в path, не в query)", capturedRawQuery)
+		t.Errorf("URL.RawQuery: got %q, want empty", capturedRawQuery)
 	}
 }

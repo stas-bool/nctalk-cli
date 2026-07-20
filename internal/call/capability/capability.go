@@ -6,12 +6,14 @@
 //
 // Источник данных — эндпоинт SignalingController::getSettings (Spreed):
 //
-//	GET /ocs/v2.php/apps/spreed/api/v3/signaling/settings/{token}
+//	GET /ocs/v2.php/apps/spreed/api/v3/signaling/settings
 //
-// apiVersion **v3** здесь НЕ противоречит v4 в соседнем internal/call/signaling
-// (pathSignalingFmt): pull-signaling (/signaling/{token}) и signaling-settings
-// (/signaling/settings/{token}) — РАЗНЫЕ эндпоинты Spreed с разными restricted
-// apiVersions (см. testdata/signaling/README.md «Расхождение со спекой»).
+// БЕЗ token: route getSettings не принимает {token}, настройки signaling
+// глобальны, не per-room (баг #2: curl с token → 404, без token → 200).
+//
+// apiVersion **v3** — как и pull-signaling в соседнем internal/call/signaling
+// (pathSignalingFmt): оба signaling-эндпоинта Spreed restricted к v3
+// (подтверждено spike-gate 2026-07-20); Call API — v4 (pathCallFmt).
 // Cloud-capabilities endpoint (/ocs/v2.php/cloud/capabilities) здесь НЕ подходит:
 // спред-секция там не несёт STUN/TURN, только фичи-флаги (см. _note_on_cloud_
 // capabilities в testdata/signaling/capability.json).
@@ -25,7 +27,6 @@ package capability
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 
 	"github.com/pion/webrtc/v4"
@@ -55,22 +56,16 @@ func New(auth Auth, doer transport.Doer) *Client {
 	return &Client{doer: doer, auth: auth}
 }
 
-// pathSignalingSettingsFmt — путь GET /signaling/settings/{token} эндпоинта
-// Spreed (SignalingController::getSettings). Token подставляется в path, НЕ в
-// query — это соответствует маршруту Spreed Controller/*signaling* (path-param).
-//
-// apiVersion = v3: SignalingController::getSettings restricted к v3, как и
-// pull-signaling; это НЕ противоречит v4 в pathSignalingFmt (signaling/types.go)
-// — там другой эндпоинт (/signaling/{token} long-poll, тоже v3 по факту в
-// актуальном Spreed, но в текущей реализации зафиксировано v4 по спеке — см.
-// комментарий в types.go). Не унифицируем эти константы намеренно: разные
-// эндпоинты, разные apiVersions, точка правки при сверке с боевым (Task 2.3).
-const pathSignalingSettingsFmt = "/ocs/v2.php/apps/spreed/api/v3/signaling/settings/%s"
+// pathSignalingSettings — путь GET /signaling/settings эндпоинта Spreed
+// (SignalingController::getSettings). БЕЗ token: route не принимает {token},
+// настройки signaling глобальны (баг #2: curl с token → 404, без token → 200).
+// apiVersion = v3 (как и pull-signaling в signaling/types.go).
+const pathSignalingSettings = "/ocs/v2.php/apps/spreed/api/v3/signaling/settings"
 
 // Settings запрашивает signaling-settings для комнаты и извлекает STUN/TURN.
 //
 // Контракт:
-//   - GET /ocs/v2.php/apps/spreed/api/v3/signaling/settings/{token};
+//   - GET /ocs/v2.php/apps/spreed/api/v3/signaling/settings (БЕЗ token, баг #2);
 //   - из ocs.data читаются поля stunservers и turnservers (прочие поля —
 //     signalingMode / userId / server / federation / hideWarning / sipDialinInfo —
 //     игнорируются; они нужны signaling-клиенту, не capability);
@@ -86,11 +81,10 @@ const pathSignalingSettingsFmt = "/ocs/v2.php/apps/spreed/api/v3/signaling/setti
 //     типизирует и санитизирует их — capability НЕ дублирует sanitize).
 //
 // TURN-credentials НЕ логируются (спека §5): в коде нет log.Printf / fmt.Fprintln
-// для ICEServer. fmt.Sprintf — только для подстановки token в path.
-func (c *Client) Settings(ctx context.Context, token string) ([]webrtc.ICEServer, error) {
-	p := fmt.Sprintf(pathSignalingSettingsFmt, token)
+// для ICEServer.
+func (c *Client) Settings(ctx context.Context) ([]webrtc.ICEServer, error) {
 	var data settingsData
-	if _, err := transport.DoOCS(ctx, c.doer, c.auth, http.MethodGet, p, nil, nil, false, &data); err != nil {
+	if _, err := transport.DoOCS(ctx, c.doer, c.auth, http.MethodGet, pathSignalingSettings, nil, nil, false, &data); err != nil {
 		return nil, err
 	}
 

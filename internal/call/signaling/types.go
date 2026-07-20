@@ -87,17 +87,15 @@ type Message struct {
 // Именованные канонические пути эндпоинтов signaling/call Nextcloud Talk
 // (спека 2026-07-19 §7, по аналогии с internal/client/paths.go).
 //
-// РАСХОЖДЕНИЕ СО СПЕКОЙ (зафиксировано в testdata/signaling/README.md):
-// PHP-бэкенд Spreed hard-restrictит signaling-эндпоинты к apiVersion v3, тогда
-// как Call API — действительно v4. Спека требует v4 для signaling; реализуем
-// по спеке (пользователь сказал «реализуй по спеке, противоречие отметь»).
-// Путь — единая константа: при сверке с боевого сервера в Task 2.3 правка
-// в одном месте переведёт signaling на v3, если v4 действительно не работает.
-// Структура тела ответа/запроса от версии пути НЕ зависит (fixtures корректны
-// независимо).
+// РАСХОЖДЕНИЕ СО СПЕКОЙ разрешено сверкой с боевым (spike-gate 2026-07-20):
+// PHP-бэкенд Spreed hard-restrictит signaling-эндпоинты к apiVersion v3 (curl
+// GET v3 → 200, v4 → 998), тогда как Call API — v4. Спека требовала v4 для
+// signaling; реальность — v3. Структура тела ответа/запроса от версии пути НЕ
+// зависит (fixtures корректны независимо).
 const (
 	pathCallFmt      = "/ocs/v2.php/apps/spreed/api/v4/call/%s"
-	pathSignalingFmt = "/ocs/v2.php/apps/spreed/api/v4/signaling/%s"
+	pathSignalingFmt = "/ocs/v2.php/apps/spreed/api/v3/signaling/%s"
+	pathJoinRoomFmt  = "/ocs/v2.php/apps/spreed/api/v4/room/%s/participants/active"
 )
 
 // ---- Внутренние типы для декодирования OCS-конверта signaling ----
