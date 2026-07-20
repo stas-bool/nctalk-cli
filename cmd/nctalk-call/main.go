@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"os/signal"
@@ -28,6 +29,7 @@ import (
 	"github.com/stas/nctalk/internal/call/agent"
 	"github.com/stas/nctalk/internal/call/capability"
 	"github.com/stas/nctalk/internal/call/signaling"
+	"github.com/stas/nctalk/internal/call/weblogin"
 	"github.com/stas/nctalk/internal/client"
 	"github.com/stas/nctalk/internal/config"
 	"github.com/stas/nctalk/internal/exit"
@@ -85,10 +87,28 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 		return 1
 	}
 
-	// 3. HTTP-клиент (Timeout + SameHostRedirectPolicy) + Auth для capability/signaling.
+	// 3. HTTP-клиенты с SHARED cookiejar: loginClient (no-redirect — для web-login,
+	//    чтобы прочитать 303 Location) и httpClient (SameHostRedirectPolicy — для
+	//    capability/signaling). Session-cookie от weblogin.Login живёт в jar;
+	//    capability/signaling его подхватывают. Без PHP-session signaling pull → 404
+	//    (баг #5, см. internal/call/weblogin/doc.go).
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		fmt.Fprintf(stderr, "nctalk-call: cookiejar: %v\n", err)
+		return 1
+	}
+	loginClient := &http.Client{
+		Transport:     http.DefaultTransport,
+		Timeout:       cfg.Timeout,
+		Jar:           jar,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	httpClient := &http.Client{
 		Transport:     http.DefaultTransport,
 		Timeout:       cfg.Timeout,
+		Jar:           jar,
 		CheckRedirect: transport.SameHostRedirectPolicy,
 	}
 	// config.Load гарантировал валидность URL; panic при url.Parse здесь —
@@ -103,9 +123,6 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 	talkClient := client.NewTalkClient(cfg)
 
 	// 4. Разрешение <room>/--name → token. Сетевая ошибка → exit.FromClientErr.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	result, err := room.ResolveRoom(ctx, talkClient, positional, *name)
 	if err != nil {
 		// FromClientErr возвращает exit.ExitError-value (404 → 2, прочее → 1).
@@ -139,11 +156,22 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 		// ok — продолжаем с result.Token.
 	}
 
+	// 4a. Web-login → PHP-session в shared jar. Запускается ПОСЛЕ ResolveRoom
+	//     (незачем логиниться, если room не задан/не найден/ambiguous). БЕЗ session
+	//     signaling pull → 404 (баг #5: Basic-auth stateless, $_SESSION пуст).
+	//     loginClient — no-redirect (чтобы прочитать 303 Location, см.
+	//     weblogin.doc.go); session-cookie попадает в jar, его подхватывают
+	//     capability/signaling через httpClient.
+	if err := weblogin.Login(ctx, loginClient, auth); err != nil {
+		fmt.Fprintln(stderr, "nctalk-call: "+err.Error())
+		return 1
+	}
+
 	// 5. Capability (STUN/TURN из signaling-settings). Best-effort: при ошибке
 	//    логируем и продолжаем с пустым списком — pion примет пустой []ICEServer
 	//    (host candidates хватит для same-network spike).
 	capClient := capability.New(auth, httpClient)
-	iceServers, err := capClient.Settings(ctx, result.Token)
+	iceServers, err := capClient.Settings(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "nctalk-call: capability: %v (продолжаем без STUN/TURN)\n", err)
 		iceServers = nil
@@ -205,13 +233,31 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 	// создать PeerConnection на свой собственный sessionId (loopback ICE).
 	sigClient := signaling.New(auth, httpClient)
 
+	// 8a. joinRoom → participant session + ownSessionId (баг #3). Без joinRoom
+	//     signaling pull даст 404 (CallController требует session). sessionId —
+	//     для SetSessionId (исходящий POST) и ownSessionId-фильтра в agent
+	//     (баг #4: canonical flow web-login → joinRoom → pull → joinCall; порядок
+	//     pull/joinCall некритичен, оба 200 — см. signaling.JoinRoom doc).
+	sessionId, err := sigClient.JoinRoom(ctx, result.Token)
+	if err != nil {
+		fmt.Fprintln(stderr, "nctalk-call: "+err.Error())
+		mapped := exit.FromClientErr(err)
+		var jee exit.ExitError
+		if errors.As(mapped, &jee) {
+			return jee.Code
+		}
+		return 1
+	}
+	sigClient.SetSessionId(sessionId)
+
 	// 9. Контекст с signal.NotifyContext (SIGINT, SIGTERM). На сигнале ctx
 	//    отменяется, agent выходит по ctx.Done → штатный leave (LeaveCall в
 	//    best-effort 3с, см. agent.leaveBestEffort).
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// 10. agent.Run.
+	// 10. agent.Run. OwnSessionId из joinRoom (точнее, чем извлечение по userId
+	//     из EvUsersUpdated — review замечание 3 теперь имеет приоритетный источник).
 	agentErr := agent.Run(sigCtx, agent.Config{
 		Signaling:    sigClient,
 		Token:        result.Token,
@@ -221,6 +267,7 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 		Stdout:       pcmOut,
 		Stderr:       stderr,
 		OwnUserId:    cfg.Login,
+		OwnSessionId: sessionId,
 	})
 
 	// 11. Маппинг ошибки. nil → 0; exit.ExitError-value → Code; прочее → 1.

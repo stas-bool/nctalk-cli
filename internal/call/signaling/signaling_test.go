@@ -700,7 +700,7 @@ func TestPollLoop_ParsesAndEmitsEvents(t *testing.T) {
 // ---- Send: форма POST-запроса ----
 
 // TestSend_WireFormat — детальная проверка формы исходящего запроса:
-//   - method/path: POST /ocs/v2.php/apps/spreed/api/v4/signaling/{token};
+//   - method/path: POST /ocs/v2.php/apps/spreed/api/v3/signaling/{token};
 //   - Content-Type: application/x-www-form-urlencoded (НЕ application/json);
 //   - тело: form-encoded с ключом messages, значение которого — JSON-строка
 //     массива [{ev:"message", fn:"<inner JSON string>", sessionId:"<own>"}];
@@ -730,7 +730,7 @@ func TestSend_WireFormat(t *testing.T) {
 	if got, want := req.Method, http.MethodPost; got != want {
 		t.Errorf("Method: got %q, want %q", got, want)
 	}
-	if got, want := req.URL.Path, "/ocs/v2.php/apps/spreed/api/v4/signaling/tok-test"; got != want {
+	if got, want := req.URL.Path, "/ocs/v2.php/apps/spreed/api/v3/signaling/tok-test"; got != want {
 		t.Errorf("URL.Path: got %q, want %q", got, want)
 	}
 	if ct := req.Header.Get("Content-Type"); ct != "application/x-www-form-urlencoded" {
@@ -1018,5 +1018,58 @@ func TestSignalingDoesNotImportCLIorRender(t *testing.T) {
 			strings.Contains(line, "github.com/stas/nctalk/internal/render") {
 			t.Errorf("signaling не должен зависеть от cli/render: найдено %q", line)
 		}
+	}
+}
+
+// ---- JoinRoom (баг #3: participant session для signaling pull) ----
+
+// TestJoinRoom_ReturnsSessionId — POST /api/v4/room/{token}/participants/active
+// возвращает собственный sessionId (нужен для SetSessionId / ownSessionId-фильтра
+// в agent). Без joinRoom signaling pull → 404 (CallController требует session).
+func TestJoinRoom_ReturnsSessionId(t *testing.T) {
+	const wantSID = "x9dla7zKOAB4haAbb11f7BcMu1sh84T1"
+	doer := &mockDoer{
+		responses: []mockResp{{
+			status: 200,
+			body:   ocsOK(map[string]any{"token": "tok-test", "sessionId": wantSID, "participantType": 1}),
+		}},
+	}
+	c := newTestClient(doer)
+	sid, err := c.JoinRoom(context.Background(), "tok-test")
+	if err != nil {
+		t.Fatalf("JoinRoom: %v", err)
+	}
+	if sid != wantSID {
+		t.Errorf("sessionId: got %q, want %q", sid, wantSID)
+	}
+	if got := doer.requestCount(); got != 1 {
+		t.Fatalf("запросов: %d, want 1", got)
+	}
+	req := doer.requests[0]
+	if got, want := req.Method, http.MethodPost; got != want {
+		t.Errorf("Method: got %q, want %q", got, want)
+	}
+	if got, want := req.URL.Path, "/ocs/v2.php/apps/spreed/api/v4/room/tok-test/participants/active"; got != want {
+		t.Errorf("URL.Path: got %q, want %q", got, want)
+	}
+}
+
+// TestJoinRoom_OCS404 — серверная ошибка (комната не найдена) возвращается как
+// *transport.OCSError{Code:404} → cli-маппинг даст exit 2.
+func TestJoinRoom_OCS404(t *testing.T) {
+	doer := &mockDoer{
+		responses: []mockResp{{status: 200, body: ocsErrBody(http.StatusNotFound, "Room not found")}},
+	}
+	c := newTestClient(doer)
+	sid, err := c.JoinRoom(context.Background(), "tok-test")
+	if err == nil {
+		t.Fatalf("JoinRoom: got sid=%q err=nil, want error", sid)
+	}
+	var oe *transport.OCSError
+	if !errors.As(err, &oe) {
+		t.Fatalf("errors.As(*OCSError): got %T (%v)", err, err)
+	}
+	if oe.Code != http.StatusNotFound {
+		t.Errorf("OCSError.Code: got %d, want 404", oe.Code)
 	}
 }
