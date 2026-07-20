@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"path"
@@ -302,8 +303,10 @@ func (c *Client) Send(ctx context.Context, token string, msg Message) error {
 //
 // Прочие Type (например, "control") и неизвестные внутренние type — скипаются.
 func parseEnvelopes(envelopes []signalingEnvelope) []Event {
+	log.Printf("DEBUG signaling: parseEnvelopes count=%d", len(envelopes))
 	events := make([]Event, 0, len(envelopes))
 	for _, env := range envelopes {
+		log.Printf("DEBUG signaling: env.Type=%s", env.Type)
 		switch env.Type {
 		case "usersInRoom":
 			users, ok := decodeUsers(env.Data)
@@ -313,6 +316,11 @@ func parseEnvelopes(envelopes []signalingEnvelope) []Event {
 			events = append(events, Event{Kind: EvUsersUpdated, Users: users})
 		case "message":
 			inner, ok := decodeInnerMessage(env.Data)
+			if ok {
+				log.Printf("DEBUG signaling: inner.type=%s from=%.12s", inner.Type, inner.From)
+			} else {
+				log.Printf("DEBUG signaling: inner decode FAILED")
+			}
 			if !ok {
 				continue
 			}
@@ -386,17 +394,37 @@ func decodeSDPEvent(inner innerMessage) (Event, bool) {
 func decodeCandidateEvent(inner innerMessage) (Event, bool) {
 	var p icePayload
 	if err := json.Unmarshal(inner.Payload, &p); err != nil {
+		log.Printf("DEBUG signaling: decodeCandidateEvent FAIL err=%v payload=%.200s", err, string(inner.Payload))
 		return Event{}, false
 	}
+	log.Printf("DEBUG signaling: decodeCandidateEvent OK cand=%.120s", p.Candidate.Candidate)
 	return Event{
 		Kind: EvCandidate,
 		From: inner.From,
 		Candidate: ICECandidate{
-			Candidate:     p.Candidate,
-			SDPMLineIndex: p.SDPMLineIndex,
-			SDPMid:        p.SDPMid,
+			Candidate:     p.Candidate.Candidate,
+			SDPMLineIndex: p.Candidate.SDPMLineIndex,
+			SDPMid:        p.Candidate.SDPMid,
 		},
 	}, true
+}
+
+// WrapCandidatePayload оборачивает плоский pion ICECandidateInit JSON во
+// вложенный Spreed wire-format {"candidate":{candidate,sdpMLineIndex,sdpMid}}
+// для ИСХОДЯЩЕГО candidate (баг #6, spike-gate 2026-07-20). Симметрично
+// входящему icePayload: удалённый Spreed-клиент в talk-main.js вызывает
+// pc.addIceCandidate(a.payload.candidate), ожидая ОБЪЕКТ RTCIceCandidateInit,
+// а НЕ строку — плоский {candidate:"<str>"} даёт TypeError ×N, ломает peer-
+// pipeline → нет audio-sink → нет звука.
+//
+// initJSON — уже смаршаленный ICECandidateInit от pion c.ToJSON()
+// ({candidate,sdpMLineIndex,sdpMid}). signaling НЕ зависит от webrtc, поэтому
+// принимает json.RawMessage, а не webrtc.ICECandidateInit — caller (peer.go)
+// маршалит сам.
+func WrapCandidatePayload(initJSON json.RawMessage) (json.RawMessage, error) {
+	return json.Marshal(struct {
+		Candidate json.RawMessage `json:"candidate"`
+	}{Candidate: initJSON})
 }
 
 // ---- retry/backoff (спека §7 «Polling retry/backoff») ----

@@ -137,14 +137,35 @@ type sdpPayload struct {
 	SDP  string `json:"sdp"`
 }
 
-// icePayload — payload для candidate (fixtures: candidate.json).
-// SDPMLineIndex/SDPMid — указатели: в реальном трафике могут быть null
-// (или отсутствовать), отличаем от zero-value.
+// icePayload — payload для ВХОДЯЩЕГО candidate. Реальный формат Spreed/Chrome
+// (подтверждено spike-gate 2026-07-20): поле "candidate" содержит ВЛОЖЕННЫЙ
+// ОБЪЕКТ {candidate, sdpMLineIndex, sdpMid}, а НЕ строку. compile-only скрыл
+// расхождение: самопальная фикстура с плоским {candidate:"..."} проходила
+// unit-тест, но на боевом ВСЕ candidates скипались с
+// "json: cannot unmarshal object into Go struct field icePayload.candidate of
+// type string" → pion не получал remote ICE candidates → ICE вечный
+// "connecting" → audio-pipe не вставал. Это баг-формат, скрытый compile-only
+// (как и v4→v3/session ранее) — см. инвариант про fixtures в CLAUDE.md.
+//
+// ИСХОДЯЩИЙ candidate (peer.OnICECandidate → Message.Payload) — ТОТ ЖЕ
+// ВЛОЖЕННЫЙ формат {candidate:{candidate,sdpMLineIndex,sdpMid}} (симметрия):
+// peer.go оборачивает плоский pion ToJSON() через WrapCandidatePayload в
+// этот же тип. Раньше считалось (ошибочно, compile-only), что Spreed принимает
+// плоский исходящий — на деле удалённый talk-main.js зовёт
+// addIceCandidate(a.payload.candidate) со строкой → TypeError ×N → нет audio-
+// sink → нет звука (баг #6, spike-gate 2026-07-20). Асимметрии НЕТ: обе стороны
+// Spreed internal-signaling работают вложенным wire-format'ом.
 type icePayload struct {
-	Candidate        string  `json:"candidate"`
-	SDPMLineIndex    *int    `json:"sdpMLineIndex"`
-	SDPMid           *string `json:"sdpMid"`
-	UsernameFragment string  `json:"usernameFragment"`
+	Candidate iceCandidateBody `json:"candidate"`
+}
+
+// iceCandidateBody — содержимое поля payload.candidate (вложенный объект
+// входящего Spreed-candidate). SDPMLineIndex/SDPMid — указатели: в реальном
+// трафике могут быть null/отсутствовать, отличаем от zero-value.
+type iceCandidateBody struct {
+	Candidate     string  `json:"candidate"`
+	SDPMLineIndex *int    `json:"sdpMLineIndex"`
+	SDPMid        *string `json:"sdpMid"`
 }
 
 // rawUser — участник в usersInRoom (fixtures: usersInRoom.json). Соответствует

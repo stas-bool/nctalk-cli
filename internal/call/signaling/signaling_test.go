@@ -333,6 +333,56 @@ func TestParse_Candidate(t *testing.T) {
 	}
 }
 
+// TestWrapCandidatePayload — ИСХОДЯЩИЙ candidate-payload должен быть ВЛОЖЕННЫМ
+// объектом {candidate:{candidate,sdpMLineIndex,sdpMid}} (симметрично входящему
+// icePayload), иначе удалённый Spreed-клиент в talk-main.js вызывает
+// pc.addIceCandidate(a.payload.candidate) со СТРОКОЙ → TypeError ×N → peer-pipeline
+// не достраивается → нет audio-sink → нет звука (баг #6, spike-gate 2026-07-20).
+// Вход — плоский pion-формат ICECandidateInit от c.ToJSON(): {candidate,sdpMLineIndex,sdpMid}.
+//
+// WrapCandidatePayload живёт в signaling (wire-format там), не зависит от webrtc —
+// принимает уже смаршаленный init как json.RawMessage.
+func TestWrapCandidatePayload(t *testing.T) {
+	// Плоский pion ICECandidateInit (строка candidate на верхнем уровне).
+	initJSON := json.RawMessage(`{"candidate":"candidate:842163049 1 udp 1677729535 203.0.113.10 49152 typ host","sdpMLineIndex":0,"sdpMid":"0"}`)
+	out, err := WrapCandidatePayload(initJSON)
+	if err != nil {
+		t.Fatalf("WrapCandidatePayload: %v", err)
+	}
+
+	// 1) Результат должен парситься как icePayload (тот же тип, что входящий
+	//    candidate) — доказывает симметрию входящего/исходящего wire-format'а.
+	var p icePayload
+	if err := json.Unmarshal(out, &p); err != nil {
+		t.Fatalf("результат не парсится как icePayload (вложенный формат): %v\nraw=%s", err, out)
+	}
+	if p.Candidate.Candidate != "candidate:842163049 1 udp 1677729535 203.0.113.10 49152 typ host" {
+		t.Errorf("nested Candidate: got %q", p.Candidate.Candidate)
+	}
+	if p.Candidate.SDPMLineIndex == nil || *p.Candidate.SDPMLineIndex != 0 {
+		t.Errorf("nested SDPMLineIndex: got %v, want 0", p.Candidate.SDPMLineIndex)
+	}
+	if p.Candidate.SDPMid == nil || *p.Candidate.SDPMid != "0" {
+		t.Errorf("nested SDPMid: got %v, want %q", p.Candidate.SDPMid, "0")
+	}
+
+	// 2) На верхнем уровне — ТОЛЬКО ключ "candidate" (объект-обёртка). Плоские
+	//    sdpMLineIndex/sdpMid снаружи = баг #6 (browser addIceCandidate падает).
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(out, &top); err != nil {
+		t.Fatalf("unmarshal top-level map: %v", err)
+	}
+	if _, ok := top["candidate"]; !ok {
+		t.Fatal("нет ключа \"candidate\" на верхнем уровне (формат не вложен)")
+	}
+	if _, ok := top["sdpMLineIndex"]; ok {
+		t.Error("плоский \"sdpMLineIndex\" на верхнем уровне — формат плоский, не вложенный (баг #6)")
+	}
+	if _, ok := top["sdpMid"]; ok {
+		t.Error("плоский \"sdpMid\" на верхнем уровне — формат плоский, не вложенный (баг #6)")
+	}
+}
+
 // TestParse_EmptyData — пустой ocs.data (или только usersInRoom с пустым списком)
 // не должен падать.
 func TestParse_EmptyData(t *testing.T) {

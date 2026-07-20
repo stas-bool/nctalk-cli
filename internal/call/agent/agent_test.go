@@ -88,6 +88,12 @@ func (p *fakePeer) OnIncomingAudio(sink media.AudioSink) {
 	p.onSink = sink
 }
 
+// CreateOffer — stub: реальный peer.Peer инициирует SDP-exchange (impolite-роль);
+// в тестах agent.Run эффект offer'а не проверяется (seed-peer sendrecv-путь
+// покрыт на pion-уровне в peer_test.go/TestPeerLoop_NoGlare). Удовлетворяет
+// peerConn interface (CreateOffer добавлен в незавершёнке audio-pipe).
+func (p *fakePeer) CreateOffer() error { return nil }
+
 func (p *fakePeer) Close() error {
 	p.closeMu.Lock()
 	defer p.closeMu.Unlock()
