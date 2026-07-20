@@ -19,7 +19,7 @@
       },
       {
         "type": "message",
-        "data": "{\"type\":\"candidate\",\"from\":\"SESSION_2\",\"to\":\"SESSION_1\",\"roomType\":\"video\",\"payload\":{\"candidate\":\"candidate:842163049 1 udp 1677729535 203.0.113.10 49152 typ host generation 0 ufrag 9aX3 network-cost 999\",\"sdpMLineIndex\":0,\"sdpMid\":\"0\",\"usernameFragment\":\"9aX3\"}}"
+        "data": "{\"type\":\"candidate\",\"from\":\"SESSION_2\",\"to\":\"SESSION_1\",\"roomType\":\"video\",\"payload\":{\"candidate\":{\"candidate\":\"candidate:842163049 1 udp 1677729535 203.0.113.10 49152 typ host generation 0 ufrag 9aX3 network-cost 999\",\"sdpMLineIndex\":0,\"sdpMid\":\"0\",\"usernameFragment\":\"9aX3\"}}}"
       },
       {
         "type": "usersInRoom",

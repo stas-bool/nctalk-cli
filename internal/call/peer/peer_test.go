@@ -158,8 +158,9 @@ func pumpLoop(src *Peer, dst *Peer, errCh chan<- error) {
 
 // messageToEvent — обратная конверсия signaling.Message → signaling.Event.
 // Эмулирует работу signaling-слоя на приёмной стороне (decodeSdpEvent /
-// decodeCandidateEvent). Для candidate: JSON от pion имеет *uint16 для
-// sdpMLineIndex, signaling хранит *int — конверсия через int-кеширование.
+// decodeCandidateEvent). Для candidate: payload — вложенный Spreed wire-format
+// {candidate:{...}} (баг #6); внутри pion ToJSON даёт *uint16 для sdpMLineIndex,
+// signaling хранит *int — конверсия через int-кеширование.
 func messageToEvent(msg signaling.Message) (signaling.Event, error) {
 	switch msg.Type {
 	case "offer", "answer":
@@ -173,26 +174,30 @@ func messageToEvent(msg signaling.Message) (signaling.Event, error) {
 		}
 		return signaling.Event{Kind: kind, SDP: p.SDP}, nil
 	case "candidate":
-		// Парсим как pion-формат (lowercase keys, *uint16 для sdpMLineIndex).
-		var init struct {
-			Candidate     string  `json:"candidate"`
-			SDPMLineIndex *uint16 `json:"sdpMLineIndex"`
-			SDPMid        *string `json:"sdpMid"`
+		// Парсим вложенный Spreed wire-format {candidate:{candidate,sdpMLineIndex,
+		// sdpMid}} (баг #6, симметрично decodeCandidateEvent/icePayload). Поля у
+		// pion ToJSON — *uint16 для sdpMLineIndex, signaling хранит *int → конверсия.
+		var wrapped struct {
+			Candidate struct {
+				Candidate     string  `json:"candidate"`
+				SDPMLineIndex *uint16 `json:"sdpMLineIndex"`
+				SDPMid        *string `json:"sdpMid"`
+			} `json:"candidate"`
 		}
-		if err := json.Unmarshal(msg.Payload, &init); err != nil {
+		if err := json.Unmarshal(msg.Payload, &wrapped); err != nil {
 			return signaling.Event{}, err
 		}
 		var idx *int
-		if init.SDPMLineIndex != nil {
-			v := int(*init.SDPMLineIndex)
+		if wrapped.Candidate.SDPMLineIndex != nil {
+			v := int(*wrapped.Candidate.SDPMLineIndex)
 			idx = &v
 		}
 		return signaling.Event{
 			Kind: signaling.EvCandidate,
 			Candidate: signaling.ICECandidate{
-				Candidate:     init.Candidate,
+				Candidate:     wrapped.Candidate.Candidate,
 				SDPMLineIndex: idx,
-				SDPMid:        init.SDPMid,
+				SDPMid:        wrapped.Candidate.SDPMid,
 			},
 		}, nil
 	}

@@ -32,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"sync"
 	"time"
 
@@ -62,6 +63,10 @@ type peerConn interface {
 	// не через N encodeLoop'ов (review замечание 1).
 	AttachOutgoingTrack(*webrtc.TrackLocalStaticSample) error
 	OnIncomingAudio(media.AudioSink)
+	// CreateOffer инициирует SDP-exchange (impolite-роль). Без него nctalk-call
+	// только ждёт offer от браузера, а браузер шлёт offer по своей perfect-
+	// negotiation логике и может не прислать (glare, Task 2.6 pending).
+	CreateOffer() error
 	Close() error
 }
 
@@ -292,10 +297,14 @@ mainLoop:
 			}
 			switch ev.Kind {
 			case signaling.EvUsersUpdated:
+				fmt.Fprintf(cfg.Stderr, "DEBUG ev=UsersUpdated users=%d\n", len(ev.Users))
 				a.reconcile(ev.Users)
 			case signaling.EvOffer, signaling.EvAnswer, signaling.EvCandidate:
+				fmt.Fprintf(cfg.Stderr, "DEBUG ev=%d from=%.12s\n", ev.Kind, ev.From)
 				if b, ok := a.peerBySid(ev.From); ok {
 					_ = b.peer.HandleEvent(ev)
+				} else {
+					fmt.Fprintf(cfg.Stderr, "DEBUG   peer not in map for from=%.12s\n", ev.From)
 				}
 				// Если пира нет в map — событие пришло раньше, чем EvUsersUpdated для
 				// этого sessionId. Скипаем (баг сервера/сети; recoverable следующим
@@ -357,6 +366,7 @@ func encodeDoneCh(ch chan error) <-chan error {
 //     done<-err, агент выйдет с этим кодом.
 //   - track.WriteSample ошибка (все PC закрылись) — done<-nil (не фатал).
 func agentEncodeLoop(src media.AudioSource, track *webrtc.TrackLocalStaticSample, done chan<- error) {
+	var count int
 	for {
 		payload, dur, err := src.ReadSample()
 		if err != nil {
@@ -375,6 +385,17 @@ func agentEncodeLoop(src media.AudioSource, track *webrtc.TrackLocalStaticSample
 			done <- nil
 			return
 		}
+		count++
+		if count == 1 || count%50 == 0 {
+			log.Printf("DEBUG encodeLoop: wrote %d samples (dur=%v)", count, dur)
+		}
+		// Real-time pacing. pion WriteSample отправляет RTP немедленно (без
+		// pacing), а ffmpeg encode читает вход быстрее real-time — без sleep весь
+		// PCM-файл кодируется за <1с, encodeLoop тут же EOF, agent выходит ДО
+		// установления ICE (spike-gate 2026-07-20: sendrecv recording.pcm пуст,
+		// exit 0 за <1с). Sleep на dur (типично 20мс Opus-frame) даёт real-time
+		// стриминг — sendrecv держится всё время --in, ICE успевает, audio идёт.
+		time.Sleep(dur)
 	}
 }
 
@@ -452,11 +473,13 @@ func (a *agentState) reconcile(users []signaling.User) {
 		if u.SessionId == ownSid {
 			continue
 		}
-		if u.InCall&inFlagWithAudio == 0 {
-			// recv-only участники (InCall=1) не отправляют нам аудио — подключаться
-			// не к кому. Пропускаем.
-			continue
-		}
+		// DEBUG (spike-gate 2026-07-20): фильтр WITH_AUDIO ВРЕМЕННО отключён,
+		// чтобы sendrecv-отправитель (A) подключался к recvonly-слушателю (B)
+		// для чистого A→B теста без glare (оба sendrecv дают glare без PN,
+		// Task 2.6). ВЕРНУТЬ фильтр после теста.
+		// if u.InCall&inFlagWithAudio == 0 {
+		// 	continue
+		// }
 		wanted[u.SessionId] = struct{}{}
 	}
 
@@ -477,6 +500,9 @@ func (a *agentState) reconcile(users []signaling.User) {
 		}
 	}
 	a.mu.Unlock()
+
+	fmt.Fprintf(a.cfg.Stderr, "DEBUG reconcile: wanted=%d toAdd=%d toRemove=%d ownSid=%.12s\n",
+		len(wanted), len(toAdd), len(toRemove), ownSid)
 
 	// Cleanup ушедших (вне лока — Close/decoder.Close могут блокировать).
 	for _, b := range toRemove {
@@ -560,6 +586,18 @@ func (a *agentState) addPeer(sid string) error {
 			_ = p.Close()
 			_ = decoder.Close()
 			return fmt.Errorf("attach outgoing: %w", err)
+		}
+		// sendrecv: nctalk-call сам инициирует offer (минимальный glare-обход,
+		// Task 2.6 — полноценный perfect-negotiation pending). Браузер шлёт
+		// offer по своей perfect-negotiation логике (по сравнению sessionId) и
+		// может не прислать → nctalk-call ждёт зря → PC state только closed,
+		// audio-pipe не встаёт (spike-gate 2026-07-20: sendrecv parseEnvelopes
+		// только usersInRoom, без offer). В recvonly (audioTrack==nil) НЕ
+		// offerим — там браузер сам offer'ит по PN-логике.
+		if err := p.CreateOffer(); err != nil {
+			_ = p.Close()
+			_ = decoder.Close()
+			return fmt.Errorf("create offer: %w", err)
 		}
 	}
 

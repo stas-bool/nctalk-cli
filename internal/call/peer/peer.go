@@ -20,9 +20,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 
+	"github.com/pion/interceptor"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 	"github.com/stas/nctalk/internal/call/media"
 	"github.com/stas/nctalk/internal/call/signaling"
@@ -98,6 +102,14 @@ type Peer struct {
 	closeOnce sync.Once
 	closed    chan struct{}
 	closeErr  error
+
+	// sendCounter — DEBUG-instrumentation (spike-gate 2026-07-20): interceptor,
+	// считающий отправленные pion'ом RTP-пакеты. Отвечает на гипотезу (a)
+	// «pion RTPSender не отправляет RTP»: BindLocalStream-хук вызывается на
+	// каждый уходящий пакет. packets=0 при работающем encodeLoop → pion НЕ
+	// вызывает SendRTP → проблема в RTPSender/transceiver-binding/SRTP.
+	// УБРАТЬ вместе с остальными debug-логами (next step #2 в state-файле).
+	sendCounter *sendCounterInterceptor
 }
 
 // New создаёт PeerConnection с указанной конфигурацией ICE-серверов и
@@ -106,7 +118,32 @@ type Peer struct {
 // только если pion не смог создать PC (повреждён ICEServer, системный лимит и
 // т.п.) — прикладной код должен трактовать это как фатальное.
 func New(cfg Config) (*Peer, error) {
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{
+	// Audio-only MediaEngine: регистрируем ТОЛЬКО Opus. Без video-codec'ов
+	// pion отвечает на m=video в offer'е браузера port 0 (отклоняет) — nctalk-call
+	// строго audio-only (спека §6). Раньше default-API pion'а согласовывал
+	// m=video (VP8/H264/...) с Chrome → answer содержал video m-line
+	// sendonly/sendrecv БЕЗ реального sender → Chrome не стартовал media,
+	// OnTrack не срабатывал, recording.pcm пуст (spike-gate 2026-07-20).
+	m := &webrtc.MediaEngine{}
+	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:    webrtc.MimeTypeOpus,
+			ClockRate:   48000,
+			Channels:    2,
+			SDPFmtpLine: "minptime=10;useinbandfec=1",
+		},
+		PayloadType: 111,
+	}, webrtc.RTPCodecTypeAudio); err != nil {
+		return nil, fmt.Errorf("peer: RegisterCodec(opus): %w", err)
+	}
+	// DEBUG-instrumentation (spike-gate 2026-07-20): interceptor-счётчик
+	// отправленных RTP-пакетов. packets>0 при encodeLoop → pion SendRPT
+	// вызывается (гипотеза (a) исключена). УБРАТЬ с остальными debug-логами.
+	counter := &sendCounterInterceptor{}
+	ir := &interceptor.Registry{}
+	ir.Add(&counterFactory{c: counter})
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(m), webrtc.WithInterceptorRegistry(ir))
+	pc, err := api.NewPeerConnection(webrtc.Configuration{
 		ICEServers: cfg.ICEServers,
 	})
 	if err != nil {
@@ -114,10 +151,11 @@ func New(cfg Config) (*Peer, error) {
 	}
 
 	p := &Peer{
-		pc:       pc,
-		outCh:    make(chan signaling.Message, 64),
-		failedCh: make(chan error, 1),
-		closed:   make(chan struct{}),
+		pc:          pc,
+		outCh:       make(chan signaling.Message, 64),
+		failedCh:    make(chan error, 1),
+		closed:      make(chan struct{}),
+		sendCounter: counter,
 	}
 
 	// Локальные ICE-candidates → outCh как signaling.Message{Type:"candidate"}.
@@ -126,14 +164,24 @@ func New(cfg Config) (*Peer, error) {
 	// тестов не критичен).
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c == nil {
+			log.Printf("DEBUG peer: ICE gathering DONE (end-of-candidates)")
 			return
 		}
-		// c.ToJSON() возвращает ICECandidateInit с уже готовыми *string/*uint16
-		// и json-тегами lowercase — это валидный Spreed-формат (см. фикстуру
-		// testdata/signaling/candidate.json: {"candidate":..,"sdpMLineIndex":..,
-		// "sdpMid":..}). Marshal не падает даже на невалидном кандидате (ToJSON
-		// проглатывает ошибку ToICE, возвращает Candidate="").
-		payload, err := json.Marshal(c.ToJSON())
+		log.Printf("DEBUG peer: LOCAL candidate typ=%s addr=%s port=%d",
+			c.Typ, c.Address, c.Port)
+		// c.ToJSON() возвращает плоский pion ICECandidateInit с *string/*uint16
+		// и json-тегами lowercase. Spreed wire-format — ВЛОЖЕННЫЙ: payload.candidate
+		// обязан быть ОБЪЕКТОМ {candidate,sdpMLineIndex,sdpMid} (не строкой), иначе
+		// удалённый talk-main.js addIceCandidate(a.payload.candidate) падает с
+		// TypeError ×N → peer-pipeline не достраивается → нет audio-sink → нет
+		// звука (баг #6, spike-gate 2026-07-20). Оборачиваем плоский pion-формат
+		// через signaling.WrapCandidatePayload (wire-format живёт в signaling,
+		// симметрично входящему icePayload; см. фикстуру candidate.json).
+		initJSON, err := json.Marshal(c.ToJSON())
+		if err != nil {
+			return
+		}
+		payload, err := signaling.WrapCandidatePayload(initJSON)
 		if err != nil {
 			return
 		}
@@ -148,8 +196,25 @@ func New(cfg Config) (*Peer, error) {
 	// (наш собственный Close либо удалённый side graceful shutdown); клиент
 	// узнаёт о завершении через Done().
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		log.Printf("DEBUG peer: PC state=%s", state)
 		if state == webrtc.PeerConnectionStateFailed {
 			p.signalFailure(errors.New("peer: PeerConnectionStateFailed (ICE/DTLS)"))
+		}
+	})
+
+	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		log.Printf("DEBUG peer: ICE-conn state=%s", state)
+		if state == webrtc.ICEConnectionStateConnected {
+			senders := p.pc.GetSenders()
+			log.Printf("DEBUG peer: senders=%d", len(senders))
+			for i, s := range senders {
+				t := s.Track()
+				tn := "<nil>"
+				if t != nil {
+					tn = t.ID()
+				}
+				log.Printf("DEBUG peer: sender[%d] track=%s", i, tn)
+			}
 		}
 	})
 
@@ -157,8 +222,34 @@ func New(cfg Config) (*Peer, error) {
 	// при появлении remote track. Запускаем decodeLoop, который читает
 	// RTP-пакеты и пишёт Opus-payload в зарегистрированный sink.
 	pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+		log.Printf("DEBUG peer: OnTrack id=%s", track.ID())
 		p.handleIncomingTrack(track)
 	})
+
+	// DEBUG: периодический лог счётчика отправленных RTP (1с) + финальный
+	// снимок при Close. Показывает, уходит ли RTP при работающем encodeLoop.
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		var lastPackets, lastBytes uint64
+		for {
+			select {
+			case <-ticker.C:
+				pkts := counter.packets.Load()
+				byts := counter.bytes.Load()
+				// Безусловный лог (даже при 0) — различает «интерсептор не привязан»
+				// от «привязан, но pion не отправляет».
+				log.Printf("DEBUG peer: RTP sent packets=%d (+%d) bytes=%d (+%d)",
+					pkts, pkts-lastPackets, byts, byts-lastBytes)
+				lastPackets = pkts
+				lastBytes = byts
+			case <-p.closed:
+				log.Printf("DEBUG peer: RTP sent FINAL packets=%d bytes=%d",
+					counter.packets.Load(), counter.bytes.Load())
+				return
+			}
+		}
+	}()
 
 	return p, nil
 }
@@ -183,6 +274,7 @@ func (p *Peer) HandleEvent(ev signaling.Event) error {
 		}); err != nil {
 			return fmt.Errorf("peer: SetRemoteDescription(offer): %w", err)
 		}
+		log.Printf("DEBUG OFFER (remote) SDP:\n%s", ev.SDP)
 		p.remoteDescr.Store(true)
 		p.drainPendingICE()
 
@@ -190,6 +282,7 @@ func (p *Peer) HandleEvent(ev signaling.Event) error {
 		if err != nil {
 			return fmt.Errorf("peer: CreateAnswer: %w", err)
 		}
+		log.Printf("DEBUG ANSWER (local) SDP:\n%s", answer.SDP)
 		if err := p.pc.SetLocalDescription(answer); err != nil {
 			return fmt.Errorf("peer: SetLocalDescription(answer): %w", err)
 		}
@@ -203,6 +296,7 @@ func (p *Peer) HandleEvent(ev signaling.Event) error {
 		return nil
 
 	case signaling.EvAnswer:
+		log.Printf("DEBUG ANSWER (remote) SDP:\n%s", ev.SDP)
 		if err := p.pc.SetRemoteDescription(webrtc.SessionDescription{
 			Type: webrtc.SDPTypeAnswer, SDP: ev.SDP,
 		}); err != nil {
@@ -213,6 +307,7 @@ func (p *Peer) HandleEvent(ev signaling.Event) error {
 		return nil
 
 	case signaling.EvCandidate:
+		log.Printf("DEBUG peer: REMOTE candidate: %s", ev.Candidate.Candidate)
 		init, err := toPionICEInit(ev.Candidate)
 		if err != nil {
 			return fmt.Errorf("peer: ICECandidateInit: %w", err)
@@ -295,6 +390,7 @@ func (p *Peer) CreateOffer() error {
 	if err != nil {
 		return fmt.Errorf("peer: CreateOffer: %w", err)
 	}
+	log.Printf("DEBUG OFFER (local CreateOffer) SDP:\n%s", offer.SDP)
 	if err := p.pc.SetLocalDescription(offer); err != nil {
 		return fmt.Errorf("peer: SetLocalDescription(offer): %w", err)
 	}
@@ -396,4 +492,36 @@ func toPionICEInit(c signaling.ICECandidate) (webrtc.ICECandidateInit, error) {
 type sdpOutPayload struct {
 	Type string `json:"type"` // "offer" или "answer"
 	SDP  string `json:"sdp"`
+}
+
+// ---- DEBUG: interceptor-счётчик отправленных RTP (spike-gate 2026-07-20) ----
+//
+// sendCounterInterceptor встраивает NoOp и переопределяет только BindLocalStream:
+// pion вызывает writer.Write на каждый уходящий RTP-пакет. Счётчики показывают,
+// вызывает ли pion SendRTP при track.WriteSample (encodeLoop). УБРАТЬ с debug-логами.
+
+type sendCounterInterceptor struct {
+	interceptor.NoOp
+	packets atomic.Uint64
+	bytes   atomic.Uint64
+}
+
+func (c *sendCounterInterceptor) BindLocalStream(info *interceptor.StreamInfo, writer interceptor.RTPWriter) interceptor.RTPWriter {
+	log.Printf("DEBUG peer: BindLocalStream called ssrc=%d", info.SSRC)
+	return interceptor.RTPWriterFunc(func(header *rtp.Header, payload []byte, attrs interceptor.Attributes) (int, error) {
+		n, err := writer.Write(header, payload, attrs)
+		if err == nil && n > 0 {
+			c.packets.Add(1)
+			c.bytes.Add(uint64(len(payload)))
+		}
+		return n, err
+	})
+}
+
+// counterFactory реализует interceptor.Factory, возвращая тот же экземпляр
+// счётчика — pion вызовет на нём BindLocalStream при создании outgoing track.
+type counterFactory struct{ c *sendCounterInterceptor }
+
+func (f *counterFactory) NewInterceptor(_ string) (interceptor.Interceptor, error) {
+	return f.c, nil
 }
