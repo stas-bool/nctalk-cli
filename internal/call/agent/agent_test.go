@@ -18,7 +18,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net/http"
+	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -29,13 +33,14 @@ import (
 	"github.com/stas/nctalk/internal/call/peer"
 	"github.com/stas/nctalk/internal/call/signaling"
 	"github.com/stas/nctalk/internal/exit"
+	"github.com/stas/nctalk/internal/transport"
 )
 
 // ---- Compile-time гарантии: моки удовлетворяют интерфейсам agent'а ----
 
 var (
-	_ peerConn    = (*fakePeer)(nil)
-	_ sigClient   = (*fakeSignaling)(nil)
+	_ peerConn          = (*fakePeer)(nil)
+	_ sigClient         = (*fakeSignaling)(nil)
 	_ media.AudioSource = (*fakeEncoder)(nil)
 	_ media.AudioSink   = (*fakeDecoder)(nil)
 )
@@ -50,7 +55,7 @@ type fakePeer struct {
 	failed   chan error             // тест шлёт сюда → watchPeer срабатывает
 	done     chan struct{}          // закрывается в Close
 
-	handleEvMu sync.Mutex
+	handleEvMu   sync.Mutex
 	handleEvents []signaling.Event // запись всех HandleEvent-вызовов
 
 	attachedTrack *webrtc.TrackLocalStaticSample // review замечание 1: track вместо src
@@ -58,7 +63,7 @@ type fakePeer struct {
 
 	// onConnected — callback, зарегистрированный agent'ом через OnConnected.
 	// fireConnected() вызывает его, имитируя pion OnICEConnectionStateChange(connected).
-	onConnMu  sync.Mutex
+	onConnMu    sync.Mutex
 	onConnected func()
 
 	closeMu  sync.Mutex
@@ -161,12 +166,12 @@ func (p *fakePeer) isClosed() bool {
 type fakeSignaling struct {
 	mu sync.Mutex
 
-	joinCount   int
-	joinFlags   int
-	joinErr     error // если задано — возвращается из JoinCall
-	leaveCount  int
-	sentMsgs    []signaling.Message
-	leaveErr    error
+	joinCount  int
+	joinFlags  int
+	joinErr    error // если задано — возвращается из JoinCall
+	leaveCount int
+	sentMsgs   []signaling.Message
+	leaveErr   error
 
 	// pollLoop — инъекция поведения PollLoop. nil → блок на ctx.Done.
 	pollLoop func(ctx context.Context, ch chan<- signaling.Event) error
@@ -245,7 +250,7 @@ func (e *fakeEncoder) Close() error {
 func (e *fakeEncoder) closeCount() int32 { return atomic.LoadInt32(&e.closeCnt) }
 
 // fakeDecoder пишет payload напрямую в pcmW (как будто это уже PCM s16le).
-//pcmW — это *pcmMixerWriter из agent'а; тест может использовать эту связь,
+// pcmW — это *pcmMixerWriter из agent'а; тест может использовать эту связь,
 // чтобы прогнать PCM-кадры через Mixer.
 type fakeDecoder struct {
 	pcmW     io.Writer
@@ -270,11 +275,11 @@ func (d *fakeDecoder) closeCount() int32 { return atomic.LoadInt32(&d.closeCnt) 
 // makeConfig собирает Config с мок-фабриками, считающими создания через атомики.
 // Возвращает cfg + указатели на каунтеры и capture-каналы для синхронизации.
 type testCounters struct {
-	peerCreated     int32
-	decoderCreated  int32
-	encoderCreated  int32
-	peerCh          chan *fakePeer     // каждый созданный fakePeer падает сюда
-	decoderCh       chan *fakeDecoder  // каждый созданный fakeDecoder — сюда
+	peerCreated    int32
+	decoderCreated int32
+	encoderCreated int32
+	peerCh         chan *fakePeer    // каждый созданный fakePeer падает сюда
+	decoderCh      chan *fakeDecoder // каждый созданный fakeDecoder — сюда
 }
 
 func newTestCounters() *testCounters {
@@ -332,7 +337,10 @@ func pollSendThenBlock(events []signaling.Event) func(ctx context.Context, ch ch
 }
 
 // users — helper: собирает []signaling.User из пар (sessionId, inCall).
-func users(pairs ...struct{ sid string; flags int }) []signaling.User {
+func users(pairs ...struct {
+	sid   string
+	flags int
+}) []signaling.User {
 	out := make([]signaling.User, 0, len(pairs))
 	for _, p := range pairs {
 		out = append(out, signaling.User{SessionId: p.sid, InCall: p.flags})
@@ -361,7 +369,10 @@ func TestRun_JoinAndLeave(t *testing.T) {
 	fs := &fakeSignaling{
 		pollLoop: pollSendThenBlock([]signaling.Event{
 			{Kind: signaling.EvUsersUpdated, Users: users(
-				struct{ sid string; flags int }{"peer-A", 3},
+				struct {
+					sid   string
+					flags int
+				}{"peer-A", 3},
 			)},
 		}),
 	}
@@ -809,3 +820,165 @@ func TestRun_SendsUnmuteOnICEConnected(t *testing.T) {
 	}
 }
 
+// ---- Task 3.1: exit-коды по спеке §10 ----
+//
+// JoinCall (Call API v4) возвращает *transport.OCSError{Code} (Code =
+// ocs.meta.statusCode). Спека §10 маппинг: 404 (комната) → exit 2; 412 (lobby)
+// → exit 1 с пояснением; 403/прочее → exit 1. agent.Run маппит через
+// mapJoinCallErr (раньше JoinCall-ошибки шли через exit.FromClientErr — только
+// 404→2 различалось; 412 падал в generic 1 БЕЗ пояснения про lobby).
+//
+// ffmpeg-диагностика (спека §10: «ffmpeg/sox отсутствуют/упали → exit 1 с
+// указанием backend'а и как установить; не падать молча»): mapCodecErr enrich'ит
+// ошибку missing-binary инструкцией по установке.
+
+// runJoinCallErr — общий каркас для JoinCall-exit-тестов: joinErr инъектируется в
+// fakeSignaling, recvonly (InFlags=1) — encoder не запускается, Run выходит сразу
+// из JoinCall (до encoder/track/peer). Возвращает итоговую ошибку Run.
+func runJoinCallErr(t *testing.T, joinErr error) error {
+	t.Helper()
+	fs := &fakeSignaling{joinErr: joinErr}
+	counters := newTestCounters()
+	cfg := counters.buildConfig(fs, 1, io.Discard) // recvonly → encoder не нужен
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	return Run(ctx, cfg)
+}
+
+// wantExitError проверяет, что err — exit.ExitError с нужным Code (и nil-safe
+// диагностикой на провал).
+func wantExitError(t *testing.T, err error, wantCode int) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("Run err = nil, want exit.ExitError{Code:%d}", wantCode)
+	}
+	var ee exit.ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("Run err тип = %T (%v), want exit.ExitError", err, err)
+	}
+	if ee.Code != wantCode {
+		t.Errorf("ExitError.Code = %d, want %d", ee.Code, wantCode)
+	}
+}
+
+// TestRun_JoinCall_404_RoomNotFound_Exit2 — спека §10: Call API 404 → exit 2.
+func TestRun_JoinCall_404_RoomNotFound_Exit2(t *testing.T) {
+	err := runJoinCallErr(t, &transport.OCSError{Code: http.StatusNotFound, Message: "Room not found"})
+	wantExitError(t, err, exit.ExitNotFound)
+}
+
+// TestRun_JoinCall_403_Forbidden_Exit1 — спека §10: Call API 403 (read-only /
+// нет прав) → exit 1 с сообщением сервера.
+func TestRun_JoinCall_403_Forbidden_Exit1(t *testing.T) {
+	err := runJoinCallErr(t, &transport.OCSError{Code: http.StatusForbidden, Message: "Read-only call"})
+	wantExitError(t, err, exit.ExitGeneric)
+}
+
+// TestRun_JoinCall_412_Lobby_Exit1WithHint — спека §10: Call API 412 (lobby) →
+// exit 1 с пояснением «lobby». Без mapJoinCallErr текст = «client: ...» без слова
+// lobby (regression guard).
+func TestRun_JoinCall_412_Lobby_Exit1WithHint(t *testing.T) {
+	err := runJoinCallErr(t, &transport.OCSError{Code: http.StatusPreconditionFailed, Message: "Precondition failed"})
+	wantExitError(t, err, exit.ExitGeneric)
+	if !strings.Contains(err.Error(), "lobby") {
+		t.Errorf("err текст = %q, должен содержать пояснение про lobby (спека §10)", err.Error())
+	}
+}
+
+// TestRun_EncoderMissing_FFmpegHint — спека §10: ffmpeg отсутствует → exit 1 с
+// указанием backend'а и как установить. NewEncoder инъектирует ошибку missing-
+// binary (формат media.NewFFmpegEncoder: fmt.Errorf("media: запуск ffmpeg-encode:
+// %w", &exec.Error{Name:"ffmpeg", Err: exec.ErrNotFound})).
+func TestRun_EncoderMissing_FFmpegHint(t *testing.T) {
+	fs := &fakeSignaling{} // JoinCall проходит (joinErr=nil)
+	counters := newTestCounters()
+	cfg := counters.buildConfig(fs, 3, io.Discard) // InFlags=3 → sendrecv, encoder запускается
+	cfg.NewEncoder = func(io.Reader) (media.AudioSource, error) {
+		return nil, fmt.Errorf("media: запуск ffmpeg-encode: %w",
+			&exec.Error{Name: "ffmpeg", Err: exec.ErrNotFound})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	err := Run(ctx, cfg)
+	wantExitError(t, err, exit.ExitGeneric)
+
+	txt := err.Error()
+	if !strings.Contains(txt, "ffmpeg") {
+		t.Errorf("err текст = %q, должен упоминать ffmpeg-backend", txt)
+	}
+	if !strings.Contains(txt, "установите") {
+		t.Errorf("err текст = %q, должен содержать инструкцию по установке (спека §10)", txt)
+	}
+	// leaveBestEffort вызывает LeaveCall после encoder-fail (cleanup).
+	if fs.leaveCount != 1 {
+		t.Errorf("LeaveCall count = %d, want 1 (best-effort cleanup после encoder-fail)", fs.leaveCount)
+	}
+}
+
+// TestRun_MultiPeerFailure_Progressive — спека §10: mesh переживает отказ
+// отдельных peer'ов. N=3 пира, поочерёдно Failed() двух (N=3→2→1) — оставшийся
+// активен, Run НЕ выходит до ctx.Cancel. Расширяет TestRun_SinglePeerFailure
+// (N=2→1) сценарием прогрессивного отвала в большем mesh (Task 3.1 Step 2).
+func TestRun_MultiPeerFailure_Progressive(t *testing.T) {
+	fs := &fakeSignaling{
+		pollLoop: pollSendThenBlock([]signaling.Event{
+			{Kind: signaling.EvUsersUpdated, Users: []signaling.User{
+				{SessionId: "peer-A", InCall: 3},
+				{SessionId: "peer-B", InCall: 3},
+				{SessionId: "peer-C", InCall: 3},
+			}},
+		}),
+	}
+	counters := newTestCounters()
+	cfg := counters.buildConfig(fs, 1, io.Discard)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- Run(ctx, cfg) }()
+
+	// Ждём создания 3 пиров и их decoders.
+	pA := waitRecvTimeout(t, counters.peerCh, 500*time.Millisecond)
+	pB := waitRecvTimeout(t, counters.peerCh, 500*time.Millisecond)
+	pC := waitRecvTimeout(t, counters.peerCh, 500*time.Millisecond)
+	dA := waitRecvTimeout(t, counters.decoderCh, 500*time.Millisecond)
+	dB := waitRecvTimeout(t, counters.decoderCh, 500*time.Millisecond)
+	dC := waitRecvTimeout(t, counters.decoderCh, 500*time.Millisecond)
+
+	// Шаг 1: роняем peer-A → mesh остаётся {B, C}.
+	pA.failed <- errors.New("ICE failed A")
+	time.Sleep(100 * time.Millisecond)
+	if !pA.isClosed() || dA.closeCount() == 0 {
+		t.Error("peer-A / decoder-A не закрыты после Failed()")
+	}
+	if pB.isClosed() || pC.isClosed() {
+		t.Error("peer-B/C закрыты преждевременно после падения A")
+	}
+	select {
+	case <-runDone:
+		t.Fatal("Run завершился после N=3→2 — должен продолжать")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Шаг 2: роняем peer-B → mesh остаётся {C}.
+	pB.failed <- errors.New("ICE failed B")
+	time.Sleep(100 * time.Millisecond)
+	if !pB.isClosed() || dB.closeCount() == 0 {
+		t.Error("peer-B / decoder-B не закрыты после Failed()")
+	}
+	if pC.isClosed() || dC.closeCount() != 0 {
+		t.Error("peer-C / decoder-C затронут после падения B — должен оставаться активным")
+	}
+	select {
+	case <-runDone:
+		t.Fatal("Run завершился после N=3→2→1 — должен продолжать (1 peer жив)")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Завершаем — Run возвращает nil (штатный ctx.Cancel).
+	cancel()
+	if err := <-runDone; err != nil {
+		t.Fatalf("Run err = %v, want nil", err)
+	}
+}
