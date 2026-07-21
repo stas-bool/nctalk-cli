@@ -522,16 +522,18 @@ func (a *agentState) reconcile(users []signaling.User) {
 // Порядок (спека §7):
 //  1. Выделить idx (проверка maxPeers).
 //  2. Создать decoder с pcmW = &pcmMixerWriter{idx, mixer}.
-//  3. Создать peer через NewPeer(peer.Config{ICEServers, IsPolite:false}).
-//     IsPolite=false: glare-handling — Task 2.6, пока не реализован.
+//  3. Создать peer через NewPeer(peer.Config{ICEServers, IsPolite}). IsPolite —
+//     роль perfect-negotiation по сравнению sessionId (Task 2.6, спека §7):
+//     больший = polite, меньший = impolite; fallback impolite если ownSid неизвестен.
 //  4. OnIncomingAudio(decoder) — ДО HandleEvent (pion OnTrack асинхронен).
 //  5. AttachOutgoingTrack(a.audioTrack) если sendrecv — ДО SDP (m-line в SDP).
 //  6. Зарегистрировать bundle в map (ДО запуска горутин — watcher должен видеть
 //     sid в map, иначе removePeer станет no-op при мгновенном Failed).
 //  7. Запустить watcher и send-горутину.
 //
-// CreateOffer НЕ вызываем — инициация SDP-exchange останется на Task 2.6
-// (perfect-negotiation: один из пиров impolite, другой polite).
+// CreateOffer вызывается для sendrecv (audioTrack != nil) — nctalk инициирует
+// SDP-exchange. При glare (browser тоже offer'ит) разрешается в peer.HandleEvent
+// + negotiation.go (impolite игнорирует, polite откатывает через recreate).
 func (a *agentState) addPeer(sid string) error {
 	a.mu.Lock()
 	// Slot allocation (review замечание 9): сначала переиспользуем освободившиеся
@@ -563,10 +565,16 @@ func (a *agentState) addPeer(sid string) error {
 		return fmt.Errorf("decoder: %w", err)
 	}
 
-	// 2. Peer (pion PeerConnection).
+	// 2. Peer (pion PeerConnection). Роль perfect-negotiation (Task 2.6, спека §7):
+	// детерминированно по сравнению sessionId — больший = polite, меньший =
+	// impolite (оба пира приходят к одному распределению без обмена). Если
+	// ownSessionId ещё неизвестен — fallback impolite: nctalk offer'ит первым,
+	// browser (полноценный WebRTC) будет polite и сам rollback'нет при glare.
+	ownSid := a.ownSessionIdLocked()
+	isPolite := ownSid != "" && ownSid > sid
 	p, err := a.cfg.NewPeer(peer.Config{
 		ICEServers: a.cfg.ICEServers,
-		IsPolite:   false, // Task 2.6 — glare пока не реализован
+		IsPolite:   isPolite,
 	})
 	if err != nil {
 		_ = decoder.Close()
