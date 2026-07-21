@@ -166,13 +166,6 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 		fmt.Fprintln(stderr, "nctalk-call: "+err.Error())
 		return 1
 	}
-	// DEBUG (temporary diagnostic — spike-gate 404): cookies в jar после weblogin.
-	if u, e := url.Parse(cfg.BaseURL); e == nil {
-		fmt.Fprintf(stderr, "DEBUG post-login cookies for %s:\n", u)
-		for _, c := range jar.Cookies(u) {
-			fmt.Fprintf(stderr, "DEBUG   %s len=%d\n", c.Name, len(c.Value))
-		}
-	}
 
 	// 5. Capability (STUN/TURN из signaling-settings). Best-effort: при ошибке
 	//    логируем и продолжаем с пустым списком — pion примет пустой []ICEServer
