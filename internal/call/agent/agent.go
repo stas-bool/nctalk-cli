@@ -33,7 +33,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"sync"
 	"time"
 
@@ -305,18 +304,14 @@ mainLoop:
 			}
 			switch ev.Kind {
 			case signaling.EvUsersUpdated:
-				fmt.Fprintf(cfg.Stderr, "DEBUG ev=UsersUpdated users=%d\n", len(ev.Users))
 				a.reconcile(ev.Users)
 			case signaling.EvOffer, signaling.EvAnswer, signaling.EvCandidate:
-				fmt.Fprintf(cfg.Stderr, "DEBUG ev=%d from=%.12s\n", ev.Kind, ev.From)
-				if b, ok := a.peerBySid(ev.From); ok {
-					_ = b.peer.HandleEvent(ev)
-				} else {
-					fmt.Fprintf(cfg.Stderr, "DEBUG   peer not in map for from=%.12s\n", ev.From)
-				}
 				// Если пира нет в map — событие пришло раньше, чем EvUsersUpdated для
 				// этого sessionId. Скипаем (баг сервера/сети; recoverable следующим
 				// EvUsersUpdated + повторным offer'ом от пира).
+				if b, ok := a.peerBySid(ev.From); ok {
+					_ = b.peer.HandleEvent(ev)
+				}
 			case signaling.EvError:
 				pollErr = ev.Err
 				break mainLoop
@@ -374,7 +369,6 @@ func encodeDoneCh(ch chan error) <-chan error {
 //     done<-err, агент выйдет с этим кодом.
 //   - track.WriteSample ошибка (все PC закрылись) — done<-nil (не фатал).
 func agentEncodeLoop(src media.AudioSource, track *webrtc.TrackLocalStaticSample, done chan<- error) {
-	var count int
 	for {
 		payload, dur, err := src.ReadSample()
 		if err != nil {
@@ -392,10 +386,6 @@ func agentEncodeLoop(src media.AudioSource, track *webrtc.TrackLocalStaticSample
 			// (могут ещё приходить новые пиры), но и кодить впустую нет смысла.
 			done <- nil
 			return
-		}
-		count++
-		if count == 1 || count%50 == 0 {
-			log.Printf("DEBUG encodeLoop: wrote %d samples (dur=%v)", count, dur)
 		}
 		// Real-time pacing. pion WriteSample отправляет RTP немедленно (без
 		// pacing), а ffmpeg encode читает вход быстрее real-time — без sleep весь
@@ -481,13 +471,12 @@ func (a *agentState) reconcile(users []signaling.User) {
 		if u.SessionId == ownSid {
 			continue
 		}
-		// DEBUG (spike-gate 2026-07-20): фильтр WITH_AUDIO ВРЕМЕННО отключён,
-		// чтобы sendrecv-отправитель (A) подключался к recvonly-слушателю (B)
-		// для чистого A→B теста без glare (оба sendrecv дают glare без PN,
-		// Task 2.6). ВЕРНУТЬ фильтр после теста.
-		// if u.InCall&inFlagWithAudio == 0 {
-		// 	continue
-		// }
+		// Подключаемся только к участникам с битом WITH_AUDIO в InCall — у кого
+		// есть исходящее audio. К recvonly-слушателям (InCall без WITH_AUDIO) PC
+		// не создаём. Спека §6.
+		if u.InCall&inFlagWithAudio == 0 {
+			continue
+		}
 		wanted[u.SessionId] = struct{}{}
 	}
 
@@ -508,9 +497,6 @@ func (a *agentState) reconcile(users []signaling.User) {
 		}
 	}
 	a.mu.Unlock()
-
-	fmt.Fprintf(a.cfg.Stderr, "DEBUG reconcile: wanted=%d toAdd=%d toRemove=%d ownSid=%.12s\n",
-		len(wanted), len(toAdd), len(toRemove), ownSid)
 
 	// Cleanup ушедших (вне лока — Close/decoder.Close могут блокировать).
 	for _, b := range toRemove {
