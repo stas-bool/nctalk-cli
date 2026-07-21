@@ -32,3 +32,11 @@ go.work.sum
 
 # WebRTC-call аудио-артефакты (тестовые PCM/записи звонков)
 *.pcm
+*.wav
+
+# Spike/debug-артефакты: логи прогонов, браузер-наблюдатели playwright-MCP,
+# отвергнутый playwright-через-npm (заменён на playwright MCP extension).
+*.log
+pw-webrtc.mjs
+.playwright-mcp/
+
