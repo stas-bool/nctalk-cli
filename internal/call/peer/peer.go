@@ -110,6 +110,16 @@ type Peer struct {
 	// вызывает SendRTP → проблема в RTPSender/transceiver-binding/SRTP.
 	// УБРАТЬ вместе с остальными debug-логами (next step #2 в state-файле).
 	sendCounter *sendCounterInterceptor
+
+	// onConnected — callback, вызываемый один раз при ICEConnectionStateConnected.
+	// Регистрируется agent'ом (через OnConnected) для отправки signaling unmute —
+	// без него Spreed держит audio-sink muted (spike-gate root cause 2026-07-20).
+	// onConnectedMu защищает onConnected при установке (addPeer) и вызове
+	// (pion callback — другая горутина). onConnectedFired — идемпотентность
+	// (ICE может переходить в connected несколько раз при restart — unmute 1 раз).
+	onConnectedMu    sync.Mutex
+	onConnected      func()
+	onConnectedFired bool
 }
 
 // New создаёт PeerConnection с указанной конфигурацией ICE-серверов и
@@ -215,6 +225,10 @@ func New(cfg Config) (*Peer, error) {
 				}
 				log.Printf("DEBUG peer: sender[%d] track=%s", i, tn)
 			}
+			// ICE connected — дёрнем onConnected-callback (unmute signaling для
+			// Spreed-sink, spike-gate root cause 2026-07-20). Идемпотентно — pion
+			// может повторять connected-state при ICE restart, unmute нужен 1 раз.
+			p.fireOnConnected()
 		}
 	})
 
@@ -400,6 +414,34 @@ func (p *Peer) CreateOffer() error {
 	}
 	p.sendOut(signaling.Message{Type: "offer", Payload: payload})
 	return nil
+}
+
+// OnConnected регистрирует callback, вызываемый один раз при установке ICE
+// соединения (ICEConnectionStateConnected). Вышестоящий слой (agent) использует
+// его для отправки signaling unmute — без него Spreed держит audio-sink muted
+// (spike-gate root cause 2026-07-20). Должен вызываться ДО CreateOffer/HandleEvent
+// (как OnIncomingAudio/AttachOutgoingTrack), чтобы не пропустить первый переход
+// в connected.
+func (p *Peer) OnConnected(fn func()) {
+	p.onConnectedMu.Lock()
+	p.onConnected = fn
+	p.onConnectedMu.Unlock()
+}
+
+// fireOnConnected вызывает зарегистрированный OnConnected-callback один раз
+// (идемпотентно). Вызывается из pion OnICEConnectionStateChange(connected).
+// Callback выполняется ВНЕ мьютекса — он может блокировать (signaling.Send), а
+// лок нужен только для чтения/установки onConnected/onConnectedFired.
+func (p *Peer) fireOnConnected() {
+	p.onConnectedMu.Lock()
+	if p.onConnectedFired || p.onConnected == nil {
+		p.onConnectedMu.Unlock()
+		return
+	}
+	fn := p.onConnected
+	p.onConnectedFired = true
+	p.onConnectedMu.Unlock()
+	fn()
 }
 
 // Close — закрывает PeerConnection. Идемпотентный (sync.Once), не паникует,
