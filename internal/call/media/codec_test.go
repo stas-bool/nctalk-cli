@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"os/exec"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -312,5 +314,70 @@ func TestFFmpegEncoderDecoder_Minimal(t *testing.T) {
 	}
 	if out.Len() == 0 {
 		t.Error("PCM-вывод пуст — round-trip не сработал даже на тишине")
+	}
+}
+
+// ---- Task 3.4: orphan-protection (Plan 3.4 DoD) ----
+//
+// codec.go: cmd.Cancel = Process.Kill() + cmd.WaitDelay = 5с + Close дожидается
+// cmd.Wait — гарантия, что ffmpeg-субпроцесс убит при ctx.Cancel (Ctrl-C/shutdown),
+// без orphan-процессов. Тест запускает ffmpeg, закрывает, проверяет signal(pid, 0)
+// (nil-err = жив, ESRCH = мёртв и reaped после cmd.Wait).
+
+// procAlive возвращает true, если процесс pid ещё жив. Использует signal 0 (probe
+// без реального сигнала): nil-err = жив, ESRCH/EPERM = мёртв/недоступен.
+func procAlive(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+// TestFFmpegEncoder_CloseNoOrphan — после Close ffmpeg-encoder мёртв (Plan 3.4).
+// Encoder-Close = cancel (Kill) + Wait — детерминированный kill-путь.
+func TestFFmpegEncoder_CloseNoOrphan(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg не установлен")
+	}
+	pcm := genSineS16LE(440, 100*time.Millisecond, PCMSampleRate)
+	enc, err := NewFFmpegEncoder(bytes.NewReader(pcm))
+	if err != nil {
+		t.Fatalf("NewFFmpegEncoder: %v", err)
+	}
+	pid := enc.cmd.Process.Pid // white-box: package media
+	// waitErr на cancel = "signal: killed" — ожидаемо (Kill), НЕ ошибка orphan.
+	_ = enc.Close()
+	if procAlive(pid) {
+		t.Errorf("ffmpeg pid=%d жив после Close — orphan не убит (Plan 3.4)", pid)
+	}
+}
+
+// TestFFmpegDecoder_CloseNoOrphan — после Close ffmpeg-decoder мёртв (Plan 3.4).
+// Decoder-Close = graceful-first (Flush + stdin-close → ffmpeg финиширует), при
+// ошибке fallback cancel (Kill). Graceful на пустом вводе может задержаться —
+// оборачиваем в timeout, чтобы тест не завис при регрессии orphan-kill.
+func TestFFmpegDecoder_CloseNoOrphan(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg не установлен")
+	}
+	dec, err := NewFFmpegDecoder(io.Discard)
+	if err != nil {
+		t.Fatalf("NewFFmpegDecoder: %v", err)
+	}
+	pid := dec.cmd.Process.Pid
+
+	done := make(chan struct{})
+	go func() {
+		_ = dec.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("decoder.Close не завершился за 5с — graceful-path завис (orphan?)")
+	}
+	if procAlive(pid) {
+		t.Errorf("ffmpeg pid=%d жив после Close — orphan не убит (Plan 3.4)", pid)
 	}
 }
