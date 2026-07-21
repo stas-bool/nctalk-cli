@@ -33,6 +33,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"os/exec"
 	"sync"
 	"time"
 
@@ -42,6 +44,7 @@ import (
 	"github.com/stas/nctalk/internal/call/peer"
 	"github.com/stas/nctalk/internal/call/signaling"
 	"github.com/stas/nctalk/internal/exit"
+	"github.com/stas/nctalk/internal/transport"
 )
 
 // ---- DI: маленькие интерфейсы в package agent ----
@@ -134,21 +137,21 @@ const (
 // Config для Run. Все поля читаются только в момент вызова Run (immutable в
 // течение звонка) — мьютексов не требует.
 type Config struct {
-	Signaling    sigClient        // уже готовый (вне agent: сборка из transport.Auth)
-	Token        string           // room token (уже ResolveRoom'ом)
-	InFlags      int              // 1=recvonly, 3=sendrecv (спека §6)
-	OwnSessionId string           // собственный sessionId — статический фильтр (если известен заранее)
-	OwnUserId    string           // NEXTCLOUD_LOGIN: для извлечения ownSessionId из usersInRoom (review замечание 3)
+	Signaling    sigClient          // уже готовый (вне agent: сборка из transport.Auth)
+	Token        string             // room token (уже ResolveRoom'ом)
+	InFlags      int                // 1=recvonly, 3=sendrecv (спека §6)
+	OwnSessionId string             // собственный sessionId — статический фильтр (если известен заранее)
+	OwnUserId    string             // NEXTCLOUD_LOGIN: для извлечения ownSessionId из usersInRoom (review замечание 3)
 	ICEServers   []webrtc.ICEServer // из capability (Task 2.10)
-	Stdin        io.Reader        // PCM на отправку (nil если InFlags==1)
-	Stdout       io.Writer        // PCM приём: Mixer → stdout
-	Stderr       io.Writer        // статус/диагностика (НЕ содержит кредов)
+	Stdin        io.Reader          // PCM на отправку (nil если InFlags==1)
+	Stdout       io.Writer          // PCM приём: Mixer → stdout
+	Stderr       io.Writer          // статус/диагностика (НЕ содержит кредов)
 
 	// Injection points для тестов. nil → production-обёртки над peer.New /
 	// media.NewFFmpeg*. Тесты кладут свои мок-фабрики.
-	NewPeer     peerFactory
-	NewEncoder  encoderFactory
-	NewDecoder  decoderFactory
+	NewPeer    peerFactory
+	NewEncoder encoderFactory
+	NewDecoder decoderFactory
 	// MixerTick — канал тиков дренирования Mixer'а. nil → внутренний
 	// time.NewTicker(20ms) (стоп в defer Run). Тесты передают управляемый
 	// канал, чтобы детерминированно прогонять кадры через Mixer.
@@ -205,10 +208,11 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 
-	// Step 1: JoinCall. При ошибке — маппинг через exit.FromClientErr
-	// (*transport.OCSError{Code:404} → ExitError{Code:2}, остальное → Code:1).
+	// Step 1: JoinCall. При ошибке — маппинг через mapJoinCallErr (спека §10):
+	// 404 (комната) → exit 2; 412 (lobby) → exit 1 с пояснением; 403/прочее → exit 1
+	// (404 различается в exit.FromClientErr, lobby-пояснение добавляем здесь).
 	if err := cfg.Signaling.JoinCall(ctx, cfg.Token, cfg.InFlags); err != nil {
-		return exit.FromClientErr(err)
+		return mapJoinCallErr(err)
 	}
 
 	// Step 2: encoder + общий audioTrack (если sendrecv). encodeLoop ОДИН на
@@ -223,7 +227,7 @@ func Run(ctx context.Context, cfg Config) error {
 		enc, err := cfg.NewEncoder(cfg.Stdin)
 		if err != nil {
 			leaveBestEffort(cfg.Signaling, cfg.Token)
-			return fmt.Errorf("agent: encoder: %w", err)
+			return mapCodecErr("encoder", err)
 		}
 		encoder = enc
 		track, err := webrtc.NewTrackLocalStaticSample(
@@ -273,13 +277,13 @@ func Run(ctx context.Context, cfg Config) error {
 
 	// agentState — разделяемое состояние main loop'а и per-peer горутин.
 	a := &agentState{
-		cfg:           cfg,
-		ctx:           ctx,
-		mixer:         mixer,
-		encoder:       encoder,
-		audioTrack:    audioTrack,
-		peers:         make(map[string]*peerBundle),
-		ownSessionId:  cfg.OwnSessionId, // может быть пустым — извлечём из EvUsersUpdated
+		cfg:          cfg,
+		ctx:          ctx,
+		mixer:        mixer,
+		encoder:      encoder,
+		audioTrack:   audioTrack,
+		peers:        make(map[string]*peerBundle),
+		ownSessionId: cfg.OwnSessionId, // может быть пустым — извлечём из EvUsersUpdated
 	}
 
 	// Step 5-8: main select.
@@ -562,7 +566,7 @@ func (a *agentState) addPeer(sid string) error {
 	}
 	decoder, err := a.cfg.NewDecoder(pcmW)
 	if err != nil {
-		return fmt.Errorf("decoder: %w", err)
+		return mapCodecErr("decoder", err)
 	}
 
 	// 2. Peer (pion PeerConnection). Роль perfect-negotiation (Task 2.6, спека §7):
@@ -885,4 +889,52 @@ func leaveBestEffort(sig sigClient, token string) {
 	ctx, cancel := context.WithTimeout(context.Background(), leaveCallTimeout)
 	defer cancel()
 	_ = sig.LeaveCall(ctx, token)
+}
+
+// ---- exit-маппинг по спеке §10 ----
+
+// mapJoinCallErr маппит ошибку JoinCall (Call API v4) в exit-код (спека §10):
+//
+//   - nil → nil;
+//   - *transport.OCSError{Code:412} (lobby — комната ожидает допуска модератором)
+//     → exit 1 с человекочитаемым пояснением «lobby» (без него текст сервера
+//     «client: Precondition failed» ничего не объясняет пользователю);
+//   - прочее → exit.FromClientErr: 404 → exit 2 (комната/звонок не найдены),
+//     403/401/5xx/сеть → exit 1.
+//
+// 412 выделен отдельно потому, что exit.FromClientErr различает только 404, а
+// lobby-сценарий требует явной подсказки (спека: «не падать молча»).
+func mapJoinCallErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	var ocsErr *transport.OCSError
+	if errors.As(err, &ocsErr) && ocsErr.Code == http.StatusPreconditionFailed {
+		return exit.Exit(exit.ExitGeneric,
+			fmt.Errorf("комната в режиме lobby — ожидайте допуска модератором: %w", err))
+	}
+	return exit.FromClientErr(err)
+}
+
+// mapCodecErr обогащает ошибку запуска ffmpeg-subprocess (encoder/decoder)
+// человекочитаемой диагностикой (спека §10: «ffmpeg/sox отсутствуют или упали →
+// exit 1 с указанием, какой backend и как установить; не падать молча»).
+//
+// Распознаёт отсутствующий бинарник по errors.Is(err, exec.ErrNotFound) — цепочка
+// media.NewFFmpeg* → fmt.Errorf("media: запуск ffmpeg-…: %w", &exec.Error{Err:
+// exec.ErrNotFound}) unwraps'ся до exec.ErrNotFound. В этом случае добавляет
+// инструкцию по установке backend'а. Прочие ошибки (crash при старте, pipe-fail)
+// проходят с префиксом роли — exit 1 в любом случае (фатал audio-pipe).
+//
+// Для encoder (sendrecv) — фаталит Run. Для decoder (в addPeer) — возвращается
+// в reconcile, который ЛОГИРУЕТ и ПРОДОЛЖАЕТ (single-peer failure); ExitError-
+// обёртка безвредна (reconcile печатает err.Error() через %v).
+func mapCodecErr(role string, err error) error {
+	if errors.Is(err, exec.ErrNotFound) {
+		return exit.Exit(exit.ExitGeneric, fmt.Errorf(
+			"agent: %s: ffmpeg не найден в PATH — аудио-backend недоступен; "+
+				"установите: macOS «brew install ffmpeg», Debian/Ubuntu «apt install ffmpeg»: %w",
+			role, err))
+	}
+	return exit.Exit(exit.ExitGeneric, fmt.Errorf("agent: %s: %w", role, err))
 }
