@@ -9,11 +9,14 @@
 // signaling не зовёт — транспорт исходящих сообщений (signaling.Client.Send)
 // лежит на вышестоящем слое (agent, Task 2.8).
 //
-// В этой задаче (Task 2.4) реализован МИНИМАЛЬНЫЙ flow БЕЗ perfect-negotiation:
-// accept offer → CreateAnswer → send; incoming ICE буферизуется до
-// SetRemoteDescription. Glare-handling (одновременные offer'ы двух пиров с
-// ролями polite/impolite) — Task 2.6; поле Config.IsPolite сохранено, но
-// логики glare здесь нет.
+// Perfect-negotiation (Task 2.6, спека §7): glare = оба пира в have-local-offer.
+// impolite игнорирует входящий offer; polite — откатывает свой и принимает
+// входящий. Pion v4 НЕ умеет rollback из have-local-offer (state-machine в
+// signalingstate.go блокирует have-local-offer→SetLocal(rollback)→stable), а
+// спека §7 требует именно rollback для polite — поэтому polite-glare разрешается
+// ПЕРЕСОЗДАНИЕМ PeerConnection (recreatePCForGlare): старый pc закрывается,
+// новый стартует в stable и принимает входящий offer. Логика решения
+// (polite/impolite/ignore) вынесена в negotiation.go.
 package peer
 
 import (
@@ -34,9 +37,10 @@ import (
 // candidates (тесты на localhost ICE). Спека §5.
 type Config struct {
 	ICEServers []webrtc.ICEServer
-	// IsPolite — роль perfect-negotiation (спека §7). Назначается детерминированно
-	// по сравнению sessionId/actorId пиров (Task 2.6). В Task 2.4 поле сохранено,
-	// но логики glare нет — минимальный flow предполагает, что инициатор один.
+	// IsPolite — роль perfect-negotiation (спека §7). Назначается вышестоящим
+	// слоем (agent.addPeer) детерминированно по сравнению sessionId: мы polite,
+	// если наш sessionId больше remote. При glare polite откатывает свой offer
+	// (через recreatePCForGlare), impolite игнорирует входящий. См. negotiation.go.
 	IsPolite bool
 }
 
@@ -55,14 +59,28 @@ type Config struct {
 // Failed() срабатывает на DTLS/ICE-fail — вышележащий слой зовёт Close и
 // удаляет Peer из активного набора, ПРОДОЛЖАЯ работу с оставшимися (mesh
 // переживёт отказ одного пира — спека §10).
+//
+// Concurrency: все обращения к p.pc идут из agent-goroutine (HandleEvent /
+// CreateOffer / AttachOutgoingTrack / Close — single-threaded), поэтому
+// recreatePCForGlare меняет p.pc простым присваиванием без синхронизации.
+// Pion-callbacks (OnICECandidate/OnConnectionStateChange/OnICEConnectionStateChange/
+// OnTrack) замыкаются на p (методы sendOut/signalFailure/fireOnConnected/
+// handleIncomingTrack) и НЕ читают p.pc напрямую — stale-callbacks закрытого
+// pc гаснут после Close(), гонок с актуальным pc нет.
 type Peer struct {
 	pc *webrtc.PeerConnection
+
+	// api/iceServers сохраняются для recreatePCForGlare: новый pc создаётся с
+	// тем же audio-only Opus MediaEngine (через api) и тем же списком ICE-серверов.
+	api        *webrtc.API
+	iceServers []webrtc.ICEServer
 
 	// outTrack — общий TrackLocalStaticSample, добавленный в эту PC через
 	// AddTrack в AttachOutgoingTrack. nil до вызова AttachOutgoingTrack.
 	// Сам track создаётся ВЫШЕСТОЯЩИМ слоем (agent) — один на звонок, добавляется
 	// в каждую PC; pion внутри каждой PC строит отдельный RTPSender и
 	// пакует samples в RTP независимо. Это и есть fanout — без N encodeLoop'ов.
+	// При recreatePCForGlare track пере-добавляется на новый pc (AddTrack).
 	outTrack *webrtc.TrackLocalStaticSample
 
 	// outCh — исходящие signaling-сообщения (offer/answer/candidate).
@@ -80,11 +98,12 @@ type Peer struct {
 	// offer/answer, и pion в таком случае падает на AddICECandidate
 	// (ErrNoRemoteDescription). Поэтому буферизуем и дренируем сразу после
 	// SetRemoteDescription. Спека §7 «Буферизация ICE-candidates».
+	// Сбрасывается в nil при recreatePCForGlare (новый pc стартует чистым).
 	pendingICE []webrtc.ICECandidateInit
 
 	// remoteDescr — атомарный флаг: SetRemoteDescription уже выполнен.
 	// Используется в HandleEvent(EvCandidate) для решения «буферизовать или
-	// AddICECandidate сразу».
+	// AddICECandidate сразу». Сбрасывается в false при recreatePCForGlare.
 	remoteDescr atomic.Bool
 
 	// sinkMu защищает sink при установке через OnIncomingAudio и чтении в
@@ -103,18 +122,25 @@ type Peer struct {
 	// Регистрируется agent'ом (через OnConnected) для отправки signaling unmute —
 	// без него Spreed держит audio-sink muted (spike-gate root cause 2026-07-20).
 	// onConnectedMu защищает onConnected при установке (addPeer) и вызове
-	// (pion callback — другая горутина). onConnectedFired — идемпотентность
-	// (ICE может переходить в connected несколько раз при restart — unmute 1 раз).
+	// (pion callback — другая горутина). onConnectedFired — идемпотентность;
+	// сбрасывается в false при recreatePCForGlare (новый pc → новое ICE → unmute
+	// должен уйти снова).
 	onConnectedMu    sync.Mutex
 	onConnected      func()
 	onConnectedFired bool
+
+	// isPolite — роль perfect-negotiation (спека §7). Назначается вышестоящим
+	// слоем (agent.addPeer) детерминированно по сравнению sessionId: мы polite,
+	// если наш sessionId больше remote. При glare (входящий offer в
+	// have-local-offer) polite откатывает свой offer (recreatePCForGlare) и
+	// принимает входящий, impolite — игнорирует. См. negotiation.go.
+	isPolite bool
 }
 
 // New создаёт PeerConnection с указанной конфигурацией ICE-серверов и
-// регистрирует pion-callback'и: OnICECandidate (→ outCh), OnConnectionStateChange
-// (→ failedCh при Failed), OnTrack (→ decodeLoop в sink). Возвращает ошибку
-// только если pion не смог создать PC (повреждён ICEServer, системный лимит и
-// т.п.) — прикладной код должен трактовать это как фатальное.
+// регистрирует pion-callback'и (через initPC). Возвращает ошибку только если
+// pion не смог создать PC (повреждён ICEServer, системный лимит и т.п.) —
+// прикладной код должен трактовать это как фатальное.
 func New(cfg Config) (*Peer, error) {
 	// Audio-only MediaEngine: регистрируем ТОЛЬКО Opus. Без video-codec'ов
 	// pion отвечает на m=video в offer'е браузера port 0 (отклоняет) — nctalk-call
@@ -135,18 +161,36 @@ func New(cfg Config) (*Peer, error) {
 		return nil, fmt.Errorf("peer: RegisterCodec(opus): %w", err)
 	}
 	api := webrtc.NewAPI(webrtc.WithMediaEngine(m))
-	pc, err := api.NewPeerConnection(webrtc.Configuration{
-		ICEServers: cfg.ICEServers,
+
+	p := &Peer{
+		outCh:      make(chan signaling.Message, 64),
+		failedCh:   make(chan error, 1),
+		closed:     make(chan struct{}),
+		isPolite:   cfg.IsPolite,
+		api:        api,
+		iceServers: cfg.ICEServers,
+	}
+	pc, err := p.initPC()
+	if err != nil {
+		return nil, err
+	}
+	p.pc = pc
+	return p, nil
+}
+
+// initPC создаёт PeerConnection через сохранённый api (тот же audio-only Opus
+// MediaEngine) и регистрирует pion-callback'и. Используется в New и в
+// recreatePCForGlare — при glare-polite новый pc стартует в stable и принимает
+// входящий offer. Callbacks замыкаются на p (не на pc): методы sendOut /
+// signalFailure / fireOnConnected / handleIncomingTrack НЕ читают p.pc, поэтому
+// после замены p.pc в recreate они корректно работают с новым pc, а stale-callbacks
+// закрытого pc гаснут после Close().
+func (p *Peer) initPC() (*webrtc.PeerConnection, error) {
+	pc, err := p.api.NewPeerConnection(webrtc.Configuration{
+		ICEServers: p.iceServers,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("peer: NewPeerConnection: %w", err)
-	}
-
-	p := &Peer{
-		pc:       pc,
-		outCh:    make(chan signaling.Message, 64),
-		failedCh: make(chan error, 1),
-		closed:   make(chan struct{}),
 	}
 
 	// Локальные ICE-candidates → outCh как signaling.Message{Type:"candidate"}.
@@ -193,7 +237,8 @@ func New(cfg Config) (*Peer, error) {
 		if state == webrtc.ICEConnectionStateConnected {
 			// ICE connected — дёрнем onConnected-callback (unmute signaling для
 			// Spreed-sink, spike-gate root cause 2026-07-20). Идемпотентно — pion
-			// может повторять connected-state при ICE restart, unmute нужен 1 раз.
+			// может повторять connected-state при ICE restart, unmute нужен 1 раз
+			// за жизнь pc (флаг сбрасывается в recreatePCForGlare для нового pc).
 			p.fireOnConnected()
 		}
 	})
@@ -205,14 +250,60 @@ func New(cfg Config) (*Peer, error) {
 		p.handleIncomingTrack(track)
 	})
 
-	return p, nil
+	return pc, nil
 }
 
-// HandleEvent обрабатывает одно signaling-событие. SDP/ICE flow — минимальный,
-// без glare (Task 2.6):
+// recreatePCForGlare пересоздаёт PeerConnection для polite-glare: pion v4 не
+// умеет rollback из have-local-offer (state-machine в signalingstate.go блокирует
+// have-local-offer→SetLocal(rollback)→stable), а спека §7 polite-branch требует
+// именно rollback. Workaround: закрываем старый pc, создаём новый (тот же
+// audio-only MediaEngine/ICE через initPC), переносим outTrack, сбрасываем
+// per-pc state. Новый pc стартует в stable → вызывающий код (HandleEvent EvOffer)
+// делает на нём SetRemoteDescription(offer) → CreateAnswer → SetLocalDescription.
 //
-//   - EvOffer: SetRemoteDescription(offer) → drain pendingICE → CreateAnswer →
-//     SetLocalDescription → отправка answer в outCh.
+// Sink (OnIncomingAudio) НЕ переносится явно — он остаётся в p.sink, а OnTrack
+// нового pc переиспользует handleIncomingTrack → тот же sink. onConnectedFired
+// сбрасывается: новый pc → новое ICE-соединение → unmute должен уйти снова.
+//
+// Конcurrency-инвариант: вызывается из agent-goroutine (HandleEvent,
+// single-threaded). Старый pc.Close() гасит его callbacks (OnICECandidate/
+// OnTrack/...); возможен короткий хвост от старого decodeLoop, но sink
+// thread-safe (FFmpegDecoder-mutex, review замечание 2), и decodeLoop выйдет
+// по ошибке track.ReadRTP на закрытом pc.
+func (p *Peer) recreatePCForGlare() error {
+	old := p.pc
+	newPC, err := p.initPC()
+	if err != nil {
+		return err
+	}
+	p.pc = newPC
+	_ = old.Close() // stale-callbacks старого pc гаснут; decodeLoop выйдет по ReadRTP-ошибке
+
+	// Сброс per-pc state: новый pc стартует без pending candidates / remote descr.
+	p.remoteDescr.Store(false)
+	p.pendingICE = nil
+	// Новый pc → новое ICE-соединение → onConnected (unmute) должен уйти снова.
+	p.onConnectedMu.Lock()
+	p.onConnectedFired = false
+	p.onConnectedMu.Unlock()
+
+	// Перенос исходящего track на новый pc (как в AttachOutgoingTrack).
+	if p.outTrack != nil {
+		if _, err := newPC.AddTrack(p.outTrack); err != nil {
+			return fmt.Errorf("peer: re-AddTrack: %w", err)
+		}
+	}
+	return nil
+}
+
+// HandleEvent обрабатывает одно signaling-событие. SDP/ICE flow с glare-handling
+// (Task 2.6, спека §7):
+//
+//   - EvOffer: perfect-negotiation проверка glare (resolveIncomingOffer):
+//       impolite при have-local-offer → игнорирует входящий (свой в полёте);
+//       polite при have-local-offer   → recreatePCForGlare (pion не умеет
+//         rollback), затем SetRemoteDescription(offer) → CreateAnswer → ...
+//     stable/нет glare → обычный приём.
 //   - EvAnswer: SetRemoteDescription(answer) → drain pendingICE.
 //   - EvCandidate: если SetRemoteDescription уже был — AddICECandidate сразу,
 //     иначе складываем в pendingICE (будет дренирован после SetRemoteDescription).
@@ -223,6 +314,24 @@ func New(cfg Config) (*Peer, error) {
 func (p *Peer) HandleEvent(ev signaling.Event) error {
 	switch ev.Kind {
 	case signaling.EvOffer:
+		// Perfect-negotiation glare (Task 2.6, спека §7): если мы в
+		// have-local-offer (свой CreateOffer в полёте), входящий offer = glare.
+		// impolite игнорирует входящий; polite откатывает свой offer и принимает
+		// входящий. Решение — чистая функция в negotiation.go.
+		action := resolveIncomingOffer(p.pc.SignalingState(), p.isPolite)
+		if action == offerIgnore {
+			// impolite при glare: свой offer в приоритете, входящий игнорируем.
+			return nil
+		}
+		// offerAccept. Если glare (have-local-offer) — это polite: pion v4 не
+		// умеет rollback из have-local-offer, поэтому пересоздаём pc в stable
+		// (recreatePCForGlare), иначе SetRemoteDescription(offer) упадёт с
+		// InvalidModificationError (have-local-offer → have-remote-offer).
+		if p.pc.SignalingState() == webrtc.SignalingStateHaveLocalOffer {
+			if err := p.recreatePCForGlare(); err != nil {
+				return fmt.Errorf("peer: recreate for glare: %w", err)
+			}
+		}
 		if err := p.pc.SetRemoteDescription(webrtc.SessionDescription{
 			Type: webrtc.SDPTypeOffer, SDP: ev.SDP,
 		}); err != nil {
@@ -305,7 +414,8 @@ func (p *Peer) Failed() <-chan error { return p.failedCh }
 // общий track — pion внутри каждой PC делает свой RTPSender и packets.
 //
 // Вызывать ДО CreateOffer/HandleEvent(EvOffer): m-line для audio-track'а должна
-// попасть в SDP. Повторный вызов не поддерживается (вернёт ошибку).
+// попасть в SDP. При recreatePCForGlare track пере-добавляется на новый pc.
+// Повторный вызов не поддерживается (вернёт ошибку).
 func (p *Peer) AttachOutgoingTrack(track *webrtc.TrackLocalStaticSample) error {
 	if p.outTrack != nil {
 		return errors.New("peer: AttachOutgoingTrack уже вызван (один track на peer)")
@@ -322,16 +432,18 @@ func (p *Peer) AttachOutgoingTrack(track *webrtc.TrackLocalStaticSample) error {
 // асинхронно — без зарегистрированного sink'а входящие треки игнорируются, см.
 // handleIncomingTrack). В mesh (Task 2.8) инстанцируется ОТДЕЛЬНЫЙ sink на
 // каждого remote-пира (decoder-per-peer), их PCM-выводы сводит media.Mixer.
+// Сохраняется при recreatePCForGlare — OnTrack нового pc переиспользует его.
 func (p *Peer) OnIncomingAudio(sink media.AudioSink) {
 	p.sinkMu.Lock()
 	p.sink = sink
 	p.sinkMu.Unlock()
 }
 
-// CreateOrder — ЭКСПЕРИМЕНТАЛЬНЫЙ helper для инициатора offer'а. В минимальном
-// flow (без glare, Task 2.4) один из пиров создаёт offer, второй отвечает.
-// Agent (Task 2.8) будет звать CreateOffer при появлении нового участника в
-// usersInRoom (для impolite-пира, при glare — см. perfect-negotiation в §7).
+// CreateOffer — инициация SDP-exchange: создаёт offer и SetLocalDescription
+// (pc → have-local-offer), отправляет offer в outCh. Agent (Task 2.8) зовёт
+// при появлении нового участника в usersInRoom. При glare (браузер тоже
+// позвал offer) — см. HandleEvent(EvOffer) + negotiation.go: impolite игнорирует
+// входящий, polite откатывает свой (recreatePCForGlare).
 //
 // Side-effect: после SetLocalDescription pion начинает собирать local ICE
 // candidates, они пойдут в outCh через OnICECandidate.
@@ -364,9 +476,11 @@ func (p *Peer) OnConnected(fn func()) {
 }
 
 // fireOnConnected вызывает зарегистрированный OnConnected-callback один раз
-// (идемпотентно). Вызывается из pion OnICEConnectionStateChange(connected).
-// Callback выполняется ВНЕ мьютекса — он может блокировать (signaling.Send), а
-// лок нужен только для чтения/установки onConnected/onConnectedFired.
+// (идемпотентно в рамках жизни pc). Вызывается из pion OnICEConnectionStateChange
+// (connected). Флаг onConnectedFired сбрасывается в recreatePCForGlare — новый
+// pc получает новое ICE-соединение, unmute должен уйти снова. Callback
+// выполняется ВНЕ мьютекса — он может блокировать (signaling.Send), а лок нужен
+// только для чтения/установки onConnected/onConnectedFired.
 func (p *Peer) fireOnConnected() {
 	p.onConnectedMu.Lock()
 	if p.onConnectedFired || p.onConnected == nil {

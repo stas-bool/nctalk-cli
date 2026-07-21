@@ -564,6 +564,206 @@ func TestPeer_OnConnected_FiresOnICEConnected(t *testing.T) {
 	// ICE может дёргать connected-state несколько раз, unmute должен уйти 1 раз).
 	time.Sleep(500 * time.Millisecond)
 	if got := fired.Load(); got != 1 {
-		t.Errorf("OnConnected вызван %d раз после удержания, want 1 (идемпотентность)", got)
+		t.Errorf("OnConnected вызован %d раз после удержания, want 1 (идемпотентность)", got)
+	}
+}
+
+// ---- Тесты perfect-negotiation / glare (Task 2.6, спека §7) ----
+//
+// Glare = оба пира одновременно в have-local-offer (оба позвали CreateOffer).
+// Разрешение по ролям (детерминированно по sessionId, спека §7):
+//   - polite   → rollback своего offer'а + принять входящий (+ answer);
+//   - impolite → проигнорировать входящий (свой offer в приоритете).
+//
+// Тесты unit-уровня (без полного ICE handshake): оба CreateOffer, затем чужой
+// offer подаётся через HandleEvent(EvOffer) при have-local-offer — проверяем
+// исход по SignalingState и исходящим сообщениям.
+
+// drainOutgoing вычитывает все накопленные сообщения из Outgoing() без блокировки.
+// В glare-тестах очищает канал от offer/candidate после CreateOffer, оставляя
+// чистое состояние для assert'ов «отправлено/не отправлено».
+func drainOutgoing(p *Peer) {
+	for {
+		select {
+		case <-p.Outgoing():
+		default:
+			return
+		}
+	}
+}
+
+// readOutgoingWithTimeout читает одно сообщение из Outgoing() с timeout.
+// Возвращает (msg, true) если пришло, (zero, false) по таймауту.
+func readOutgoingWithTimeout(p *Peer, timeout time.Duration) (signaling.Message, bool) {
+	select {
+	case m := <-p.Outgoing():
+		return m, true
+	case <-time.After(timeout):
+		return signaling.Message{}, false
+	}
+}
+
+// extractOfferSDP дреинит Outgoing peer'а и возвращает SDP первого offer'а
+// (CreateOffer отправляет offer первым, candidates идут асинхронно после).
+func extractOfferSDP(t *testing.T, p *Peer) string {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case m := <-p.Outgoing():
+			if m.Type != "offer" {
+				continue // candidates пропускаем
+			}
+			var pl sdpOutPayload
+			if err := json.Unmarshal(m.Payload, &pl); err != nil {
+				t.Fatalf("extractOfferSDP: unmarshal offer: %v", err)
+			}
+			return pl.SDP
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	t.Fatalf("extractOfferSDP: offer не пришёл в Outgoing за 3с")
+	return ""
+}
+
+// TestPeer_Glare_PoliteRollsBackAndAccepts — polite peer уже в have-local-offer
+// (свой CreateOffer выполнен). Получает чужой offer → должен:
+//   - rollback'нуть свой offer (SetLocalDescription rollback),
+//   - принять чужой (SetRemoteDescription offer → CreateAnswer → SetLocalDescription),
+//   - финальный SignalingState == stable,
+//   - отправить answer в Outgoing.
+//
+// Спека §7: «polite-пир откатывает свой offer, принимает входящий».
+func TestPeer_Glare_PoliteRollsBackAndAccepts(t *testing.T) {
+	polite, err := New(Config{ICEServers: nil, IsPolite: true})
+	if err != nil {
+		t.Fatalf("New polite: %v", err)
+	}
+	defer polite.Close()
+	other, err := New(Config{ICEServers: nil, IsPolite: false})
+	if err != nil {
+		t.Fatalf("New other: %v", err)
+	}
+	defer other.Close()
+
+	// Audio-track на оба peer'а (как real flow — agent AttachOutgoingTrack перед
+	// CreateOffer). Без него pion генерит offer без audio m-line → без ice-ufrag
+	// → SetRemoteDescription принимающей стороны падает "no ice-ufrag".
+	track, err := webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus}, "audio", "nctalk",
+	)
+	if err != nil {
+		t.Fatalf("NewTrackLocalStaticSample: %v", err)
+	}
+	if err := polite.AttachOutgoingTrack(track); err != nil {
+		t.Fatalf("AttachOutgoingTrack polite: %v", err)
+	}
+	if err := other.AttachOutgoingTrack(track); err != nil {
+		t.Fatalf("AttachOutgoingTrack other: %v", err)
+	}
+
+	// Оба создают offer → оба в have-local-offer (glare condition).
+	if err := polite.CreateOffer(); err != nil {
+		t.Fatalf("CreateOffer polite: %v", err)
+	}
+	if err := other.CreateOffer(); err != nil {
+		t.Fatalf("CreateOffer other: %v", err)
+	}
+	if got := polite.pc.SignalingState(); got != webrtc.SignalingStateHaveLocalOffer {
+		t.Fatalf("pre: polite state=%s, want have-local-offer", got)
+	}
+	offerSDP := extractOfferSDP(t, other)
+
+	// Очищаем исходящие polite от его собственного offer/candidates — чтобы
+	// после HandleEvent можно было однозначно проверить answer.
+	drainOutgoing(polite)
+
+	// Glare: подаём чужой offer в polite peer.
+	if err := polite.HandleEvent(signaling.Event{Kind: signaling.EvOffer, SDP: offerSDP}); err != nil {
+		t.Fatalf("HandleEvent(offer) при glare: %v (polite должен rollback+accept)", err)
+	}
+
+	// Polite принял: recreate → SetRemoteDescription(offer) → CreateAnswer →
+	// SetLocalDescription(answer) → state stable.
+	if got := polite.pc.SignalingState(); got != webrtc.SignalingStateStable {
+		t.Fatalf("post: polite state=%s, want stable (recreate+accept)", got)
+	}
+	// Polite отправил answer в ответ на принятый offer. Answer может прийти НЕ
+	// первым: после SetLocalDescription(answer) pion синхронно стартует ICE
+	// gathering нового pc → OnICECandidate → sendOut(candidate) попадает в outCh
+	// раньше sendOut(answer). Ищем answer, пропуская candidates.
+	var gotAnswer bool
+	ansDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(ansDeadline) {
+		msg, ok := readOutgoingWithTimeout(polite, 50*time.Millisecond)
+		if !ok {
+			continue
+		}
+		if msg.Type == "answer" {
+			gotAnswer = true
+			break
+		}
+		// candidate — норма (ICE gathering нового pc после recreate).
+	}
+	if !gotAnswer {
+		t.Fatalf("polite не отправил answer после glare (timeout 2с)")
+	}
+}
+
+// TestPeer_Glare_ImpoliteIgnoresIncoming — impolite peer в have-local-offer,
+// получает чужой offer → должен ИГНОРИРОВАТЬ его:
+//   - вернуть nil (без ошибки),
+//   - остаться в have-local-offer (свой offer в приоритете),
+//   - НЕ отправлять answer.
+//
+// Спека §7: «impolite-пир игнорирует входящий — свой уже уйдёт и будет
+// обработан polite-стороной».
+func TestPeer_Glare_ImpoliteIgnoresIncoming(t *testing.T) {
+	impolite, err := New(Config{ICEServers: nil, IsPolite: false})
+	if err != nil {
+		t.Fatalf("New impolite: %v", err)
+	}
+	defer impolite.Close()
+	other, err := New(Config{ICEServers: nil, IsPolite: false})
+	if err != nil {
+		t.Fatalf("New other: %v", err)
+	}
+	defer other.Close()
+
+	if err := impolite.CreateOffer(); err != nil {
+		t.Fatalf("CreateOffer impolite: %v", err)
+	}
+	if err := other.CreateOffer(); err != nil {
+		t.Fatalf("CreateOffer other: %v", err)
+	}
+	if got := impolite.pc.SignalingState(); got != webrtc.SignalingStateHaveLocalOffer {
+		t.Fatalf("pre: impolite state=%s, want have-local-offer", got)
+	}
+	offerSDP := extractOfferSDP(t, other)
+
+	// Очищаем исходящие impolite — после ignore новых сообщений быть не должно.
+	drainOutgoing(impolite)
+
+	// Glare: impolite игнорирует входящий offer.
+	if err := impolite.HandleEvent(signaling.Event{Kind: signaling.EvOffer, SDP: offerSDP}); err != nil {
+		t.Fatalf("HandleEvent(offer) при glare: %v (impolite должен молча игнорировать)", err)
+	}
+
+	// State не изменился — остался have-local-offer (свой offer в приоритете).
+	if got := impolite.pc.SignalingState(); got != webrtc.SignalingStateHaveLocalOffer {
+		t.Fatalf("post: impolite state=%s, want have-local-offer (проигнорировал входящий)", got)
+	}
+	// Answer'а быть НЕ должно: impolite игнорирует входящий offer, свой уже
+	// ушёл (CreateOffer). Candidates от фонового ICE gathering — норма
+	// (CreateOffer запустил gathering асинхронно), их не считаем нарушением.
+	deadlineAns := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadlineAns) {
+		msg, ok := readOutgoingWithTimeout(impolite, 50*time.Millisecond)
+		if !ok {
+			break
+		}
+		if msg.Type == "answer" {
+			t.Fatalf("impolite отправил answer при ignore — не должен (свой offer в приоритете)")
+		}
 	}
 }
