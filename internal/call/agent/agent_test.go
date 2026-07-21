@@ -982,3 +982,110 @@ func TestRun_MultiPeerFailure_Progressive(t *testing.T) {
 		t.Fatalf("Run err = %v, want nil", err)
 	}
 }
+
+// ---- Task 3.2: ICE timeout (спека §6/§10) ----
+//
+// NCTALK_ICE_TIMEOUT (default 30s, в тестах инъектируется через cfg.ICETimeout):
+// если за таймаут ни один peer не установил ICE-соединение —
+//   - «я один в звонке» (нет remote-участников с аудио, maxParticipants=0) →
+//     exit 0 (штатно ждём других);
+//   - участники есть, но никто не ответил ICE → exit 1 с диагностикой.
+//
+// Connected-detection: OnConnected-callback (peer дёргает при
+// ICEConnectionStateConnected); fireConnected() имитирует это в тесте. Если НЕ
+// дёргаем — peer остаётся «не connected».
+
+// TestRun_ICETimeout_Alone_Exit0 — я один в звонке (pollLoop не шлёт peer'ов),
+// за ICE-timeout никто не пришёл → Run штатно завершается nil (exit 0).
+func TestRun_ICETimeout_Alone_Exit0(t *testing.T) {
+	fs := &fakeSignaling{
+		pollLoop: pollSendThenBlock(nil), // нет EvUsersUpdated с peer'ами — я один
+	}
+	counters := newTestCounters()
+	cfg := counters.buildConfig(fs, 1, io.Discard) // recvonly
+	cfg.ICETimeout = 50 * time.Millisecond
+
+	// ctx с запасом — Run должен выйти по ICE-timeout, а не по ctx.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err := Run(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Run err = %v, want nil (один в звонке → exit 0 по ICE-timeout)", err)
+	}
+	if got := atomic.LoadInt32(&counters.peerCreated); got != 0 {
+		t.Errorf("peer created = %d, want 0 (я один — peers не создавались)", got)
+	}
+	// leaveBestEffort вызывается и на exit 0 (cleanup).
+	if fs.leaveCount != 1 {
+		t.Errorf("LeaveCall count = %d, want 1 (cleanup после ICE-timeout)", fs.leaveCount)
+	}
+}
+
+// TestRun_ICETimeout_ParticipantsNotConnected_Exit1 — участник с аудио есть, но
+// за ICE-timeout peer не установил соединение (тест НЕ дёргает fireConnected) →
+// Run возвращает ExitError{1} с диагностикой.
+func TestRun_ICETimeout_ParticipantsNotConnected_Exit1(t *testing.T) {
+	fs := &fakeSignaling{
+		pollLoop: pollSendThenBlock([]signaling.Event{
+			{Kind: signaling.EvUsersUpdated, Users: []signaling.User{
+				{SessionId: "peer-A", InCall: 3},
+			}},
+		}),
+	}
+	counters := newTestCounters()
+	cfg := counters.buildConfig(fs, 1, io.Discard)
+	cfg.ICETimeout = 50 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err := Run(ctx, cfg)
+	if err == nil {
+		t.Fatal("Run err = nil, want exit.ExitError{Code:1} (участник есть, ICE no-answer)")
+	}
+	var ee exit.ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("Run err тип = %T, want exit.ExitError", err)
+	}
+	if ee.Code != exit.ExitGeneric {
+		t.Errorf("ExitError.Code = %d, want %d (ICE no-answer → exit 1)", ee.Code, exit.ExitGeneric)
+	}
+}
+
+// TestRun_ICETimeout_PeerConnected_NoExit — peer установил ICE (fireConnected) →
+// по истечении ICE-timeout Run НЕ выходит (звонок идёт), продолжает до ctx.Cancel.
+// Регрессия: everConnected=true должен отключать таймер без exit.
+func TestRun_ICETimeout_PeerConnected_NoExit(t *testing.T) {
+	fs := &fakeSignaling{
+		pollLoop: pollSendThenBlock([]signaling.Event{
+			{Kind: signaling.EvUsersUpdated, Users: []signaling.User{
+				{SessionId: "peer-A", InCall: 3},
+			}},
+		}),
+	}
+	counters := newTestCounters()
+	cfg := counters.buildConfig(fs, 1, io.Discard)
+	cfg.ICETimeout = 50 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- Run(ctx, cfg) }()
+
+	// Ждём создания peer'а и дёргаем ICE connected ДО истечения ICE-timeout (50ms).
+	fp := waitRecvTimeout(t, counters.peerCh, 500*time.Millisecond)
+	fp.fireConnected()
+
+	// Даём ICE-timeout сработать (50ms) + запас — Run НЕ должен выйти.
+	select {
+	case <-runDone:
+		t.Fatal("Run завершился по ICE-timeout при everConnected=true — должен продолжать")
+	case <-time.After(150 * time.Millisecond):
+		// OK — таймер сработал, но exit не произошёл (iceC=nil, continue).
+	}
+
+	cancel()
+	if err := <-runDone; err != nil {
+		t.Fatalf("Run err = %v, want nil", err)
+	}
+}

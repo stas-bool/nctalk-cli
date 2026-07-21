@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/stas/nctalk/internal/call/agent"
 	"github.com/stas/nctalk/internal/call/capability"
@@ -250,6 +251,15 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 	}
 	sigClient.SetSessionId(sessionId)
 
+	// 8b. NCTALK_ICE_TIMEOUT — бюджет на установку первого peer'а от старта звонка
+	//     (спека §6/§10). 0/пусто → default 30s (внутри agent). Невалидное → exit 1
+	//     (как NEXTCLOUD_TIMEOUT). Сообщение содержит только имя env (§5/§9 redact).
+	iceTimeout, err := parseDurationEnv("NCTALK_ICE_TIMEOUT")
+	if err != nil {
+		fmt.Fprintln(stderr, "nctalk-call: "+err.Error())
+		return 1
+	}
+
 	// 9. Контекст с signal.NotifyContext (SIGINT, SIGTERM). На сигнале ctx
 	//    отменяется, agent выходит по ctx.Done → штатный leave (LeaveCall в
 	//    best-effort 3с, см. agent.leaveBestEffort).
@@ -268,6 +278,7 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 		Stderr:       stderr,
 		OwnUserId:    cfg.Login,
 		OwnSessionId: sessionId,
+		ICETimeout:   iceTimeout,
 	})
 
 	// 11. Маппинг ошибки. nil → 0; exit.ExitError-value → Code; прочее → 1.
@@ -281,4 +292,20 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 	}
 	fmt.Fprintln(stderr, "nctalk-call: "+agentErr.Error())
 	return 1
+}
+
+// parseDurationEnv читает env-переменную как time.Duration. Пусто → 0 (вызывающий
+// подставит default). Невалидное значение → ошибка с именем env (без значения —
+// спека §5/§9 redact, как config.Load для NEXTCLOUD_TIMEOUT). Звонки-specific
+// (NCTALK_ICE_TIMEOUT), не входит в общий config.Load.
+func parseDurationEnv(name string) (time.Duration, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s: невалидная длительность (ожидалось напр. «30s», «1m30s»)", name)
+	}
+	return d, nil
 }

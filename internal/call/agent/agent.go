@@ -125,6 +125,10 @@ const (
 	// leaveCallTimeout — бюджет на LeaveCall при shutdown. ctx уже отменен, но
 	// сервер должен получить DELETE — иначе we hang on the call list серверно.
 	leaveCallTimeout = 3 * time.Second
+	// defaultIceTimeout — бюджет на установку первого peer-соединения от старта
+	// звонка (спека §6/§10). Настраивается env NCTALK_ICE_TIMEOUT (main.go);
+	// Config.ICETimeout==0 → это значение.
+	defaultIceTimeout = 30 * time.Second
 	// inFlagSendRecv — битмаск InCall: 1=IN_CALL, 3=IN_CALL|WITH_AUDIO (спека §6).
 	// При InFlags==3 запускаем encoder + encodeLoop + создаём общий audioTrack
 	// (один на звонок), подключаемый в каждую PC через AttachOutgoingTrack.
@@ -143,9 +147,14 @@ type Config struct {
 	OwnSessionId string             // собственный sessionId — статический фильтр (если известен заранее)
 	OwnUserId    string             // NEXTCLOUD_LOGIN: для извлечения ownSessionId из usersInRoom (review замечание 3)
 	ICEServers   []webrtc.ICEServer // из capability (Task 2.10)
-	Stdin        io.Reader          // PCM на отправку (nil если InFlags==1)
-	Stdout       io.Writer          // PCM приём: Mixer → stdout
-	Stderr       io.Writer          // статус/диагностика (НЕ содержит кредов)
+	// ICETimeout — бюджет на установку хотя бы одного peer-соединения от старта
+	// звонка (спека §6/§10). 0 → defaultIceTimeout (30s). Инъектируется тестами
+	// (малое значение для детерминированного срабатывания). По истечении: если ни
+	// один peer не установился — exit 0 при «я один в звонке», exit 1 иначе.
+	ICETimeout time.Duration
+	Stdin      io.Reader // PCM на отправку (nil если InFlags==1)
+	Stdout     io.Writer // PCM приём: Mixer → stdout
+	Stderr     io.Writer // статус/диагностика (НЕ содержит кредов)
 
 	// Injection points для тестов. nil → production-обёртки над peer.New /
 	// media.NewFFmpeg*. Тесты кладут свои мок-фабрики.
@@ -286,6 +295,18 @@ func Run(ctx context.Context, cfg Config) error {
 		ownSessionId: cfg.OwnSessionId, // может быть пустым — извлечём из EvUsersUpdated
 	}
 
+	// ICE-timeout timer (спека §6/§10): бюджет на установку первого peer'а от
+	// старта звонка. 0 → default 30s. По срабатыванию — решение exit 0 («я один в
+	// звонке») / exit 1 (участники есть, но никто не ответил ICE за таймаут).
+	// Тесты инъектируют малое cfg.ICETimeout для детерминированного срабатывания.
+	iceTimeout := cfg.ICETimeout
+	if iceTimeout == 0 {
+		iceTimeout = defaultIceTimeout
+	}
+	iceTimer := time.NewTimer(iceTimeout)
+	defer iceTimer.Stop()
+	iceC := iceTimer.C
+
 	// Step 5-8: main select.
 	var pollErr error
 mainLoop:
@@ -327,6 +348,27 @@ mainLoop:
 			if ok && err != nil {
 				pollErr = err
 			}
+			break mainLoop
+		case <-iceC:
+			// ICE-timeout (спека §6/§10). Решение по текущему состоянию:
+			if a.iceEverConnected() {
+				// Хоть один peer установлен — звонок идёт/шёл; таймер одноразовый,
+				// отключаем его и продолжаем. (Follow-up: allPeersLost grace-timer
+				// для падений после таймаута — отдельная задача; MVP 3.2 покрывает
+				// «не установилось ни одного peer за таймаут».)
+				iceC = nil
+				continue
+			}
+			if a.iceMaxParticipants() == 0 {
+				// «Я один в звонке» — штатно ждём других участников. pollErr
+				// остаётся nil → Run вернёт nil (exit 0).
+				break mainLoop
+			}
+			// Участники с аудио были, но за ICE-timeout никто не ответил → exit 1
+			// с диагностикой (спека §10).
+			pollErr = exit.Exit(exit.ExitGeneric,
+				fmt.Errorf("ICE timeout: ни один peer не установил соединение за %s "+
+					"(участников с аудио в звонке: %d)", iceTimeout, a.iceMaxParticipants()))
 			break mainLoop
 		}
 	}
@@ -424,6 +466,20 @@ type agentState struct {
 	// пиров). addPeer сначала берёт из freeIdx, потом — из nextIdx.
 	freeIdx []int
 
+	// ICE-timeout tracking (спека §6/§10). Все три поля — под a.mu (как peers),
+	// т.к. markConnected зовётся из OnConnected-callback (pion-горутина), а чтение
+	// — из main-loop'а по срабатыванию iceTimer.
+	//   - connectedPeers — сколько peer'ов ОДНОКРАТНО отметили ICE connected
+	//     (монотонно растёт; не декрементируется при падении — это everConnected-
+	//     семантика «был ли хоть один»). Для «все упали после» нужен livePeers
+	//     (follow-up);
+	//   - everConnected — кеш connectedPeers>0 (читается в iceTimer-case без арифметики);
+	//   - maxParticipants — максимум числа remote-участников с аудио (len(wanted))
+	//     по всем EvUsersUpdated; 0 = «я один в звонке» → ICE-timeout даёт exit 0.
+	connectedPeers  int
+	everConnected   bool
+	maxParticipants int
+
 	// ownSessionIdMu защищает ownSessionId (извлекается лениво из первого
 	// EvUsersUpdated по совпадению UserId == cfg.OwnUserId, review замечание 3).
 	// Если cfg.OwnSessionId задан статически — используется без поиска.
@@ -482,6 +538,12 @@ func (a *agentState) reconcile(users []signaling.User) {
 			continue
 		}
 		wanted[u.SessionId] = struct{}{}
+	}
+
+	// maxParticipants — максимум len(wanted) по всем EvUsersUpdated (для ICE-timeout
+	// §6/§10: 0 = «я один в звонке» → exit 0 по таймауту). Под a.mu (с peers).
+	if len(wanted) > a.maxParticipants {
+		a.maxParticipants = len(wanted)
 	}
 
 	// Снимаем список ушедших/новых под локом; cleanup/add — снаружи (мьютекс
@@ -619,34 +681,36 @@ func (a *agentState) addPeer(sid string) error {
 	a.peers[sid] = b
 	a.mu.Unlock()
 
-	// 4b. unmute signaling при ICE connected — ТОЛЬКО для sendrecv (audioTrack != nil).
-	// Spreed держит audio-sink для remote участника MUTED, пока не получит
-	// signaling unmute {name:'audio'} (spike-gate root cause 2026-07-20:
-	// CallParticipantModel._handleUnmute → audioAvailable=true → sink unmuted).
-	// Без unmute browser получает RTP (packetsReceived растёт), но Spreed держит
-	// sink muted → уши молчат. В recvonly не отправляем — нет исходящего audio.
-	// Посылается ПОСЛЕ ICE connected (а не сразу после offer): Spreed роутит unmute в
-	// peer.handleMessage только если Peer уже создан (simplewebrtc.js: `peers.length`),
-	// а Peer создаётся при получении нашего offer → answer exchange. ICE connected
-	// гарантирует, что Peer с обеих сторон установлен (answer обменян, DTLS поднят).
-	if a.audioTrack != nil {
-		p.OnConnected(func() {
-			payload, err := json.Marshal(struct {
-				Name string `json:"name"`
-			}{Name: "audio"})
-			if err != nil {
-				fmt.Fprintf(a.cfg.Stderr, "nctalk: unmute %s: marshal: %v\n", sid, err)
-				return
-			}
-			if err := a.cfg.Signaling.Send(a.ctx, a.cfg.Token, signaling.Message{
-				Type:    "unmute",
-				To:      sid,
-				Payload: payload,
-			}); err != nil {
-				fmt.Fprintf(a.cfg.Stderr, "nctalk: unmute %s: %v\n", sid, err)
-			}
-		})
-	}
+	// 4b. OnConnected — ВСЕГДА (не только sendrecv): ICE-timeout (спека §6/§10)
+	// считает «установился ли хоть один peer» по этому callback'у в обоих режимах.
+	// Для sendrecv (audioTrack != nil) дополнительно шлём Spreed signaling unmute
+	// {name:'audio'} — без него Spreed держит audio-sink remote-участника MUTED
+	// (spike-gate root cause 2026-07-20: CallParticipantModel._handleUnmute →
+	// audioAvailable=true → sink unmuted → уши слышат). Посылается ПОСЛЕ ICE
+	// connected: Spreed роутит unmute в peer.handleMessage только если Peer уже
+	// создан (simplewebrtc.js: peers.length), а Peer создаётся при получении нашего
+	// offer → answer exchange. ICE connected гарантирует Peer установлен с обеих
+	// сторон (answer обменян, DTLS поднят).
+	p.OnConnected(func() {
+		a.markConnected()
+		if a.audioTrack == nil {
+			return // recvonly — unmute не нужен (нет исходящего audio)
+		}
+		payload, err := json.Marshal(struct {
+			Name string `json:"name"`
+		}{Name: "audio"})
+		if err != nil {
+			fmt.Fprintf(a.cfg.Stderr, "nctalk: unmute %s: marshal: %v\n", sid, err)
+			return
+		}
+		if err := a.cfg.Signaling.Send(a.ctx, a.cfg.Token, signaling.Message{
+			Type:    "unmute",
+			To:      sid,
+			Payload: payload,
+		}); err != nil {
+			fmt.Fprintf(a.cfg.Stderr, "nctalk: unmute %s: %v\n", sid, err)
+		}
+	})
 
 	// 5. Per-peer горутины.
 	go a.watchPeer(b)
@@ -725,6 +789,31 @@ func (a *agentState) ownSessionIdLocked() string {
 	a.ownSessionIdMu.Lock()
 	defer a.ownSessionIdMu.Unlock()
 	return a.ownSessionId
+}
+
+// markConnected отмечает установку ICE-соединения очередным peer'ом. Вызывается
+// из OnConnected-callback (pion-горутина). connectedPeers монотонно растёт — это
+// everConnected-семантика «был ли хоть один peer установлен» (для ICE-timeout §6).
+func (a *agentState) markConnected() {
+	a.mu.Lock()
+	a.connectedPeers++
+	a.everConnected = true
+	a.mu.Unlock()
+}
+
+// iceEverConnected — был ли установлен хоть один peer (потокобезопасно).
+func (a *agentState) iceEverConnected() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.everConnected
+}
+
+// iceMaxParticipants — максимум числа remote-участников с аудио по всем
+// EvUsersUpdated (0 = «я один в звонке»).
+func (a *agentState) iceMaxParticipants() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.maxParticipants
 }
 
 // closeAllPeers — shutdown-версия removePeer для всех: под локом собираем
