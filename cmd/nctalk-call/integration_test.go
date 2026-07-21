@@ -113,3 +113,68 @@ func TestSpike_AudioBothDirections(t *testing.T) {
 		t.Fatalf("spike-gate FAIL: тон 440 Гц не детектирован в recording.pcm (nctalk-call stderr=%q)", callStderr.String())
 	}
 }
+
+// ---- Task 3.3: автоматизированные exit-code сценарии (без браузера) ----
+//
+// В отличие от TestSpike_AudioBothDirections (ручной, требует браузер+уши для
+// аудио-верификации), эти тесты проверяют exit-контракт ИНТЕГРАЦИОННО на реальном
+// сервере — без второго participant:
+//   - UnknownToken → exit 2 (JoinRoom/ResolveRoom 404 → mapJoinCallErr §10).
+//   - JoinLeave_Alone → exit 0 (NCTALK_ICE_TIMEOUT, «я один в звонке» §6/§10).
+//
+// In-process: дёргают run() напрямую с реальным env (как client/integration_test.go
+// дёргает TalkClient). НЕ требуют аудио-верификации — только exit-контракт.
+// Сценарии с реальным аудио (sendrecv запись, --out голос) — ручной spike-gate
+// (TestSpike_AudioBothDirections, уже PASS на Docker Talk 20.1.11).
+
+// integrationCallEnv проверяет обязательные env для звонковых integration-тестов
+// и скипает (НЕ падает) при отсутствии — как client/integration_test.go. Возвращает
+// token целевой комнаты (NCTALK_INTEGRATION_ROOM).
+func integrationCallEnv(t *testing.T) string {
+	t.Helper()
+	if os.Getenv("NCTALK_INTEGRATION_CALL") != "1" {
+		t.Skip("NCTALK_INTEGRATION_CALL != 1 — звонковые integration-тесты выключены")
+	}
+	if os.Getenv("NEXTCLOUD_URL") == "" || os.Getenv("NEXTCLOUD_LOGIN") == "" || os.Getenv("NEXTCLOUD_PASS") == "" {
+		t.Skip("требуется NEXTCLOUD_URL/LOGIN/PASS для integration")
+	}
+	token := os.Getenv("NCTALK_INTEGRATION_ROOM")
+	if token == "" {
+		t.Skip("NCTALK_INTEGRATION_ROOM не задан (token целевой комнаты)")
+	}
+	return token
+}
+
+// TestIntegration_UnknownToken_Exit2 — позиционный token не существует на сервере
+// → JoinRoom 404 → exit 2 (спека §10, mapJoinCallErr). Стабильно: всегда 404 для
+// несуществующего token, не зависит от состояния комнаты.
+func TestIntegration_UnknownToken_Exit2(t *testing.T) {
+	integrationCallEnv(t) // проверяет CALL + креды; token тут не важен
+
+	var out, errOut bytes.Buffer
+	code := run([]string{"zzz-nonexistent-token-99999"}, &out, &errOut, nil)
+	if code != 2 {
+		t.Fatalf("exit: got %d, want 2 (unknown token → JoinRoom 404; stderr=%q)", code, errOut.String())
+	}
+}
+
+// TestIntegration_JoinLeave_Alone_Exit0 — join в комнату, никто не подключился с
+// аудио → NCTALK_ICE_TIMEOUT срабатывает, «я один в звонке» → exit 0 (спека §6/§10,
+// Task 3.2). --recvonly (нет encoder → encodeLoop не обрывает main-loop раньше
+// ICE-timeout). Короткий NCTALK_ICE_TIMEOUT (env или 3s дефолт теста) для скорости.
+//
+// Хрупкость: требует пустую комнату (без participants с WITH_AUDIO). Если в комнате
+// есть активный собеседник — maxParticipants>0 → exit 1 (корректное поведение, но
+// тест ожидает 0). На Docker-тестовой комнате обычно пусто.
+func TestIntegration_JoinLeave_Alone_Exit0(t *testing.T) {
+	token := integrationCallEnv(t)
+	if os.Getenv("NCTALK_ICE_TIMEOUT") == "" {
+		t.Setenv("NCTALK_ICE_TIMEOUT", "3s") // короткий — я один, не ждём 30с
+	}
+
+	var out, errOut bytes.Buffer
+	code := run([]string{"--recvonly", "--out", os.DevNull, token}, &out, &errOut, nil)
+	if code != 0 {
+		t.Fatalf("exit: got %d, want 0 (alone → exit 0 по ICE-timeout; stderr=%q)", code, errOut.String())
+	}
+}

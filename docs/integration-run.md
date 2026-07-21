@@ -269,3 +269,51 @@ Event[0]: Kind=EvUsersUpdated
 | Тест                                  | Эндпоинт                                        | Контракт                                                              |
 | ------------------------------------- | ----------------------------------------------- | --------------------------------------------------------------------- |
 | `TestSignalingPollLoop_JoinGetOneEventLeave` | `POST /call/{token}` + `GET /signaling/{token}` + `DELETE /call/{token}` | `JoinCall` без ошибки; за 5с получен хотя бы один Event (EvUsersUpdated или EvError). |
+
+## nctalk-call integration (Task 3.3)
+
+Интеграционные тесты точки входа `cmd/nctalk-call` (`//go:build integration`).
+In-process: дёргают `run()` напрямую с реальным env — НЕ требуют второго
+participant / аудио-верификации (это manual spike-gate, см. ниже). Проверяют
+exit-контракт (0/1/2/3) интеграционно на реальном сервере.
+
+### Обязательное окружение
+
+Те же `NEXTCLOUD_URL/LOGIN/PASS`, плюс:
+
+| Переменная | Значение |
+| --- | --- |
+| `NCTALK_INTEGRATION_CALL` | `1` — явный opt-in (звонки = мутация: JoinCall/LeaveCall меняют состояние комнаты). |
+| `NCTALK_INTEGRATION_ROOM` | token целевой комнаты (для `JoinLeave_Alone`; `UnknownToken` использует захардкоженный несуществующий). |
+| `NCTALK_ICE_TIMEOUT` (опц.) | Короткий (напр. `3s`) для `JoinLeave_Alone` — иначе 30с default (Task 3.2). |
+
+### Запуск
+
+```sh
+# Docker Talk 20.1.11 (localhost:8484, admin/adminpass):
+NCTALK_INTEGRATION_CALL=1 \
+NEXTCLOUD_URL=http://localhost:8484 \
+NEXTCLOUD_LOGIN=admin \
+NEXTCLOUD_PASS=adminpass \
+NCTALK_INTEGRATION_ROOM=<token> \
+CGO_ENABLED=0 go test -tags=integration -run TestIntegration -v -timeout 60s ./cmd/nctalk-call/
+```
+
+⚠️ test-binary тянет pion → macOS Application Firewall спросит сеть (один раз,
+потом запоминает). На Linux/CI — без вопроса.
+
+### Что проверяет каждый тест
+
+| Тест | Сценарий | Контракт |
+| --- | --- | --- |
+| `TestIntegration_UnknownToken_Exit2` | позиционный `<room>` = несуществующий token | JoinRoom 404 → **exit 2** (§10, `mapJoinCallErr`). Стабильно. **PASS** Docker Talk 20.1.11 (2026-07-21). |
+| `TestIntegration_JoinLeave_Alone_Exit0` | `--recvonly` в комнату без участников с аудио, `NCTALK_ICE_TIMEOUT=3s` | никто не подключился → ICE-timeout → «я один» → **exit 0** (§6/§10, Task 3.2). **Требует пустую комнату** — иначе exit 1 (корректно, но тест ожидает 0). |
+
+### Spike-gate (manual, аудио-верификация) — отдельно
+
+`TestSpike_AudioBothDirections` (DEFERRED/skip) — ручной: реальный звонок с
+браузером, voice-loop.pcm → запись → уши. НЕ автоматизирован (second participant
+в браузере + прослушивание). Процедура — в шапке `cmd/nctalk-call/integration_test.go`.
+**PASS на Docker Talk 20.1.11 (2026-07-21)** после правок 3.1/3.2/3.4:
+«говорить» (voice-loop → браузер, слышно ушами) + «слушать» (браузер →
+nctalk-call → rec.pcm, mean −25 dB — сигнал есть). См. `docs/session-state/2026-07-21-nctalk-calls.md`.
