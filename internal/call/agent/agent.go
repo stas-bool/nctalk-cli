@@ -29,6 +29,7 @@ package agent
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -67,6 +68,13 @@ type peerConn interface {
 	// только ждёт offer от браузера, а браузер шлёт offer по своей perfect-
 	// negotiation логике и может не прислать (glare, Task 2.6 pending).
 	CreateOffer() error
+	// OnConnected регистрирует callback, вызываемый ОДИН раз при установке ICE
+	// соединения (webrtc.ICEConnectionStateConnected). Agent использует его, чтобы
+	// послать Spreed signaling unmute — без него Spreed держит audio-sink для
+	// remote участника MUTED (spike-gate root cause 2026-07-20: CallParticipantModel
+	// ставит audioAvailable=true только из unmute-сообщения → без unmute sink
+	// muted → audioLevel=0 → уши не слышат).
+	OnConnected(func())
 	Close() error
 }
 
@@ -612,6 +620,35 @@ func (a *agentState) addPeer(sid string) error {
 	a.mu.Lock()
 	a.peers[sid] = b
 	a.mu.Unlock()
+
+	// 4b. unmute signaling при ICE connected — ТОЛЬКО для sendrecv (audioTrack != nil).
+	// Spreed держит audio-sink для remote участника MUTED, пока не получит
+	// signaling unmute {name:'audio'} (spike-gate root cause 2026-07-20:
+	// CallParticipantModel._handleUnmute → audioAvailable=true → sink unmuted).
+	// Без unmute browser получает RTP (packetsReceived растёт), но Spreed держит
+	// sink muted → уши молчат. В recvonly не отправляем — нет исходящего audio.
+	// Посылается ПОСЛЕ ICE connected (а не сразу после offer): Spreed роутит unmute в
+	// peer.handleMessage только если Peer уже создан (simplewebrtc.js: `peers.length`),
+	// а Peer создаётся при получении нашего offer → answer exchange. ICE connected
+	// гарантирует, что Peer с обеих сторон установлен (answer обменян, DTLS поднят).
+	if a.audioTrack != nil {
+		p.OnConnected(func() {
+			payload, err := json.Marshal(struct {
+				Name string `json:"name"`
+			}{Name: "audio"})
+			if err != nil {
+				fmt.Fprintf(a.cfg.Stderr, "nctalk: unmute %s: marshal: %v\n", sid, err)
+				return
+			}
+			if err := a.cfg.Signaling.Send(a.ctx, a.cfg.Token, signaling.Message{
+				Type:    "unmute",
+				To:      sid,
+				Payload: payload,
+			}); err != nil {
+				fmt.Fprintf(a.cfg.Stderr, "nctalk: unmute %s: %v\n", sid, err)
+			}
+		})
+	}
 
 	// 5. Per-peer горутины.
 	go a.watchPeer(b)

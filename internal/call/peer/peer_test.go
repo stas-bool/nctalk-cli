@@ -503,3 +503,67 @@ func createOfferSDP(p *Peer) (string, error) {
 	// Возвращаем сразу — local description доступен после SetLocalDescription.
 	return offer.SDP, nil
 }
+
+// ---- Test 4: OnConnected callback срабатывает при ICE connected ----
+
+// TestPeer_OnConnected_FiresOnICEConnected проверяет, что callback,
+// зарегистрированный через OnConnected, вызывается ровно один раз при переходе
+// PeerConnection в ICEConnectionStateConnected.
+//
+// Это инфраструктура для unmute-фикса (spike-gate root cause 2026-07-20): agent
+// использует OnConnected, чтобы послать Spreed signaling unmute ровно тогда,
+// когда соединение установлено (Spreed роутит unmute только в существующий Peer).
+func TestPeer_OnConnected_FiresOnICEConnected(t *testing.T) {
+	p1, err := New(Config{ICEServers: nil, IsPolite: false})
+	if err != nil {
+		t.Fatalf("New p1: %v", err)
+	}
+	defer p1.Close()
+	p2, err := New(Config{ICEServers: nil, IsPolite: false})
+	if err != nil {
+		t.Fatalf("New p2: %v", err)
+	}
+	defer p2.Close()
+
+	var fired atomic.Int32
+	p1.OnConnected(func() { fired.Add(1) })
+
+	// Перекачка сообщений + трек + offer — стандартный сценарий NoGlare.
+	errCh := make(chan error, 16)
+	go pumpLoop(p1, p2, errCh)
+	go pumpLoop(p2, p1, errCh)
+
+	track, err := webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus}, "audio", "nctalk",
+	)
+	if err != nil {
+		t.Fatalf("NewTrackLocalStaticSample: %v", err)
+	}
+	if err := p1.AttachOutgoingTrack(track); err != nil {
+		t.Fatalf("AttachOutgoingTrack p1: %v", err)
+	}
+	if err := p1.CreateOffer(); err != nil {
+		t.Fatalf("CreateOffer p1: %v", err)
+	}
+
+	// Ждём срабатывания OnConnected. На localhost ICE+DTLS handshake ~50-200мс.
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) && fired.Load() == 0 {
+		select {
+		case e := <-errCh:
+			t.Logf("pump error (не фатал): %v", e)
+		default:
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := fired.Load(); got != 1 {
+		t.Fatalf("OnConnected вызван %d раз, want 1 (при ICE connected за 30с)", got)
+	}
+
+	// Подождём ещё секунду и убедимся, что повторных вызовов нет (идемпотентность:
+	// ICE может дёргать connected-state несколько раз, unmute должен уйти 1 раз).
+	time.Sleep(500 * time.Millisecond)
+	if got := fired.Load(); got != 1 {
+		t.Errorf("OnConnected вызван %d раз после удержания, want 1 (идемпотентность)", got)
+	}
+}

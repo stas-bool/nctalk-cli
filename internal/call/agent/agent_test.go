@@ -16,6 +16,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"sync"
@@ -55,6 +56,11 @@ type fakePeer struct {
 	attachedTrack *webrtc.TrackLocalStaticSample // review замечание 1: track вместо src
 	onSink        media.AudioSink
 
+	// onConnected — callback, зарегистрированный agent'ом через OnConnected.
+	// fireConnected() вызывает его, имитируя pion OnICEConnectionStateChange(connected).
+	onConnMu  sync.Mutex
+	onConnected func()
+
 	closeMu  sync.Mutex
 	closed   bool
 	closeCnt int
@@ -93,6 +99,28 @@ func (p *fakePeer) OnIncomingAudio(sink media.AudioSink) {
 // покрыт на pion-уровне в peer_test.go/TestPeerLoop_NoGlare). Удовлетворяет
 // peerConn interface (CreateOffer добавлен в незавершёнке audio-pipe).
 func (p *fakePeer) CreateOffer() error { return nil }
+
+// OnConnected — stub peerConn-метода. Production-peer вызывает fn из pion-
+// callbackа OnICEConnectionStateChange(connected); fakePeer просто хранит fn,
+// а тест дёргает её через fireConnected().
+func (p *fakePeer) OnConnected(fn func()) {
+	p.onConnMu.Lock()
+	p.onConnected = fn
+	p.onConnMu.Unlock()
+}
+
+// fireConnected имитирует переход peer'а в ICE connected — вызывает callback,
+// зарегистрированный через OnConnected. Идемпотентность (1 раз) на совести
+// production-peer'а (поле onConnectedFired); в тесте вызываем явно N раз по мере
+// надобности.
+func (p *fakePeer) fireConnected() {
+	p.onConnMu.Lock()
+	fn := p.onConnected
+	p.onConnMu.Unlock()
+	if fn != nil {
+		fn()
+	}
+}
 
 func (p *fakePeer) Close() error {
 	p.closeMu.Lock()
@@ -706,3 +734,78 @@ func TestRun_EvError_Exits(t *testing.T) {
 		t.Errorf("LeaveCall count = %d, want 1 (best-effort cleanup после EvError)", fs.leaveCount)
 	}
 }
+
+// ---- Test: Spreed unmute при ICE connected (spike-gate root cause 2026-07-20) ----
+
+// TestRun_SendsUnmuteOnICEConnected проверяет, что sendrecv-agent при установке
+// ICE-соединения с peer'ом шлёт Spreed signaling-сообщение unmute {name:'audio'}.
+//
+// Почему это нужно (spike-gate 2026-07-20, browser-side верификация через
+// playwright MCP): Spreed CallParticipantsAudioPlayer создаёт <audio>-sink для
+// remote участника, но держит его MUTED, пока CallParticipantModel.audioAvailable
+// !== true. audioAvailable ставится ИСКЛЮЧИТЕЛЬНО из signaling-сообщения unmute
+// (CallParticipantModel._handleUnmute ← simplewebrtc unmute ← peer.send('unmute')).
+// Без unmute от нас sink остаётся muted → audioLevel=0 → уши не слышат, хотя RTP
+// доходит (packetsReceived растёт, decoder активен). Mute/unmute — это signaling
+// (simplewebrtc.js: sendToAll('unmute', {name:'audio'})), НЕ DataChannel.
+//
+// Поэтому sendrecv-agent должен при ICE connected послать unmute. В этом тесте
+// fireConnected() имитирует pion-callback OnICEConnectionStateChange(connected).
+func TestRun_SendsUnmuteOnICEConnected(t *testing.T) {
+	fs := &fakeSignaling{
+		pollLoop: pollSendThenBlock([]signaling.Event{
+			{Kind: signaling.EvUsersUpdated, Users: []signaling.User{
+				{SessionId: "peer-A", InCall: 3},
+			}},
+		}),
+	}
+	counters := newTestCounters()
+	cfg := counters.buildConfig(fs, 3, io.Discard) // InFlags=3 → sendrecv (audioTrack создан)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() { runDone <- Run(ctx, cfg) }()
+
+	// Ждём создания peer'а (addPeer после EvUsersUpdated).
+	fp := waitRecvTimeout(t, counters.peerCh, 500*time.Millisecond)
+
+	// Симулируем ICE connected — production-peer зовёт callback из pion.
+	fp.fireConnected()
+
+	// Ждём unmute в sentMsgs (agent шлёт асинхронно из callback'а).
+	deadline := time.Now().Add(500 * time.Millisecond)
+	var unmute *signaling.Message
+	for time.Now().Before(deadline) && unmute == nil {
+		fs.mu.Lock()
+		for i := range fs.sentMsgs {
+			if fs.sentMsgs[i].Type == "unmute" {
+				m := fs.sentMsgs[i]
+				unmute = &m
+				break
+			}
+		}
+		fs.mu.Unlock()
+		if unmute == nil {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	cancel()
+	<-runDone
+
+	if unmute == nil {
+		t.Fatalf("unmute не отправлен после ICE connected; sentMsgs=%v", fs.sentMsgs)
+	}
+	if unmute.To != "peer-A" {
+		t.Errorf("unmute.To = %q, want %q (sessionId remote-пира)", unmute.To, "peer-A")
+	}
+	// payload — {"name":"audio"} (Spreed _handleUnmute различает audio/video по name).
+	var p map[string]string
+	if err := json.Unmarshal(unmute.Payload, &p); err != nil {
+		t.Fatalf("unmute payload не JSON-object: %v (raw=%s)", err, unmute.Payload)
+	}
+	if p["name"] != "audio" {
+		t.Errorf("unmute payload name = %q, want %q", p["name"], "audio")
+	}
+}
+
