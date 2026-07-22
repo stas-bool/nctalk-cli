@@ -1089,3 +1089,46 @@ func TestRun_ICETimeout_PeerConnected_NoExit(t *testing.T) {
 		t.Fatalf("Run err = %v, want nil", err)
 	}
 }
+
+// TestRun_AudioIn_ReplacesNewEncoder — если cfg.AudioIn задан, NewEncoder НЕ
+// вызывается (encoderCreated==0), encodeLoop читает из AudioIn (agentExit по
+// ctx). Регрессия для review #2: device-источник не проходит через pipe-encoder.
+func TestRun_AudioIn_ReplacesNewEncoder(t *testing.T) {
+	fs := &fakeSignaling{pollLoop: pollSendThenBlock(nil)}
+	counters := newTestCounters()
+	cfg := counters.buildConfig(fs, inFlagSendRecv, io.Discard)
+	// Подменяем AudioSource целиком — NewEncoder не должен вызваться.
+	audioIn := newFakeEncoder()
+	cfg.AudioIn = audioIn
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(100 * time.Millisecond); cancel() }()
+	if err := Run(ctx, cfg); err != nil {
+		t.Fatalf("Run err = %v, want nil", err)
+	}
+	if got := atomic.LoadInt32(&counters.encoderCreated); got != 0 {
+		t.Errorf("encoderCreated = %d, want 0 (AudioIn заменяет NewEncoder)", got)
+	}
+	if audioIn.closeCount() == 0 {
+		t.Errorf("AudioIn.Close не вызван — agent.Run должен закрывать encoder в shutdown")
+	}
+}
+
+// TestRun_AudioInNil_PacingTrue_Regression — если cfg.AudioIn == nil, путь
+// encodeLoop идентичен pipe-режиму (вызов NewEncoder, pacing=true). Существующие
+// 17 тестов это уже неявно проверяют; здесь явная регрессия для review #2.
+func TestRun_AudioInNil_PacingTrue_Regression(t *testing.T) {
+	fs := &fakeSignaling{pollLoop: pollSendThenBlock(nil)}
+	counters := newTestCounters()
+	cfg := counters.buildConfig(fs, inFlagSendRecv, io.Discard)
+	// AudioIn НЕ задаём — по умолчанию nil.
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(100 * time.Millisecond); cancel() }()
+	if err := Run(ctx, cfg); err != nil {
+		t.Fatalf("Run err = %v, want nil", err)
+	}
+	if got := atomic.LoadInt32(&counters.encoderCreated); got != 1 {
+		t.Errorf("encoderCreated = %d, want 1 (AudioIn nil → NewEncoder вызывается)", got)
+	}
+}

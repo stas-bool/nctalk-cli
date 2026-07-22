@@ -156,6 +156,12 @@ type Config struct {
 	Stdout     io.Writer // PCM приём: Mixer → stdout
 	Stderr     io.Writer // статус/диагностика (НЕ содержит кредов)
 
+	// AudioIn — готовый источник Opus-пакетов. Если задан — используется
+	// encodeLoop'ом ВМЕСТО NewEncoder(Stdin). Stdin при этом игнорируется.
+	// Для nctalk-talk сюда подаётся muteSource{device-MicSource}.
+	// Для nctalk-call — nil (как раньше, NewEncoder(Stdin)).
+	AudioIn media.AudioSource
+
 	// Injection points для тестов. nil → production-обёртки над peer.New /
 	// media.NewFFmpeg*. Тесты кладут свои мок-фабрики.
 	NewPeer    peerFactory
@@ -233,12 +239,16 @@ func Run(ctx context.Context, cfg Config) error {
 	var audioTrack *webrtc.TrackLocalStaticSample
 	var encodeDone chan error
 	if cfg.InFlags == inFlagSendRecv {
-		enc, err := cfg.NewEncoder(cfg.Stdin)
-		if err != nil {
-			leaveBestEffort(cfg.Signaling, cfg.Token)
-			return mapCodecErr("encoder", err)
+		if cfg.AudioIn != nil {
+			encoder = cfg.AudioIn
+		} else {
+			enc, err := cfg.NewEncoder(cfg.Stdin)
+			if err != nil {
+				leaveBestEffort(cfg.Signaling, cfg.Token)
+				return mapCodecErr("encoder", err)
+			}
+			encoder = enc
 		}
-		encoder = enc
 		track, err := webrtc.NewTrackLocalStaticSample(
 			webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus},
 			"audio", "nctalk",
@@ -250,7 +260,10 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 		audioTrack = track
 		encodeDone = make(chan error, 1)
-		go agentEncodeLoop(encoder, audioTrack, encodeDone)
+		// pacing=true только для stdin-pipe (NewEncoder): ffmpeg encode читает
+		// вход быстрее real-time, sleep на dur даёт real-time стриминг. При
+		// AudioIn != nil (device-source, уже real-time) pacing=false (review #2).
+		go agentEncodeLoop(encoder, audioTrack, encodeDone, cfg.AudioIn == nil)
 	}
 
 	// Step 3: Mixer + drain-горутина. Тикер инъектируется (тесты) или создаётся
@@ -414,7 +427,7 @@ func encodeDoneCh(ch chan error) <-chan error {
 //   - прочая ошибка src.ReadSample (ffmpeg crash, review замечание 4) —
 //     done<-err, агент выйдет с этим кодом.
 //   - track.WriteSample ошибка (все PC закрылись) — done<-nil (не фатал).
-func agentEncodeLoop(src media.AudioSource, track *webrtc.TrackLocalStaticSample, done chan<- error) {
+func agentEncodeLoop(src media.AudioSource, track *webrtc.TrackLocalStaticSample, done chan<- error, pacing bool) {
 	for {
 		payload, dur, err := src.ReadSample()
 		if err != nil {
@@ -433,13 +446,16 @@ func agentEncodeLoop(src media.AudioSource, track *webrtc.TrackLocalStaticSample
 			done <- nil
 			return
 		}
-		// Real-time pacing. pion WriteSample отправляет RTP немедленно (без
-		// pacing), а ffmpeg encode читает вход быстрее real-time — без sleep весь
-		// PCM-файл кодируется за <1с, encodeLoop тут же EOF, agent выходит ДО
-		// установления ICE (spike-gate 2026-07-20: sendrecv recording.pcm пуст,
-		// exit 0 за <1с). Sleep на dur (типично 20мс Opus-frame) даёт real-time
-		// стриминг — sendrecv держится всё время --in, ICE успевает, audio идёт.
-		time.Sleep(dur)
+		if pacing {
+			// Real-time pacing только для stdin-источника (pipe-режим):
+			// ffmpeg encode читает вход быстрее real-time — без sleep весь
+			// PCM-файл кодируется за <1с, encodeLoop EOF, agent выходит ДО
+			// установления ICE. Sleep на dur (типично 20мс Opus-frame) даёт
+			// real-time стриминг. При AudioIn != nil (device-source, уже
+			// real-time) sleep НЕ делается — иначе scheduler-jitter накапливается
+			// (review finding #2, HIGH).
+			time.Sleep(dur)
+		}
 	}
 }
 
