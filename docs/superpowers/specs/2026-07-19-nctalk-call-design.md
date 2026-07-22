@@ -208,9 +208,11 @@ NCCliClient/
 
 Дополнительно для звонков:
 
-- **`NCTALK_AUDIO_DEVICE_IN` / `NCTALK_AUDIO_DEVICE_OUT`** (опц.) — имена
-  аудио-устройств для `nctalk-talk` (передаются в `ffmpeg -f avfoundation` / `sox`
-  при нестандартной конфигурации; по умолчанию — системные default).
+- **`NCTALK_AUDIO_DEVICE_IN` / `NCTALK_AUDIO_DEVICE_OUT`** (опц.) — аудио-устройства
+  для `nctalk-talk`. `IN` передаётся в `ffmpeg -f avfoundation` как avfoundation-
+  строка `":<audio_idx>"` (default `":0"`); `OUT` — в `ffmpeg -f audiotoolbox
+  -audio_device_index <N>` как int-индекс или `-1` (default — системные default,
+  подробности в §8). При `--audio-backend sox` оба игнорируются.
 - **STUN/TURN** — берётся из capability сервера (`/ocs/.../signaling`-config /
   `spreed-*` capability), **не** из env пользователя. TURN-credentials (если нужны)
   приходят в той же signaling-config от сервера — клиент их не хранит и не логирует.
@@ -280,11 +282,11 @@ nctalk-talk <room>                   # TUI: список участников, M
   `PUT /call/{token}`) — вынесен в future (§13). Mute-статус других участников
   приходит через signaling `usersInRoom` (поле `inCall` flags у каждого
   участника).
-- Выбор audio-IO-backend: по умолчанию `ffmpeg`+avfoundation; переключатель
-  `--audio-backend sox|ffmpeg` (avfoundation в `ffmpeg` на macOS предпочтителен,
-  `sox` — fallback). Список доступных avfoundation-устройств для флагов
-  `NCTALK_AUDIO_DEVICE_IN`/`OUT` выводится командой
-  `ffmpeg -f avfoundation -list_devices true -i ""` (см. §8).
+- Выбор audio-IO-backend: по умолчанию `ffmpeg` с macOS-native muxer'ами
+  (`avfoundation` для input, `audiotoolbox` для output, см. §8); переключатель
+  `--audio-backend sox|ffmpeg` (`sox` — fallback). Список доступных устройств:
+  `ffmpeg -f avfoundation -list_devices true -i ""` (input) и
+  `ffmpeg -f audiotoolbox -list_devices true -i ""` (output) — см. §8.
 
 ### Exit-коды
 
@@ -449,7 +451,9 @@ RTP-упаковки. Если в spike связка Sample↔OGG-парсер �
 
 В TUI-режиме нет stdin/stdout-pipe: устройство → device. Принцип — **2
 ffmpeg-процесса на направление** по схеме «capture+encode в одном процессе» /
-«decode+play в одном»:
+«decode+play в одном». **Важно (review finding #1, CRITICAL):** input и output
+используют **разные muxer'ы** — `avfoundation` (input-only) для захвата и
+`audiotoolbox` (output-only) для вывода:
 
 - **mic → Opus (capture+encode в одном процессе):**
   ```
@@ -458,21 +462,22 @@ ffmpeg-процесса на направление** по схеме «capture+
   ```
   avfoundation-capture → PCM в процессе → libopus-encode → Opus в OGG в pipe →
   `media/ogg` → `AudioSource`. Дефолтный вход `:0` — первый системный input
-  (микрофон); вывода нет, только вход.
-- **Opus → speaker (decode+play в одном процессе):**
+  (микрофон); вывода нет, только вход. Адресация устройства — avfoundation-строка
+  формата `":<audio_idx>"`.
+- **PCM → speaker (вывод через audiotoolbox):** Mixer всегда выдаёт **PCM s16le**
+  (контракт `agent.Run.Stdout`), поэтому playback-ffmpeg ест PCM, а не Opus:
   ```
-  ffmpeg -f opus -i - -f avfoundation "<NCTALK_AUDIO_DEVICE_OUT или :0>"
+  ffmpeg -f s16le -ar 48000 -ac 1 -i - -f audiotoolbox -audio_device_index <N> -
   ```
-  `AudioSink` → `media/ogg` → ffmpeg-stdin (Opus в OGG) → декод → PCM →
-  avfoundation-playback.
-- **Список устройств** для `NCTALK_AUDIO_DEVICE_IN`/`OUT` — часть
-  `--audio-backend ffmpeg` (упомянуто в §6):
+  `NCTALK_AUDIO_DEVICE_OUT` — int-индекс (default `-1` = системное устройство
+  вывода). `avfoundation` как output НЕ работает (input-only muxer).
+- **Список устройств — отдельные команды для input/output** (different muxers,
+  разные способы адресации):
   ```
-  ffmpeg -f avfoundation -list_devices true -i ""
+  ffmpeg -f avfoundation  -list_devices true -i ""   # input (avfoundation-строка ":<audio_idx>")
+  ffmpeg -f audiotoolbox  -list_devices true -i ""   # output (int -audio_device_index <N>)
   ```
-  Выводит индексы video/audio-устройств avfoundation; в `-i` принимается формат
-  `"<video_idx>:<audio_idx>"` (для capture обычно `:0` = дефолтный аудио-вход).
-- **fallback на sox** (если avfoundation недоступен или `--audio-backend sox`):
+- **fallback на sox** (если avfoundation/audiotoolbox недоступен или `--audio-backend sox`):
   capture — `rec -q -r 48000 -c 1 -b 16 -e signed-encoding -t raw -`; playback —
   `play -q -r 48000 -c 1 -b 16 -e signed-encoding -t raw -`.
 
@@ -503,9 +508,12 @@ remote_N ─► WebRTC ─► pion.OnTrack ─► ReadSample(Opus) ─┘
 ```
 mic ─► ffmpeg(capture+enc: avfoundation→OGG/Opus) ─► media/ogg ─► AudioSource ─► pion ─► WebRTC ─► N remotes
 
-remote_1..N ─► OnTrack ─► ReadSample ─► media.Mixer ─► media/ogg ─► ffmpeg(dec+play: OGG/Opus→avfoundation) ─► speaker
+remote_1..N ─► OnTrack ─► ReadSample ─► media.Mixer ─► PCM ─► ffmpeg(dec+play: PCM→audiotoolbox) ─► speaker
 TUI: участники · M=mute · Q=leave · +/−=громкость · индикатор говорящего
 ```
+Mixer выдаёт PCM s16le (контракт `agent.Run.Stdout`); playback-ffmpeg ест PCM и
+пишет в устройство через `-f audiotoolbox -audio_device_index <N>` (`avfoundation`
+input-only, как output НЕ работает — review finding #1).
 
 В обоих режимах `SIGINT`/`SIGTERM` = корректный leave (`DELETE /call/{token}`) с
 гарантированной очисткой peer'ов и subprocess'ов (ffmpeg-процессы — через
