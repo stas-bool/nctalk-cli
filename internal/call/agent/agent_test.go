@@ -16,6 +16,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1227,4 +1228,68 @@ func TestRun_OnStateNil_NoGoroutine_Regression(t *testing.T) {
 	}
 	// Не упало = нет паники на nil-OnState; утечки горутин проверяются по
 	// отсутствию блокировки в завершении теста (timeout в go test).
+}
+
+// ---- Task 4.3: rmsToLevel + pcmMixerWriter RMS → collector (review #10) ----
+
+// TestRMS_ToLevel_Formula — формула dBFS→Level (review #10, спека §7).
+func TestRMS_ToLevel_Formula(t *testing.T) {
+	cases := []struct {
+		name    string
+		samples []int16
+		want    int
+	}{
+		{"тишина", []int16{0, 0, 0, 0}, 0},
+		{"full-scale sine", []int16{32767, -32767, 32767, -32767}, 99}, // rms=32767, dBFS=-0.0005, level=99.999→int=99 (int16 max abs <32768)
+		{"тихий сигнал (~-56 dBFS)", []int16{50, -50, 50, -50}, 6},     // rms=50, dBFS≈-56.3, level≈6
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := rmsToLevel(tc.samples)
+			if got != tc.want {
+				t.Errorf("rmsToLevel(%v) = %d, want %d", tc.samples, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPcmMixerWriter_RMS_ToCollector — после Write PCM-кадра в pcmMixerWriter,
+// collector.snapshot().Participants[idx].Level > 0 для громкого сигнала.
+func TestPcmMixerWriter_RMS_ToCollector(t *testing.T) {
+	coll := newCallStateCollector()
+	coll.updateParticipants([]signaling.User{
+		{SessionId: "sid-A", ActorId: "actor-A", InCall: 3},
+	}, "own")
+	mixer := media.NewMixer(2)
+	w := &pcmMixerWriter{
+		idx: 0, sid: "sid-A", mixer: mixer,
+		frameSamples: mixerFrameSamples, collector: coll,
+	}
+	// Синтетический PCM: full-scale sine.
+	samples := make([]int16, mixerFrameSamples)
+	for i := range samples {
+		if i%2 == 0 {
+			samples[i] = 32767
+		} else {
+			samples[i] = -32767
+		}
+	}
+	// []int16 → s16le bytes.
+	pcm := make([]byte, len(samples)*2)
+	for i, s := range samples {
+		binary.LittleEndian.PutUint16(pcm[i*2:i*2+2], uint16(s))
+	}
+	if _, err := w.Write(pcm); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	snap := coll.snapshot()
+	var level int
+	for _, p := range snap.Participants {
+		if p.SessionId == "sid-A" {
+			level = p.Level
+		}
+	}
+	if level < 90 {
+		t.Errorf("Level после full-scale = %d, want ≥90 (snapshot=%+v)", level, snap)
+	}
 }
