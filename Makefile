@@ -20,7 +20,7 @@ PKG.nctalk      := ./cmd/nctalk
 PKG.nctalk-call := ./cmd/nctalk-call
 PKG.nctalk-talk := ./cmd/nctalk-talk
 
-.PHONY: all build sign build-signed vet test clean setup-codesign help
+.PHONY: all build sign build-signed vet test clean setup-codesign help nctalk nctalk-call nctalk-talk
 
 all: build-signed
 
@@ -40,6 +40,7 @@ build: $(BINS)
 # быть ещё не написаны на ранних этапах).
 nctalk nctalk-call nctalk-talk:
 	@if [ -d "$(PKG.$@)" ]; then \
+	  rm -f "$@"; \
 	  echo "→ go build -o $@ $(PKG.$@)"; \
 	  go build -o "$@" "$(PKG.$@)"; \
 	else \

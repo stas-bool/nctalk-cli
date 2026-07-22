@@ -31,6 +31,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"strings"
 	"time"
@@ -38,6 +39,17 @@ import (
 	"github.com/stas/nctalk/internal/exit"
 	"github.com/stas/nctalk/internal/transport"
 )
+
+// signalingDebug — отладочные логи signaling-парсера. Молчат по умолчанию;
+// включаются env NCTALK_DEBUG=1 (или CLI-флагом --debug, который выставляет env).
+// Пишет через стандартный log (os.Stderr) — намеренно: debug нужен в терминале
+// при ручной отладке, а не в call.log, и только если человек явно попросил.
+func signalingDebug(format string, a ...any) {
+	if os.Getenv("NCTALK_DEBUG") == "" {
+		return
+	}
+	log.Printf("DEBUG signaling: " + format, a...)
+}
 
 // Client — signaling-клиент. Не знает про WebRTC-пир и аудио (микширование,
 // кодеки) — только OCS-транспорт и протокол signaling. Создаётся один раз на
@@ -303,10 +315,10 @@ func (c *Client) Send(ctx context.Context, token string, msg Message) error {
 //
 // Прочие Type (например, "control") и неизвестные внутренние type — скипаются.
 func parseEnvelopes(envelopes []signalingEnvelope) []Event {
-	log.Printf("DEBUG signaling: parseEnvelopes count=%d", len(envelopes))
+	signalingDebug("parseEnvelopes count=%d", len(envelopes))
 	events := make([]Event, 0, len(envelopes))
 	for _, env := range envelopes {
-		log.Printf("DEBUG signaling: env.Type=%s", env.Type)
+		signalingDebug("env.Type=%s", env.Type)
 		switch env.Type {
 		case "usersInRoom":
 			users, ok := decodeUsers(env.Data)
@@ -317,9 +329,9 @@ func parseEnvelopes(envelopes []signalingEnvelope) []Event {
 		case "message":
 			inner, ok := decodeInnerMessage(env.Data)
 			if ok {
-				log.Printf("DEBUG signaling: inner.type=%s from=%.12s", inner.Type, inner.From)
+				signalingDebug("inner.type=%s from=%.12s", inner.Type, inner.From)
 			} else {
-				log.Printf("DEBUG signaling: inner decode FAILED")
+				signalingDebug("inner decode FAILED")
 			}
 			if !ok {
 				continue
@@ -394,10 +406,10 @@ func decodeSDPEvent(inner innerMessage) (Event, bool) {
 func decodeCandidateEvent(inner innerMessage) (Event, bool) {
 	var p icePayload
 	if err := json.Unmarshal(inner.Payload, &p); err != nil {
-		log.Printf("DEBUG signaling: decodeCandidateEvent FAIL err=%v payload=%.200s", err, string(inner.Payload))
+		signalingDebug("decodeCandidateEvent FAIL err=%v payload=%.200s", err, string(inner.Payload))
 		return Event{}, false
 	}
-	log.Printf("DEBUG signaling: decodeCandidateEvent OK cand=%.120s", p.Candidate.Candidate)
+	signalingDebug("decodeCandidateEvent OK cand=%.120s", p.Candidate.Candidate)
 	return Event{
 		Kind: EvCandidate,
 		From: inner.From,
