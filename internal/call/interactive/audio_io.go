@@ -196,6 +196,8 @@ type speakerWriter struct {
 	cancel context.CancelFunc
 	stdin  io.WriteCloser
 
+	firstErr  error // первый error от ffmpeg-stdin (review M-4: silent crash detection)
+	errOnce   sync.Once
 	closeOnce sync.Once
 	waitOnce  sync.Once
 	waitErr   error
@@ -204,7 +206,7 @@ type speakerWriter struct {
 // NewSpeakerWriter запускает playback-ffmpeg и возвращает stdin-pipe как io.WriteCloser.
 // deviceOut — int-индекс audiotoolbox или строка "default"/"-1" (default "-1" =
 // системное устройство вывода). Пустая строка → "-1".
-func NewSpeakerWriter(deviceOut string) (io.WriteCloser, error) {
+func NewSpeakerWriter(deviceOut string) (*speakerWriter, error) {
 	if deviceOut == "" || deviceOut == "default" {
 		deviceOut = "-1"
 	}
@@ -238,10 +240,21 @@ func NewSpeakerWriter(deviceOut string) (io.WriteCloser, error) {
 	return &speakerWriter{cmd: cmd, cancel: cancel, stdin: stdin}, nil
 }
 
-// Write пробрасывает PCM s16le в stdin процесса.
+// Write пробрасывает PCM s16le в stdin процесса. При ошибке (playback-ffmpeg
+// упал — невалидный audio_device_index, устройство пропало) запоминает первый
+// error для LastError(): mixerDrain в agent'е молча проглатывает Write-ошибку,
+// иначе пользователь видит «работающий» TUI без звука и без причины (review M-4).
 func (s *speakerWriter) Write(p []byte) (int, error) {
-	return s.stdin.Write(p)
+	n, err := s.stdin.Write(p)
+	if err != nil {
+		s.errOnce.Do(func() { s.firstErr = err })
+	}
+	return n, err
 }
+
+// LastError возвращает первый error от ffmpeg-stdin (nil если не было).
+// interactive.Run логирует его после agent.Run (review M-4).
+func (s *speakerWriter) LastError() error { return s.firstErr }
 
 // Close — idempotent. Close stdin → ffmpeg финиширует → Wait.
 func (s *speakerWriter) Close() error {

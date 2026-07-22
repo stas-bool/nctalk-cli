@@ -1,6 +1,6 @@
 // internal/call/interactive/volume.go — PCM gain на вывод в динамик.
 // Спека 2026-07-21 §4.3, §7. Перехватывает io.Writer (PCM s16le от Mixer'а),
-// масштабирует int16-семплы на gain/100 c clipping на ±32767, перед inner.Write.
+// масштабирует int16-семплы на gain/100 c clipping на [-32768, 32767], перед inner.Write.
 package interactive
 
 import (
@@ -10,7 +10,7 @@ import (
 )
 
 // volumeWriter — перехватывает io.Writer (PCM s16le на вывод). Масштабирует
-// каждый int16-семпл на gain (×gain/100), с clipping на ±32767, перед inner.Write.
+// каждый int16-семпл на gain (×gain/100), с clipping на [-32768, 32767], перед inner.Write.
 // Применяется к PCM ПОСЛЕ Mixer'а, перед playback-ffmpeg => влияет только на
 // динамик (в сеть уходит как было).
 type volumeWriter struct {
@@ -38,8 +38,8 @@ func (w *volumeWriter) Write(p []byte) (int, error) {
 		switch {
 		case scaled > 32767:
 			scaled = 32767
-		case scaled < -32767:
-			scaled = -32767
+		case scaled < -32768:
+			scaled = -32768
 		}
 		binary.LittleEndian.PutUint16(out[i:i+2], uint16(int16(scaled)))
 	}

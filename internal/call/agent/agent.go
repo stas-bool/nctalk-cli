@@ -36,6 +36,7 @@ import (
 	"math"
 	"net/http"
 	"os/exec"
+	"sort"
 	"sync"
 	"time"
 
@@ -563,10 +564,11 @@ func agentEncodeLoop(src media.AudioSource, track *webrtc.TrackLocalStaticSample
 // — оба под lock. review finding #5: без mutex гонки между горутиной
 // pcmMixerWriter.Write и main-loop reconcile при чтении/записи общей map.
 type callStateCollector struct {
-	mu     sync.Mutex
-	status string
-	parts  map[string]*Participant // sessionId → указатель на актуальный Participant
-	levels map[string]int           // sessionId → последний Level (RMS из Task 4.3)
+	mu        sync.Mutex
+	status    string
+	failedSid string                  // sessionId пира с ICE-failure (transient, review M-2)
+	parts     map[string]*Participant // sessionId → указатель на актуальный Participant
+	levels    map[string]int          // sessionId → последний Level (RMS из Task 4.3)
 }
 
 func newCallStateCollector() *callStateCollector {
@@ -579,6 +581,16 @@ func newCallStateCollector() *callStateCollector {
 func (c *callStateCollector) setStatus(s string) {
 	c.mu.Lock()
 	c.status = s
+	c.mu.Unlock()
+}
+
+// markPeerFailed — transient-статус ICE-failure одного пира. Запоминает sid,
+// чтобы updateParticipants сбросил статус когда signaling подтвердит уход пира
+// (review M-2: иначе "peer failed: <sid>" липнет навсегда в long-lived звонке).
+func (c *callStateCollector) markPeerFailed(sid string) {
+	c.mu.Lock()
+	c.failedSid = sid
+	c.status = "peer failed: " + sid
 	c.mu.Unlock()
 }
 
@@ -614,6 +626,17 @@ func (c *callStateCollector) updateParticipants(users []signaling.User, ownSid s
 			}
 		}
 	}
+	// Сброс transient peer-failure: упавший пир ушёл из signaling (больше не в
+	// want) → статус больше не релевантен. Если остались живые участники —
+	// "joined" (review M-2).
+	if c.failedSid != "" {
+		if _, ok := want[c.failedSid]; !ok {
+			c.failedSid = ""
+			if len(c.parts) > 0 {
+				c.status = "joined"
+			}
+		}
+	}
 }
 
 // setLevel — вызывается из pcmMixerWriter (per-peer горутина, в Task 4.3).
@@ -636,6 +659,11 @@ func (c *callStateCollector) snapshot() CallState {
 		cp.Level = c.levels[sid]
 		out.Participants = append(out.Participants, cp)
 	}
+	// Детерминированный порядок (review M-3): без sort итерация map даёт
+	// случайный порядок → имена прыгают в TUI на каждом OnState (10Гц).
+	sort.Slice(out.Participants, func(i, j int) bool {
+		return out.Participants[i].Name < out.Participants[j].Name
+	})
 	return out
 }
 
@@ -1057,10 +1085,11 @@ func (a *agentState) watchPeer(b *peerBundle) {
 		if err != nil {
 			reason = err.Error()
 		}
-		// Single-peer failure → статус "peer failed: <sid>" в OnState-снапшотах
-		// (review #7). No-op в pipe-режиме (state==nil).
+		// Single-peer failure → transient-статус "peer failed: <sid>" в OnState-
+		// снапшотах (review #7). Сбрасывается когда signaling подтвердит уход пира
+		// (review M-2, markPeerFailed). No-op в pipe-режиме (state==nil).
 		if a.state != nil {
-			a.state.setStatus("peer failed: " + b.sid)
+			a.state.markPeerFailed(b.sid)
 		}
 		a.removePeer(b.sid, reason)
 	case <-b.peer.Done():

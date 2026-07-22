@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -107,6 +106,12 @@ func Run(ctx context.Context, cfg Config) error {
 
 	// 7. Cleanup: только speakerWriter. mic (MicSource) закрывает agent.Run через
 	// encoder.Close = AudioIn.Close = muteSource.Close = MicSource.Close (review #4).
+	// Review M-4: если playback-ffmpeg упал (невалидный audio_device_index и т.п.),
+	// speakerWriter.Write молча копил error — логируем первый, иначе пользователь
+	// не поймёт, почему нет звука в динамике.
+	if le := speaker.LastError(); le != nil && cfg.LogFile != nil {
+		fmt.Fprintf(cfg.LogFile, "nctalk-talk: playback (audiotoolbox) упал: %v\n", le)
+	}
 	_ = speaker.Close()
 	return agentErr
 }
@@ -173,6 +178,16 @@ func (e *stateEnricher) onState(raw agent.CallState) {
 			Speaking:  spk,
 		})
 	}
+	// Cleanup ушедших участников (review L-4): иначе speaking-map растёт на churn.
+	present := make(map[string]struct{}, len(raw.Participants))
+	for _, p := range raw.Participants {
+		present[p.SessionId] = struct{}{}
+	}
+	for sid := range e.speaking {
+		if _, ok := present[sid]; !ok {
+			delete(e.speaking, sid)
+		}
+	}
 	e.last = enriched
 	e.mu.Unlock()
 	// Всегда пушим Update — Level-полоска живая (review #12: dedup без Level
@@ -180,12 +195,4 @@ func (e *stateEnricher) onState(raw agent.CallState) {
 	e.view.Update(enriched)
 }
 
-// participantsKey — ключ дедупа по count+sorted(sessionId,name). Заготовка для
-// future оптимизации (сейчас всегда пушим — review #12).
-func participantsKey(ps []ParticipantState) string {
-	var b strings.Builder
-	for _, p := range ps {
-		fmt.Fprintf(&b, "%s|%s;", p.SessionId, p.Name)
-	}
-	return b.String()
-}
+// (participantsKey удалён — был dead code, review L-6.)

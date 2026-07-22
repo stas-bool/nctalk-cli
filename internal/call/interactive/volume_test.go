@@ -45,7 +45,7 @@ func TestVolumeWriter_Gain200_Clipping(t *testing.T) {
 	v := &volumeWriter{inner: &inner}
 	v.SetGain(200)
 	pcm := make([]byte, 4)
-	negFullScale := int16(-32767) // переменная — чтобы uint16()-каст был non-constant (Go 1.21)
+	negFullScale := int16(-32768) // переменная — чтобы uint16()-каст был non-constant (Go 1.21)
 	binary.LittleEndian.PutUint16(pcm[0:2], 32767)            // +full-scale
 	binary.LittleEndian.PutUint16(pcm[2:4], uint16(negFullScale)) // -full-scale
 	if _, err := v.Write(pcm); err != nil {
@@ -56,8 +56,8 @@ func TestVolumeWriter_Gain200_Clipping(t *testing.T) {
 	if got0 != 32767 {
 		t.Errorf("+full-scale ×2: got %d, want 32767 (clipped)", got0)
 	}
-	if got1 != -32767 {
-		t.Errorf("-full-scale ×2: got %d, want -32767 (clipped)", got1)
+	if got1 != -32768 {
+		t.Errorf("-full-scale ×2: got %d, want -32768 (clipped)", got1)
 	}
 }
 
