@@ -136,7 +136,29 @@ const (
 	// inFlagWithAudio — бит WITH_AUDIO в InCall-флаге юзера (для фильтрации
 	// users: подключаемся только к тем, у кого есть аудио).
 	inFlagWithAudio = 2
+	// stateTickPeriod — частота пуша OnState-снапшота. 100мс = 10Гц — достаточно
+	// для TUI-обновления и не нагружает CPU.
+	stateTickPeriod = 100 * time.Millisecond
 )
+
+// Participant — один remote-участник в снапшоте состояния звонка.
+// Поля — только то, что знает agent; mute/volume/speaking — enrichment в interactive.
+type Participant struct {
+	SessionId string
+	Name      string // В MVP = signaling.User.ActorId (id, НЕ display name — review #6).
+	Level     int    // 0..100, нормализованный RMS (raw из pcmMixerWriter, Task 4.3).
+}
+
+// CallState — снапшот состояния звонка, пушится в cfg.OnState раз в ~100мс.
+// Status (review #7) — lifecycle-фазы:
+//   "joining"             — до JoinCall success;
+//   "joined"              — после JoinCall success;
+//   "peer failed: <sid>"  — single-peer failure (из watchPeer);
+//   "ice-timeout"         — exit по ICE-таймауту.
+type CallState struct {
+	Status       string
+	Participants []Participant
+}
 
 // Config для Run. Все поля читаются только в момент вызова Run (immutable в
 // течение звонка) — мьютексов не требует.
@@ -161,6 +183,10 @@ type Config struct {
 	// Для nctalk-talk сюда подаётся muteSource{device-MicSource}.
 	// Для nctalk-call — nil (как раньше, NewEncoder(Stdin)).
 	AudioIn media.AudioSource
+
+	// OnState — periodic-снапшот состояния звонка. Agent вызывает раз в ~100мс из
+	// throttle-горутины. nil → не вызывается (nctalk-call не нуждается).
+	OnState func(CallState)
 
 	// Injection points для тестов. nil → production-обёртки над peer.New /
 	// media.NewFFmpeg*. Тесты кладут свои мок-фабрики.
@@ -223,11 +249,26 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 
+	// callStateCollector — создаётся только если задан cfg.OnState (TUI-режим
+	// nctalk-talk). nctalk-call (pipe-режим) оставляет collector==nil → throttle-
+	// горутина не запускается, nil-checks в reconcile/watchPeer — no-op.
+	var collector *callStateCollector
+	if cfg.OnState != nil {
+		collector = newCallStateCollector()
+		collector.setStatus("joining")
+	}
+
 	// Step 1: JoinCall. При ошибке — маппинг через mapJoinCallErr (спека §10):
 	// 404 (комната) → exit 2; 412 (lobby) → exit 1 с пояснением; 403/прочее → exit 1
 	// (404 различается в exit.FromClientErr, lobby-пояснение добавляем здесь).
 	if err := cfg.Signaling.JoinCall(ctx, cfg.Token, cfg.InFlags); err != nil {
 		return mapJoinCallErr(err)
+	}
+
+	// JoinCall success → статус "joined" (review #7). До этого снапшоты содержат
+	// "joining" — TUI видит переход.
+	if collector != nil {
+		collector.setStatus("joined")
 	}
 
 	// Step 2: encoder + общий audioTrack (если sendrecv). encodeLoop ОДИН на
@@ -306,6 +347,7 @@ func Run(ctx context.Context, cfg Config) error {
 		audioTrack:   audioTrack,
 		peers:        make(map[string]*peerBundle),
 		ownSessionId: cfg.OwnSessionId, // может быть пустым — извлечём из EvUsersUpdated
+		state:        collector,        // nil если cfg.OnState==nil (pipe-режим nctalk-call)
 	}
 
 	// ICE-timeout timer (спека §6/§10): бюджет на установку первого peer'а от
@@ -319,6 +361,19 @@ func Run(ctx context.Context, cfg Config) error {
 	iceTimer := time.NewTimer(iceTimeout)
 	defer iceTimer.Stop()
 	iceC := iceTimer.C
+
+	// stateThrottle-горутина — пушит снапшот в cfg.OnState раз в stateTickPeriod.
+	// Только если collector != nil (cfg.OnState != nil). stateStop сигнализирует
+	// shutdown из main-loop'а (закрываем в Step 9 finalization ДО drainStop),
+	// stateDone даёт дождаться выхода throttle (гарантия: после <-stateDone ни
+	// одного вызова OnState больше нет — безопасно читать captured-переменные).
+	var stateStop chan struct{}
+	var stateDone chan struct{}
+	if collector != nil {
+		stateStop = make(chan struct{})
+		stateDone = make(chan struct{})
+		go stateThrottle(ctx, collector, cfg.OnState, stateStop, stateDone)
+	}
 
 	// Step 5-8: main select.
 	var pollErr error
@@ -375,6 +430,9 @@ mainLoop:
 			if a.iceMaxParticipants() == 0 {
 				// «Я один в звонке» — штатно ждём других участников. pollErr
 				// остаётся nil → Run вернёт nil (exit 0).
+				if collector != nil {
+					collector.setStatus("ice-timeout")
+				}
 				break mainLoop
 			}
 			// Участники с аудио были, но за ICE-timeout никто не ответил → exit 1
@@ -382,15 +440,24 @@ mainLoop:
 			pollErr = exit.Exit(exit.ExitGeneric,
 				fmt.Errorf("ICE timeout: ни один peer не установил соединение за %s "+
 					"(участников с аудио в звонке: %d)", iceTimeout, a.iceMaxParticipants()))
+			if collector != nil {
+				collector.setStatus("ice-timeout")
+			}
 			break mainLoop
 		}
 	}
 
 	// Step 9: финализация. Порядок важен:
-	//   1. drainStop + ждём drain — больше никто не пишет в Stdout.
-	//   2. close peers/decoders/encoder — корректный shutdown pion'а и ffmpeg'ов.
-	//   3. LeaveCall best-effort — сервер убирает нас из usersInRoom.
-	//   4. Останавливаем внутренний тикер (если был).
+	//   1. stateStop + ждём stateDone — throttle больше не вызывает OnState
+	//      (финальный снапшот с terminal-статусом уже ушёл через case <-stop).
+	//   2. drainStop + ждём drain — больше никто не пишет в Stdout.
+	//   3. close peers/decoders/encoder — корректный shutdown pion'а и ffmpeg'ов.
+	//   4. LeaveCall best-effort — сервер убирает нас из usersInRoom.
+	//   5. Останавливаем внутренний тикер (если был).
+	if stateStop != nil {
+		close(stateStop)
+		<-stateDone
+	}
 	close(drainStop)
 	<-drainDone
 	if ticker != nil {
@@ -413,6 +480,35 @@ func encodeDoneCh(ch chan error) <-chan error {
 		return nil
 	}
 	return ch
+}
+
+// stateThrottle — горутина периодического снапшота состояния (раз в stateTickPeriod).
+// Выход по ctx.Done ИЛИ close(stateStop) — в обоих случаях шлёт финальный снапшот
+// (OnState увидит terminal-статус: "ice-timeout" / "peer failed: …" / "joined").
+// defer close(done) даёт main-loop'у дождаться выхода через <-stateDone — после
+// этого ни одного вызова OnState больше нет (гарантия для captured-переменных
+// вызывающего).
+//
+// Финальный снапшот при ctx.Done: main-loop выходит из-за cancel, но terminal-
+// статус ("ice-timeout", "peer failed: …") уже установлен в collector ДО break
+// mainLoop; throttle отправит последний снапшот с этим статусом. При выходе через
+// stateStop — аналогично (collector уже содержит terminal-статус).
+func stateThrottle(ctx context.Context, c *callStateCollector, cb func(CallState), stop <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
+	ticker := time.NewTicker(stateTickPeriod)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			cb(c.snapshot())
+			return
+		case <-stop:
+			cb(c.snapshot())
+			return
+		case <-ticker.C:
+			cb(c.snapshot())
+		}
+	}
 }
 
 // agentEncodeLoop — ОДИН encodeLoop на звонок (review замечание 1). Читает
@@ -461,6 +557,87 @@ func agentEncodeLoop(src media.AudioSource, track *webrtc.TrackLocalStaticSample
 
 // ---- agentState: разделяемое состояние ----
 
+// callStateCollector — thread-safe хранилище снапшота для OnState. Write RMS
+// (из per-peer pcmMixerWriter в Task 4.3) и update participants (из reconcile)
+// — оба под lock. review finding #5: без mutex гонки между горутиной
+// pcmMixerWriter.Write и main-loop reconcile при чтении/записи общей map.
+type callStateCollector struct {
+	mu     sync.Mutex
+	status string
+	parts  map[string]*Participant // sessionId → указатель на актуальный Participant
+	levels map[string]int           // sessionId → последний Level (RMS из Task 4.3)
+}
+
+func newCallStateCollector() *callStateCollector {
+	return &callStateCollector{
+		parts:  make(map[string]*Participant),
+		levels: make(map[string]int),
+	}
+}
+
+func (c *callStateCollector) setStatus(s string) {
+	c.mu.Lock()
+	c.status = s
+	c.mu.Unlock()
+}
+
+// updateParticipants — обновляет карту участников под lock. RMS-levels НЕ
+// сбрасываются (если sid остался — уровень сохраняется; ушёл — удаляется).
+func (c *callStateCollector) updateParticipants(users []signaling.User, ownSid string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	want := make(map[string]struct{}, len(users))
+	for _, u := range users {
+		if u.SessionId == "" || u.SessionId == ownSid {
+			continue
+		}
+		if u.InCall&inFlagWithAudio == 0 {
+			continue
+		}
+		want[u.SessionId] = struct{}{}
+	}
+	for sid := range c.parts {
+		if _, ok := want[sid]; !ok {
+			delete(c.parts, sid)
+			delete(c.levels, sid)
+		}
+	}
+	for _, u := range users {
+		if _, ok := want[u.SessionId]; !ok {
+			continue
+		}
+		if _, exists := c.parts[u.SessionId]; !exists {
+			c.parts[u.SessionId] = &Participant{
+				SessionId: u.SessionId,
+				Name:      u.ActorId, // MVP = ActorId (review #6).
+			}
+		}
+	}
+}
+
+// setLevel — вызывается из pcmMixerWriter (per-peer горутина, в Task 4.3).
+// Idempotent, lock-protected.
+func (c *callStateCollector) setLevel(sid string, level int) {
+	c.mu.Lock()
+	if _, ok := c.parts[sid]; ok {
+		c.levels[sid] = level
+	}
+	c.mu.Unlock()
+}
+
+// snapshot — копия состояния для OnState.
+func (c *callStateCollector) snapshot() CallState {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := CallState{Status: c.status, Participants: make([]Participant, 0, len(c.parts))}
+	for sid, p := range c.parts {
+		cp := *p
+		cp.Level = c.levels[sid]
+		out.Participants = append(out.Participants, cp)
+	}
+	return out
+}
+
 // agentState инкапсулирует peers-map и счетчик idx. Защищён мьютексом для
 // конкурентного доступа из main loop (reconcile) и per-peer горутин (watcher
 // → removePeer).
@@ -503,6 +680,11 @@ type agentState struct {
 	ownSessionIdMu   sync.Mutex
 	ownSessionId     string
 	ownUserIdChecked bool
+
+	// state — thread-safe коллектор снапшота для OnState. nil если cfg.OnState==nil
+	// (pipe-режим nctalk-call). write RMS (per-peer pcmMixerWriter, Task 4.3) и
+	// update participants (reconcile) — оба под lock (review finding #5).
+	state *callStateCollector
 }
 
 // peerBundle — связка «peer + decoder + idx в Mixer'е» для одного remote-пира.
@@ -594,6 +776,13 @@ func (a *agentState) reconcile(users []signaling.User) {
 		if err := a.addPeer(sid); err != nil {
 			fmt.Fprintf(a.cfg.Stderr, "nctalk: не удалось создать peer %s: %v\n", sid, err)
 		}
+	}
+
+	// callStateCollector update — пушит актуальный список участников в OnState-
+	// снапшоты (Task 4.2). ownSid уже вычислен выше (a.ownSessionIdLocked()).
+	// No-op в pipe-режиме (state==nil).
+	if a.state != nil {
+		a.state.updateParticipants(users, ownSid)
 	}
 }
 
@@ -864,6 +1053,11 @@ func (a *agentState) watchPeer(b *peerBundle) {
 		reason := "disconnected"
 		if err != nil {
 			reason = err.Error()
+		}
+		// Single-peer failure → статус "peer failed: <sid>" в OnState-снапшотах
+		// (review #7). No-op в pipe-режиме (state==nil).
+		if a.state != nil {
+			a.state.setStatus("peer failed: " + b.sid)
 		}
 		a.removePeer(b.sid, reason)
 	case <-b.peer.Done():

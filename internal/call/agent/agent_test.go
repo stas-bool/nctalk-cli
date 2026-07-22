@@ -1132,3 +1132,99 @@ func TestRun_AudioInNil_PacingTrue_Regression(t *testing.T) {
 		t.Errorf("encoderCreated = %d, want 1 (AudioIn nil → NewEncoder вызывается)", got)
 	}
 }
+
+// ---- Task 4.2: callStateCollector + OnState (review #5, #7) ----
+
+// TestCallStateCollector_Concurrent — гонка setLevel ∥ updateParticipants ∥ snapshot.
+// Запускать с -race: data-race = FAIL. review finding #5.
+func TestCallStateCollector_Concurrent(t *testing.T) {
+	c := newCallStateCollector()
+	c.setStatus("joined")
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		sid := fmt.Sprintf("peer-%d", i)
+		go func() {
+			defer wg.Done()
+			c.updateParticipants([]signaling.User{{
+				SessionId: sid, ActorId: "actor-" + sid, InCall: 3,
+			}}, "own")
+			for j := 0; j < 100; j++ {
+				c.setLevel(sid, j)
+				_ = c.snapshot()
+			}
+		}()
+	}
+	wg.Wait()
+	snap := c.snapshot()
+	if snap.Status != "joined" {
+		t.Errorf("status = %q, want joined", snap.Status)
+	}
+}
+
+// TestRun_OnState_SnapshotAndStatus — OnState получает переход joining→joined
+// и участников в снапшоте после EvUsersUpdated. Гарантирует, что Status меняется
+// по жизненному циклу (review #7), а participants — из reconcile.
+func TestRun_OnState_SnapshotAndStatus(t *testing.T) {
+	fs := &fakeSignaling{
+		pollLoop: pollSendThenBlock([]signaling.Event{
+			{Kind: signaling.EvUsersUpdated, Users: []signaling.User{
+				{SessionId: "peer-A", ActorId: "actor-A", InCall: 3},
+			}},
+		}),
+	}
+	counters := newTestCounters()
+	cfg := counters.buildConfig(fs, 1, io.Discard) // recvonly — encodeLoop не запускается
+
+	var mu sync.Mutex
+	var snaps []CallState
+	cfg.OnState = func(s CallState) {
+		mu.Lock()
+		snaps = append(snaps, s)
+		mu.Unlock()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(300 * time.Millisecond); cancel() }() // > 3×stateTickPeriod
+	if err := Run(ctx, cfg); err != nil {
+		t.Fatalf("Run err = %v, want nil", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(snaps) == 0 {
+		t.Fatal("OnState ни разу не вызван")
+	}
+	first := snaps[0]
+	if first.Status != "joining" && first.Status != "joined" {
+		t.Errorf("first status = %q, want joining|joined", first.Status)
+	}
+	found := false
+	for _, s := range snaps {
+		for _, p := range s.Participants {
+			if p.SessionId == "peer-A" && p.Name == "actor-A" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Errorf("ни в одном снапшоте нет peer-A с Name=actor-A (snaps=%+v)", snaps)
+	}
+}
+
+// TestRun_OnStateNil_NoGoroutine_Regression — OnState==nil → без throttle-горутины
+// и collector'а. Косвенно: agent.Run завершается штатно, нет паники на nil-OnState.
+func TestRun_OnStateNil_NoGoroutine_Regression(t *testing.T) {
+	fs := &fakeSignaling{pollLoop: pollSendThenBlock(nil)}
+	counters := newTestCounters()
+	cfg := counters.buildConfig(fs, 1, io.Discard)
+	// OnState НЕ задаём.
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(150 * time.Millisecond); cancel() }()
+	if err := Run(ctx, cfg); err != nil {
+		t.Fatalf("Run err = %v, want nil", err)
+	}
+	// Не упало = нет паники на nil-OnState; утечки горутин проверяются по
+	// отсутствию блокировки в завершении теста (timeout в go test).
+}
