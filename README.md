@@ -143,3 +143,20 @@ CGO_ENABLED=0 go vet ./...
 - `internal/cli` — разбор флагов, роутинг, правило разрешения `<room>`, exit-коды.
 - `internal/render` — текстовые таблицы и JSON.
 - `testdata/` — обезличенные JSON-фикстуры ответов Talk.
+
+## Аудио-звонки (эксперимент — ветка `feat/nctalk-calls`)
+
+Реальное аудио в звонках Talk (слушать + говорить) из терминала/процесса, как **отдельный модуль** к `nctalk`. **Не в `main`**: spike-first, spike-gate ещё не пройден.
+
+- **`nctalk-call <room>`** — режим «агент/pipe»: PCM `s16le`/48 кГц/моно через stdin/stdout (для скрипта/бота/записи). Флаг `--recvonly` — только приём (запись чужого аудио без передачи своего).
+- **`nctalk-talk <room>`** — режим «человек/TUI» (микрофон/динамик через `ffmpeg`/`sox`) — *pending* (Этап 4).
+
+Стек: `github.com/pion/webrtc/v4` + `ffmpeg` (codec и audio-IO, без CGO), macOS. `cmd/nctalk` изолирован от WebRTC. Подробно — в спеке [`docs/superpowers/specs/2026-07-19-nctalk-call-design.md`](docs/superpowers/specs/2026-07-19-nctalk-call-design.md).
+
+```sh
+make setup-codesign        # one-time: codesign-identity nctalk-dev (убирает вопросы фаервола/TCC при пересборке)
+make build-signed          # собрать + подписать nctalk/nctalk-call/nctalk-talk (CGO=0)
+./nctalk-call <room>       # stdin → в звонок; из звонка → stdout (PCM s16le/48к/моно)
+```
+
+**Статус:** реализован spike (Этапы 0–2), прошёл code-review (9 валидных правок), `go test` и `go test -race` зелёные. Дальше — **spike-gate**: ручной запуск реального звонка (сервер + собеседник в браузере + разрешение firewall) → объективный PASS/FAIL (round-trip синусоиды 440 Гц) → go/no-go для продолжения.

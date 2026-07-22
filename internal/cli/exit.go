@@ -1,83 +1,53 @@
+// cli/exit.go — тонкий re-export контракта exit-кодов из пакета internal/exit
+// (спека 2026-07-19 §4, Task 1.2). Все типы/константы/хелперы перенесены в
+// internal/exit, чтобы cmd/nctalk-call и cmd/nctalk-talk могли использовать тот
+// же контракт без зависимости от cli-роутера. Здесь оставлены алиасы и тонкие
+// обёртки для backcompat: handler-ы (handlers_chat.go, handlers_reactions.go,
+// handlers_search.go, handlers_rooms.go) и тесты продолжают ссылаться на
+// cli.ExitError, cli.ExitOK и т.д. без правок.
+//
+//_layer direction: cli → exit (НЕ наоборот, иначе цикл импортов).
 package cli
 
-import (
-	"errors"
-	"net/http"
+import "github.com/stas/nctalk/internal/exit"
 
-	"github.com/stas/nctalk/internal/client"
-)
+// ExitError — алиас для exit.ExitError (см. комментарий выше). Аlias в Go —
+// это ТОТ ЖЕ тип (не wrapper), поэтому существующий код вида
+// `ExitError{Code: ExitGeneric, Err: err}` и `var ee ExitError; errors.As(...)`
+// работает идентично.
+type ExitError = exit.ExitError
 
-// Exit-коды по спеке §7.
+// Exit-коды по спеке §7 — реэкспорт констант из internal/exit.
 //
 //	0 — успех
 //	1 — общая ошибка (сеть/авторизация)
 //	2 — not found (только для разрешения <room>: 0 совпадений по имени)
-//	3 — ambiguous (>1 совпадения по имени, не угадываем)
+//	3 — ambiguous (>1 совпадение по имени, не угадываем)
 //
-// ВНИМАНИЕ: константа для кода 1 названа ExitGeneric, а не ExitError, как в
-// плане — потому что ExitError уже занято именем типа (см. ниже) в той же
-// области видимости, и Go не допускает совпадения имён константы и типа.
-// Спека §7 задаёт только числа кодов (0/1/2/3), не имена; коллизия возникла
-// на уровне плана. Семантика кода 1 — «общая ошибка (сеть/авторизация)» —
-// сохранена.
+// Константа для кода 1 названа ExitGeneric (не ExitError) — имя ExitError
+// занято типом выше; подробности в internal/exit/exit.go.
 const (
-	ExitOK        = 0
-	ExitGeneric   = 1 // общая ошибка: сеть/авторизация/неизвестная команда (в плане — ExitError)
-	ExitNotFound  = 2
-	ExitAmbiguous = 3
+	ExitOK        = exit.ExitOK
+	ExitGeneric   = exit.ExitGeneric
+	ExitNotFound  = exit.ExitNotFound
+	ExitAmbiguous = exit.ExitAmbiguous
 )
 
-// ExitError связывает ошибку с конкретным exit-кодом процесса.
-// Реализует интерфейс error, поэтому свободно проходит как обычная ошибка,
-// при этом Code используется на верхнем уровне (main) для os.Exit.
-//
-// Сама по себе эта обёртка НЕ санитайзит текст ошибки от кредов —
-// это задача слоя client/config (см. спека §5, §9). Здесь только перенос кода.
-type ExitError struct {
-	Code int
-	Err  error
-}
+// Exit — тонкая обёртка над exit.Exit для backcompat handler-ов.
+func Exit(code int, err error) ExitError { return exit.Exit(code, err) }
 
-// Error возвращает текст обёрнутой ошибки. При nil-ошибке возвращает пустую
-// строку — это позволяет использовать ExitError{ExitOK, nil} как «нет ошибки».
-func (e ExitError) Error() string {
-	if e.Err == nil {
-		return ""
-	}
-	return e.Err.Error()
-}
-
-// Unwrap поддерживает errors.Is/errors.As над обёрнутой ошибкой.
-func (e ExitError) Unwrap() error { return e.Err }
-
-// Exit — хелпер-конструктор: собирает ExitError из кода и ошибки как есть,
-// без проверок и санитайза (вызывающий отвечает за корректный код и текст).
-func Exit(code int, err error) ExitError {
-	return ExitError{Code: code, Err: err}
-}
-
-// exitFromClientErr маппит ошибку клиентского слоя в ExitError по контракту
-// спеки §7/§9:
+// exitFromClientErr — тонкая обёртка над exit.FromClientErr. Делегирует в
+// общий пакет internal/exit, сохраняя signatures и behavior для существующих
+// вызовов из handler-ов (chat/reactions/search).
 //
-//   - nil → ExitOK (успех; для поисковых команд пустой результат = успех);
-//   - *client.OCSError с Code 404 → ExitNotFound (2): комната/сообщение/реакция
-//     не найдены на стороне сервера;
-//   - прочие ошибки (сеть, 401 auth, 403, 5xx, невалидный replyTo, decode-ошибка,
-//     OCS-статусы отличные от 404) → ExitGeneric (1).
+// Контракт маппинга (спека §7/§9):
+//   - nil → ExitError{ExitOK, nil};
+//   - *transport.OCSError{Code:404} → ExitNotFound (2);
+//   - прочие ошибки (сеть, 401/403/400/5xx, decode-ошибки) → ExitGeneric (1).
 //
-// Не различает неоднозначность (exit 3): та по-прежнему рождается только в
-// ResolveRoom (>1 совпадение по --name), и путь оттуда идёт через явный
-// Exit(ExitAmbiguous, …), а не через эту функцию.
-//
-// Текст ошибки не санитайзится здесь — клиентский слой уже пропустил его через
-// sanitizeErr (без URL/userinfo/пароля), спека §5/§9.
+// Возвращаемое значение всегда имеет конкретный тип exit.ExitError — type
+// assertion безопасно (FromClientErr никогда не возвращает nil interface при
+// не-nil аргументе, а при nil возвращает ExitError{ExitOK}).
 func exitFromClientErr(err error) ExitError {
-	if err == nil {
-		return ExitError{Code: ExitOK}
-	}
-	var ocsErr *client.OCSError
-	if errors.As(err, &ocsErr) && ocsErr.Code == http.StatusNotFound {
-		return ExitError{Code: ExitNotFound, Err: err}
-	}
-	return ExitError{Code: ExitGeneric, Err: err}
+	return exit.FromClientErr(err).(ExitError)
 }

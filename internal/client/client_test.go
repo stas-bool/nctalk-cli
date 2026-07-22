@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/stas/nctalk/internal/config"
+	"github.com/stas/nctalk/internal/transport"
 )
 
 // testCfg собирает Config с указанным baseURL и фиксированными тестовыми
@@ -30,9 +31,12 @@ func testCfg(baseURL string) config.Config {
 
 // ocsBody строит тело OCS-ответа с указанным statusCode/message/data.
 // data может быть nil. Используется httptest-хендлером.
+//
+// NB: используется transport.OCSEnvelope напрямую (а не client-alias), т.к.
+// Go 1.21 не поддерживает generic type aliases (см. client/aliases.go).
 func ocsBody(t *testing.T, statusCode int, message string, data any) []byte {
 	t.Helper()
-	var env OCSEnvelope[any]
+	var env transport.OCSEnvelope[any]
 	env.OCS.Meta.Status = "ok"
 	env.OCS.Meta.StatusCode = statusCode
 	env.OCS.Meta.Message = message

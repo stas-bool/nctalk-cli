@@ -1,0 +1,25 @@
+{
+  "_comment": "SYNTHETIC fixture — assembled from public Spreed source, not captured from a real server. Verify against real traffic in Task 2.3. Represents ONE incoming 'offer' message as delivered by the long-poll GET /ocs/v2.php/apps/spreed/api/v3/signaling/{token}. Spreed wraps the offer in a {type:'message', data:'<stringified JSON>'} envelope; the stringified payload's shape is {type:'offer', from:<sender_sessionId>, to:<recipient_sessionId>, roomType:'video'|'screen', payload:{type:'offer', sdp:<SDP string>}}. NOTE on roomType: Spreed uses roomType:'video' even for audio-only calls (the WebRTC connection is the same; directionality lives in the SDP m-line). Audio-only 'sendrecv' SDP m-line is shown here. Anonymized: sessionId -> 'SESSION_1'/'SESSION_2'; actorId derivable from 'from' only via a separate usersInRoom lookup; ICE IP in SDP -> 203.0.113.10 (RFC 5737 TEST-NET-3).",
+  "_source": [
+    "https://raw.githubusercontent.com/nextcloud/spreed/main/lib/Controller/SignalingController.php (sendMessages adds 'from'; pullMessages delivers via getAndDeleteMessages)",
+    "https://raw.githubusercontent.com/nextcloud/spreed/main/src/utils/signaling.js (sendCallMessage -> spreedArrayConnection.push {ev:'message', fn:JSON.stringify(data), sessionId})"
+  ],
+  "_outgoing_post_body_reference": "When nctalk-call SENDS an offer, the POST to /signaling/{token} body is form-encoded as {messages:'<stringified [{ev:\"message\", fn:\"<stringified payload without 'from' (server adds it)>\", sessionId:\"<own_sessionId>\"}]>'}. See README.md for a concrete example.",
+  "ocs": {
+    "meta": {
+      "status": "ok",
+      "statuscode": 200,
+      "message": "OK"
+    },
+    "data": [
+      {
+        "type": "message",
+        "data": "{\"type\":\"offer\",\"from\":\"SESSION_2\",\"to\":\"SESSION_1\",\"roomType\":\"video\",\"payload\":{\"type\":\"offer\",\"sdp\":\"v=0\\r\\no=- 473522518 2 INET4 0.0.0.0\\r\\ns=-\\r\\nt=0 0\\r\\na=group:BUNDLE 0\\r\\na=extmap-allow-mixed\\r\\na=msid-semantic: WMS\\r\\nm=audio 9 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126\\r\\nc=IN IP4 0.0.0.0\\r\\na=rtcp:9 IN IP4 0.0.0.0\\r\\na=ice-ufrag:9aX3\\r\\na=ice-pwd:zfP7Bt2D8MhVqKsqLZqXG8kXzvE2qjLP\\r\\na=ice-options:trickle\\r\\na=fingerprint:sha-256 0F:74:A9:64:0D:3B:55:22:16:45:0D:5F:8F:93:8F:06:6A:A6:26:9F:DE:0F:7E:F1:AA:6D:FB:8E:78:E2:42:14\\r\\na=setup:actpass\\r\\na=mid:0\\r\\na=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\\r\\na=sendrecv\\r\\na=rtcp-mux\\r\\na=rtpmap:111 opus/48000/2\\r\\na=rtcp-fb:111 transport-cc\\r\\na=fmtp:111 minptime=10;useinbandfec=1\\r\\na=rtpmap:63 red/48000/2\\r\\na=fmtp:63 111/111\\r\\na=rtpmap:9 G722/8000\\r\\na=rtpmap:0 PCMU/8000\\r\\na=rtpmap:8 PCMA/8000\\r\\na=rtpmap:13 CN/8000\\r\\na=rtpmap:110 telephone-event/48000\\r\\na=rtpmap:126 telephone-event/8000\\r\\na=ssrc:3288326156 cname:SESSION_2\\r\\na=ssrc:3288326156 msid:SESSION_2 audio\\r\\na=ssrc:3288326156 mslabel:SESSION_2\\r\\na=ssrc:3288326156 label:audio\\r\\n\"}}"
+      },
+      {
+        "type": "usersInRoom",
+        "data": []
+      }
+    ]
+  }
+}
