@@ -144,19 +144,87 @@ CGO_ENABLED=0 go vet ./...
 - `internal/render` — текстовые таблицы и JSON.
 - `testdata/` — обезличенные JSON-фикстуры ответов Talk.
 
-## Аудио-звонки (эксперимент — ветка `feat/nctalk-calls`)
+## Аудио-звонки (эксперимент)
 
-Реальное аудио в звонках Talk (слушать + говорить) из терминала/процесса, как **отдельный модуль** к `nctalk`. **Не в `main`**: spike-first, spike-gate ещё не пройден.
+Реальное аудио в звонках Talk (слушать + говорить) из терминала/процесса — два отдельных бинарника к базовому `nctalk`. Стек: `github.com/pion/webrtc/v4` + `ffmpeg` (codec и audio-IO, без CGO), macOS. `cmd/nctalk` изолирован от WebRTC (не зависит от pion).
 
-- **`nctalk-call <room>`** — режим «агент/pipe»: PCM `s16le`/48 кГц/моно через stdin/stdout (для скрипта/бота/записи). Флаг `--recvonly` — только приём (запись чужого аудио без передачи своего).
-- **`nctalk-talk <room>`** — режим «человек/TUI» (микрофон/динамик через `ffmpeg`/`sox`) — *pending* (Этап 4).
+> Экспериментально (spike-first). `nctalk-call` прошёл spike-gate — реальный двусторонний звонок на Docker Talk 20.1.11 (говорить + слушать). `nctalk-talk` (TUI) реализован, автотесты зелёные. Спеки — в [`docs/superpowers/specs/`](docs/superpowers/specs/) (`2026-07-19-nctalk-call-design.md`, `2026-07-21-nctalk-talk-tui-design.md`).
 
-Стек: `github.com/pion/webrtc/v4` + `ffmpeg` (codec и audio-IO, без CGO), macOS. `cmd/nctalk` изолирован от WebRTC. Подробно — в спеке [`docs/superpowers/specs/2026-07-19-nctalk-call-design.md`](docs/superpowers/specs/2026-07-19-nctalk-call-design.md).
+Сборка (подпись убирает вопросы фаервола/TCC при пересборке):
 
 ```sh
-make setup-codesign        # one-time: codesign-identity nctalk-dev (убирает вопросы фаервола/TCC при пересборке)
+make setup-codesign        # one-time: codesign-identity nctalk-dev
 make build-signed          # собрать + подписать nctalk/nctalk-call/nctalk-talk (CGO=0)
-./nctalk-call <room>       # stdin → в звонок; из звонка → stdout (PCM s16le/48к/моно)
 ```
 
-**Статус:** реализован spike (Этапы 0–2), прошёл code-review (9 валидных правок), `go test` и `go test -race` зелёные. Дальше — **spike-gate**: ручной запуск реального звонка (сервер + собеседник в браузере + разрешение firewall) → объективный PASS/FAIL (round-trip синусоиды 440 Гц) → go/no-go для продолжения.
+### `nctalk-call <room>` — pipe/агент (PCM через stdin/stdout)
+
+Отправляет и принимает аудио как raw PCM `s16le`/48 кГц/моно через stdin/stdout — для скрипта, бота, записи.
+
+```sh
+nctalk-call kytxaiyc                            # stdin → звонок; звонок → stdout (sendrecv)
+nctalk-call kytxaiyc --name "review team"       # разрешить комнату по имени
+nctalk-call kytxaiyc --in voice.pcm             # отправить свой PCM из файла (вместо stdin)
+nctalk-call kytxaiyc --out rec.pcm              # записать входящее аудио в файл (вместо stdout)
+nctalk-call kytxaiyc --recvonly --out rec.pcm   # только приём (своё не отправлять)
+```
+
+| Флаг        | Назначение                                                                       |
+| ----------- | -------------------------------------------------------------------------------- |
+| `<room>`    | token позиционно; либо `--name` для поиска по имени.                             |
+| `--name`    | case-insensitive подстрока в `displayName` (как у `chat show`).                  |
+| `--in`      | PCM для отправки: путь файла или `-` (stdin, по умолчанию).                      |
+| `--out`     | куда писать входящий PCM: путь файла или `-` (stdout, по умолчанию).             |
+| `--recvonly`| только приём чужого аудио (своё не отправлять).                                  |
+| `--debug`   | подробные signaling-логи.                                                        |
+
+Env (помимо `NEXTCLOUD_*`): `NCTALK_ICE_TIMEOUT` (бюджет на установку первого peer-соединения, по умолчанию `30s`), `NCTALK_DEBUG`.
+
+`--out` пишет **raw PCM `s16le`/48 кГц/моно**, а не контейнер. Конверт в WAV:
+
+```sh
+ffmpeg -f s16le -ar 48000 -ac 1 -i rec.pcm rec.wav
+```
+
+Разрешение `<room>`/`--name` и exit-коды — те же, что у `nctalk`: `0` успех · `1` ошибка · `2` not found (0 совпадений по `--name`) · `3` неоднозначно (>1 совпадение, в stderr — кандидаты `token<TAB>имя`).
+
+### `nctalk-talk <room>` — интерактивный TUI (человек)
+
+Микрофон и динамик — через `ffmpeg` (macOS: avfoundation для входа, audiotoolbox для выхода). Экранное управление: список участников, mute, громкость, индикатор «говорит».
+
+```sh
+nctalk-talk kytxaiyc                            # зайти в звонок; микрофон/динамик по умолчанию
+nctalk-talk --name "review team"                # разрешить комнату по имени
+```
+
+Управление:
+
+- `M` — mute своего микрофона (своё аудио перестаёт уходить в сеть; флаг звонка не меняется).
+- `+` / `−` — громкость локального динамика ±10 % (диапазон 0–200 %, по умолчанию 100 %).
+- `Q` или `Ctrl-C` — выйти из звонка (штатный leave, exit `0`).
+- Кто говорит — подсвечивается по уровню (VAD).
+
+| Флаг     | Назначение                                                      |
+| -------- | --------------------------------------------------------------- |
+| `<room>` | token позиционно; либо `--name`.                                |
+| `--name` | case-insensitive подстрока в `displayName`.                     |
+| `--debug`| подробные signaling-логи.                                       |
+
+Env (помимо `NEXTCLOUD_*`):
+
+| Переменная                | Назначение                                                                                |
+| ------------------------- | ----------------------------------------------------------------------------------------- |
+| `NCTALK_AUDIO_DEVICE_IN`  | Микрофон, avfoundation-строка `":<idx>"` (по умолчанию `":0"` — первый audio-input).       |
+| `NCTALK_AUDIO_DEVICE_OUT` | Динамик: int-индекс audiotoolbox либо `default`/`-1` (по умолчанию `default`).             |
+| `NCTALK_ICE_TIMEOUT`      | Бюджет на установку peer-соединения (по умолчанию `30s`).                                  |
+| `NCTALK_CALL_LOG`         | Путь лога (по умолчанию `./call.log`). Все технические строки — туда.                      |
+| `NCTALK_DEBUG`            | Подробные signaling-логи.                                                                  |
+
+Листинг устройств (input и output — разные muxers `ffmpeg`):
+
+```sh
+ffmpeg -f avfoundation -list_devices true -i ""   # input  → NCTALK_AUDIO_DEVICE_IN  (":<idx>")
+ffmpeg -f audiotoolbox -list_devices true -i ""   # output → NCTALK_AUDIO_DEVICE_OUT (индекс из списка)
+```
+
+Exit-коды — те же (`0`/`1`/`2`/`3`). В не-терминале (pipe) TUI уходит в fallback-режим без raw-mode/alt-screen и пишет статус построчно в stdout — это позволяет гонять его в интеграционных тестах.
