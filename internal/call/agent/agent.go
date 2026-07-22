@@ -33,6 +33,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os/exec"
 	"sync"
@@ -828,8 +829,10 @@ func (a *agentState) addPeer(sid string) error {
 	// 1. Decoder с writer-адаптером в Mixer[idx].
 	pcmW := &pcmMixerWriter{
 		idx:          idx,
+		sid:          sid,
 		mixer:        a.mixer,
 		frameSamples: mixerFrameSamples,
+		collector:    a.state,
 	}
 	decoder, err := a.cfg.NewDecoder(pcmW)
 	if err != nil {
@@ -1111,9 +1114,11 @@ func (a *agentState) sendPeer(b *peerBundle) {
 // 20мс звука на shutdown — не слышно).
 type pcmMixerWriter struct {
 	idx          int
+	sid          string              // sessionId пира (для setLevel) — NEW
 	mixer        *media.Mixer
 	buf          []byte
 	frameSamples int
+	collector    *callStateCollector // nil → RMS не собирается (nctalk-call) — NEW
 }
 
 // Write реализует io.Writer. Аккумулирует p в buf, при заполнении кадра
@@ -1138,10 +1143,41 @@ func (w *pcmMixerWriter) Write(p []byte) (int, error) {
 			samples[i] = int16(binary.LittleEndian.Uint16(w.buf[i*2 : i*2+2]))
 		}
 		w.mixer.Push(w.idx, samples)
+		if w.collector != nil {
+			w.collector.setLevel(w.sid, rmsToLevel(samples))
+		}
 		// Сбрасываем buf, сохраняя underlying array (ре-use в следующих Write).
 		w.buf = w.buf[:0]
 	}
 	return n, nil
+}
+
+// rmsToLevel считает нормализованный уровень PCM-кадра.
+// dBFS = 20·log10(rms/32768), map dBFS ∈ [-60, 0] → Level ∈ [0, 100].
+// Тише -60 → 0, громче 0 → 100 (clamped). Спека §7, review #10.
+func rmsToLevel(samples []int16) int {
+	if len(samples) == 0 {
+		return 0
+	}
+	var sumSq float64
+	for _, s := range samples {
+		f := float64(s)
+		sumSq += f * f
+	}
+	rms := math.Sqrt(sumSq / float64(len(samples)))
+	if rms < 1 {
+		return 0
+	}
+	dbFS := 20.0 * math.Log10(rms/32768.0)
+	// Линейная map [-60, 0] → [0, 100].
+	level := int((dbFS + 60.0) * 100.0 / 60.0)
+	if level < 0 {
+		return 0
+	}
+	if level > 100 {
+		return 100
+	}
+	return level
 }
 
 // ---- mixerDrain: горутина дренирования Mixer → Stdout ----
