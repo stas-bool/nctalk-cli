@@ -30,13 +30,21 @@ go.work.sum
 .env
 .env.*
 
-# WebRTC-call аудио-артефакты (тестовые PCM/записи звонков)
+# WebRTC-call аудио/медиа-артефакты (тестовые записи, спектрограммы, TTS)
 *.pcm
 *.wav
+*.aiff
+*.m4a
+*.ogg
+*.mp3
+*.png
 
 # Spike/debug-артефакты: логи прогонов, браузер-наблюдатели playwright-MCP,
 # отвергнутый playwright-через-npm (заменён на playwright MCP extension).
 *.log
 pw-webrtc.mjs
 .playwright-mcp/
+
+# Local session-state (управляется через /checkpoint, не версионится в git)
+docs/session-state/
 
