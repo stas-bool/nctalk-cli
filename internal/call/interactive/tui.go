@@ -126,27 +126,32 @@ func (v *ansiView) Update(s CallState) {
 	}
 }
 
-// renderTTY — полная перерисовка (alternate screen, без скролла).
+// renderTTY — перерисовка in-place (alternate screen, без скролла).
+// Cursor-home + per-line clear-to-EOL (\x1b[K) + clear-to-end-of-screen (\x1b[J)
+// ВНИМАНИЕ full \x1b[2J на 10Гц мерцает (review LOW-3: flicker) — заменён на
+// selective-clear: курсор домой, каждая строка дописывается \x1b[K (стирает хвост
+// прошлой строки), в конце \x1b[J стирает строки ниже (если прошлый кадр был длиннее).
 func (v *ansiView) renderTTY(s CallState) {
 	var b strings.Builder
-	// Очистка экрана + cursor home.
-	b.WriteString("\x1b[2J\x1b[H")
-	fmt.Fprintf(&b, "nctalk-talk — статус: %s\n", s.Status)
-	fmt.Fprintf(&b, "mute(M): %s   громкость(+/-): %d%%\n",
+	// Cursor home (без full clear).
+	b.WriteString("\x1b[H")
+	fmt.Fprintf(&b, "nctalk-talk — статус: %s\x1b[K\n", s.Status)
+	fmt.Fprintf(&b, "mute(M): %s   громкость(+/-): %d%%\x1b[K\n",
 		mutedLabel(s.SelfMuted), s.Volume)
-	b.WriteString("────────────────────────\n")
+	b.WriteString("────────────────────────\x1b[K\n")
 	if len(s.Participants) == 0 {
-		b.WriteString("(нет участников)\n")
+		b.WriteString("(нет участников)\x1b[K\n")
 	}
 	for _, p := range s.Participants {
 		mark := " "
 		if p.Speaking {
 			mark = "▶"
 		}
-		fmt.Fprintf(&b, "%s %s  [%s]\n", mark, p.Name, levelBar(p.Level))
+		fmt.Fprintf(&b, "%s %s  [%s]\x1b[K\n", mark, p.Name, levelBar(p.Level))
 	}
-	b.WriteString("────────────────────────\n")
-	b.WriteString("Q/Ctrl-C — выйти\n")
+	b.WriteString("────────────────────────\x1b[K\n")
+	b.WriteString("Q/Ctrl-C — выйти\x1b[K\n")
+	b.WriteString("\x1b[J") // стереть строки ниже (прошлый кадр длиннее)
 	fmt.Fprint(v.stdout, b.String())
 }
 

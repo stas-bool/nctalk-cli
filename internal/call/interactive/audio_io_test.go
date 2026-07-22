@@ -103,7 +103,7 @@ func TestSpeakerWriter_FfmpegArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSpeakerWriter: %v", err)
 	}
-	cmd := sw.(*speakerWriter).cmd
+	cmd := sw.cmd
 	args := cmd.Args
 	defer sw.Close()
 	// Ищем пару "-f audiotoolbox" в output-части (после "-i -").
@@ -138,7 +138,7 @@ func TestSpeakerWriter_DefaultDevice(t *testing.T) {
 		t.Fatalf("NewSpeakerWriter: %v", err)
 	}
 	defer sw.Close()
-	cmd := sw.(*speakerWriter).cmd
+	cmd := sw.cmd
 	found := false
 	for i, a := range cmd.Args {
 		if a == "-audio_device_index" && i+1 < len(cmd.Args) && cmd.Args[i+1] == "-1" {
