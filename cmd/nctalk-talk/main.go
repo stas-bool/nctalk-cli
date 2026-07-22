@@ -44,8 +44,12 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 	fs := flag.NewFlagSet("nctalk-talk", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	name := fs.String("name", "", "искать комнату по имени (case-insensitive подстрока DisplayName)")
+	debug := fs.Bool("debug", false, "подробные логи signaling (ставит NCTALK_DEBUG=1)")
 	if err := fs.Parse(args); err != nil {
 		return 1
+	}
+	if *debug {
+		os.Setenv("NCTALK_DEBUG", "1")
 	}
 	positional := ""
 	if fs.NArg() > 0 {

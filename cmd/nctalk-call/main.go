@@ -72,9 +72,13 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 		inPath   = fs.String("in", "-", "PCM s16le/48к/моно для отправки: путь файла или `-` для stdin")
 		outPath  = fs.String("out", "-", "куда писать входящий PCM: путь файла или `-` для stdout")
 		recvOnly = fs.Bool("recvonly", false, "только приём чужого аудио (своего не отправлять); InFlags=1 (спека §6)")
+		debug    = fs.Bool("debug", false, "подробные логи signaling (ставит NCTALK_DEBUG=1)")
 	)
 	if err := fs.Parse(args); err != nil {
 		return 1
+	}
+	if *debug {
+		os.Setenv("NCTALK_DEBUG", "1")
 	}
 	positional := ""
 	if fs.NArg() > 0 {
