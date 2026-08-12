@@ -113,10 +113,14 @@ func TestRun_ChatShow_E2E(t *testing.T) {
 	}
 }
 
-// TestRun_NoEnv_Returns1 — все NEXTCLOUD_* пустые → config.Load возвращает
-// ошибку, run пишет её в stderr с префиксом "nctalk:" и возвращает 1.
-// stdout остаётся пустым. Сообщения config.Load содержат только имена
-// переменных (не значения) — поэтому вывод безопасен (спека §5/§9).
+// TestRun_NoEnv_Returns1 — спека §5 (после правки help): пустые NEXTCLOUD_*
+// при обычной команде (НЕ help-запрос) → config.Load возвращает ошибку, run
+// пишет её в stderr с префиксом "nctalk:" и возвращает 1. stdout остаётся пустым.
+//
+// ВАЖНО: раньше этот тест подавал nil args и проверял config-ошибку; но после
+// перехвата help в run() пустые args → общий help в stderr + exit 1 (не config).
+// Поэтому теперь тест подаёт реальную команду, которая минует HandleHelp и
+// доходит до config.Load.
 func TestRun_NoEnv_Returns1(t *testing.T) {
 	// Явно опустошаем все четыре env-переменные (t.Setenv восстанавливает
 	// значения после теста).
@@ -126,7 +130,8 @@ func TestRun_NoEnv_Returns1(t *testing.T) {
 	t.Setenv("NEXTCLOUD_TIMEOUT", "")
 
 	var out, errOut bytes.Buffer
-	code := run(nil, &out, &errOut, nil)
+	// Реальная команда, минует HandleHelp (там нет --help/help) → доходит до config.Load.
+	code := run([]string{"rooms", "list"}, &out, &errOut, nil)
 	if code != 1 {
 		t.Fatalf("ожидался exit 1, получен %d (stderr=%q)", code, errOut.String())
 	}
@@ -290,5 +295,51 @@ func TestRun_RoomsFind_Empty_Exit0(t *testing.T) {
 	}
 	if out.String() != "" {
 		t.Errorf("stdout: got %q, want empty", out.String())
+	}
+}
+
+// TestRun_HelpWithoutEnv_WorksWithoutCreds — спека §5: help работает БЕЗ
+// NEXTCLOUD_*. HandleHelp вызывается строго до config.Load, поэтому пустые env
+// не мешают; клиент не создаётся; код 0 (или 1 для no-args); в stderr/stdout — help.
+func TestRun_HelpWithoutEnv_WorksWithoutCreds(t *testing.T) {
+	// Явно опустошаем env (как TestRun_NoEnv_Returns1).
+	t.Setenv("NEXTCLOUD_URL", "")
+	t.Setenv("NEXTCLOUD_LOGIN", "")
+	t.Setenv("NEXTCLOUD_PASS", "")
+	t.Setenv("NEXTCLOUD_TIMEOUT", "")
+
+	cases := []struct {
+		name     string
+		args     []string
+		wantCode int
+		wantOut  string // "stdout" | "stderr"
+	}{
+		{"help flag", []string{"--help"}, 0, "stdout"},
+		{"h flag", []string{"-h"}, 0, "stdout"},
+		{"help word", []string{"help"}, 0, "stdout"},
+		{"help rooms list", []string{"help", "rooms", "list"}, 0, "stdout"},
+		{"rooms list --help", []string{"rooms", "list", "--help"}, 0, "stdout"},
+		{"search --help", []string{"search", "--help"}, 0, "stdout"},
+		{"no args", nil, 1, "stderr"},
+		{"help unknown", []string{"help", "nosuch"}, 1, "stderr"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			code := run(tc.args, &out, &errOut, nil)
+			if code != tc.wantCode {
+				t.Fatalf("exit: got %d, want %d (stdout=%q stderr=%q)", code, tc.wantCode, out.String(), errOut.String())
+			}
+			switch tc.wantOut {
+			case "stdout":
+				if out.String() == "" {
+					t.Errorf("want non-empty stdout, got empty (stderr=%q)", errOut.String())
+				}
+			case "stderr":
+				if errOut.String() == "" {
+					t.Errorf("want non-empty stderr, got empty (stdout=%q)", out.String())
+				}
+			}
+		})
 	}
 }
