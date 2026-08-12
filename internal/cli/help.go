@@ -9,6 +9,10 @@
 // поэтому help работает без NEXTCLOUD_* (спека §5).
 package cli
 
+import (
+	"strings"
+)
+
 // flagSpec — описание одного флага в декларации команды.
 // Поле Value пусто для boolean-флагов (--unread, --system, --all, ...).
 type flagSpec struct {
@@ -165,4 +169,72 @@ func joinPath(p []string) string {
 		out += s
 	}
 	return out
+}
+
+// isHelpRequest — спека §5 (порядок разбора) и §2 (правила help-форм).
+//
+// Шаги:
+//  1. Вырезать из args все --help/-h (в любой позиции); запомнить sawHelp.
+//  2. Если первый оставшийся токен — "help", вырезать его и запомнить sawHelp.
+//  3. Если sawHelp — вычислить путь (первые 1-2 не-флаговых токена остатка).
+//
+// Пустые args → НЕ help-запрос (это "no-args error" — отдельный случай в HandleHelp).
+func isHelpRequest(args []string) (helpRequested bool, path []string) {
+	filtered := make([]string, 0, len(args))
+	sawHelp := false
+	for _, a := range args {
+		if a == "--help" || a == "-h" {
+			sawHelp = true
+			continue
+		}
+		filtered = append(filtered, a)
+	}
+	if len(filtered) > 0 && filtered[0] == "help" {
+		sawHelp = true
+		filtered = filtered[1:]
+	}
+	if !sawHelp {
+		return false, nil
+	}
+	return true, computePath(filtered)
+}
+
+// computePath возвращает первые 1-2 не-флаговых токена (спека §2). Все --*
+// выкидываются; для известных value-флагов в форме --flag (без =) следующий
+// токен (значение) тоже выкидывается; unknown --flag трактуется как boolean
+// (safe: не съедает возможный позиционный).
+func computePath(args []string) []string {
+	path := make([]string, 0, 2)
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !strings.HasPrefix(a, "--") {
+			path = append(path, a)
+			if len(path) == 2 {
+				return path
+			}
+			continue
+		}
+		// Это флаг.
+		if strings.Contains(a, "=") {
+			continue // --flag=value — один токен, уже выкинут
+		}
+		if isValueFlag(a) && i+1 < len(args) {
+			i++ // пропускаем значение в форме --flag value
+		}
+	}
+	return path
+}
+
+// isValueFlag проверяет по cmdSpecs, принимает ли флаг значение. Unknown-флаг
+// трактуется как boolean (safe для computePath: не съедает следующий позиционный).
+func isValueFlag(flagName string) bool {
+	name := strings.TrimPrefix(flagName, "--")
+	for _, cs := range cmdSpecs {
+		for _, f := range cs.Flags {
+			if strings.TrimPrefix(f.Name, "--") == name {
+				return f.Value != ""
+			}
+		}
+	}
+	return false
 }
