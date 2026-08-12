@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"reflect"
 	"sort"
 	"strings"
@@ -390,5 +391,186 @@ func TestHandleHelp_NoArgsGeneralToStderr(t *testing.T) {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("no-args stderr должен содержать %q; got %q", want, stderr)
 		}
+	}
+}
+
+// TestAntiDrift_HelpMatchesDeclaration — для каждой команды: help-текст упоминает
+// РОВНО флаги из cmdSpecs (без лишних и без пропущенных). Спека §6 prong 1.
+// Ловит класс «флаг в декларации, но забыт в render-логике» (или наоборот).
+func TestAntiDrift_HelpMatchesDeclaration(t *testing.T) {
+	for _, cs := range cmdSpecs {
+		t.Run(joinPath(cs.Path), func(t *testing.T) {
+			deps := newTestDeps()
+			args := append(append([]string{}, cs.Path...), "--help")
+			_, code := HandleHelp(args, deps)
+			if code != 0 {
+				t.Fatalf("exit: got %d, want 0", code)
+			}
+			stdout := deps.Stdout.(*bytes.Buffer).String()
+			declared := map[string]bool{"--json": true} // глобальный
+			for _, f := range cs.Flags {
+				declared[f.Name] = true
+			}
+			// Каждый заявленный флаг присутствует в help.
+			for name := range declared {
+				if !strings.Contains(stdout, name) {
+					t.Errorf("anti-drift: заявленный флаг %q отсутствует в help\nвывод=\n%s", name, stdout)
+				}
+			}
+			// В help нет --*-флагов, не заявленных в декларации (кроме --json и --help).
+			for _, token := range tokeniseFlags(stdout) {
+				if token == "--json" || token == "--help" || token == "-h" {
+					continue
+				}
+				if !declared[token] {
+					t.Errorf("anti-drift: help упоминает незаявленный флаг %q (не в cmdSpecs)\nвывод=\n%s", token, stdout)
+				}
+			}
+		})
+	}
+}
+
+// tokeniseFlags — находит все --[a-z][a-z-]* токены в тексте (грубый парсинг).
+func tokeniseFlags(s string) []string {
+	var out []string
+	cur := ""
+	flush := func() {
+		if cur != "" {
+			out = append(out, cur)
+			cur = ""
+		}
+	}
+	for i := 0; i < len(s); i++ {
+		if i+1 < len(s) && s[i] == '-' && s[i+1] == '-' {
+			flush()
+			cur = "--"
+			i++
+			for i+1 < len(s) {
+				c := s[i+1]
+				if (c >= 'a' && c <= 'z') || c == '-' {
+					cur += string(c)
+					i++
+				} else {
+					break
+				}
+			}
+			flush()
+		}
+	}
+	return out
+}
+
+// TestAntiDrift_HandlerMatchesDeclaration — для каждой команды: handler
+// принимает КАЖДЫЙ заявленный в cmdSpecs флаг (без ошибки "неизвестный флаг") И
+// отвергает любой незаявленный --*-флаг (с ошибкой "неизвестный флаг"). Спека §6 prong 2.
+//
+// Ловит класс «флаг в декларации, но handler его не парсит» (тот самый баг с
+// rooms find --include-former и rooms search --limit из review спеки) и обратный.
+func TestAntiDrift_HandlerMatchesDeclaration(t *testing.T) {
+	ctx := context.Background()
+	for _, cs := range cmdSpecs {
+		t.Run(joinPath(cs.Path), func(t *testing.T) {
+			handler := lookupHandlerByPath(cs.Path)
+			if handler == nil {
+				t.Fatalf("lookupHandlerByPath(%v) = nil", cs.Path)
+			}
+
+			// 1. Каждый ЗАЯВЛЕННЫЙ флаг handler принимает.
+			for _, f := range cs.Flags {
+				deps := newTestDeps()
+				// chat send читает тело ДО ResolveRoom: при nil Stdin (дефолт
+				// newTestDeps) handler fallback-ает на os.Stdin — в CI обычно
+				// мгновенный EOF («тело пусто» → ExitGeneric), но на tty stdin
+				// может зависнуть, и semantics prong 1 ослабляется (handler
+				// падает до проверки семантики флага). Даём непустое Stdin-тело
+				// для chat send — handler доходит до mockTalkClient.SendMessage
+				// (errMock, тоже не «неизвестный флаг»). Для --file это shimmer
+				// (handler идёт через os.ReadFile, но Stdin безвреден).
+				if joinPath(cs.Path) == "chat send" {
+					deps.Stdin = strings.NewReader("anti-drift body")
+				}
+				args := buildArgsForFlag(cs, f)
+				ee := handler(ctx, deps, args, false)
+				// Допустимо: любая ошибка, КРОМЕ "неизвестный флаг".
+				if ee.Err != nil && strings.Contains(ee.Err.Error(), "неизвестный флаг") {
+					t.Errorf("anti-drift: заявленный флаг %q отвергнут handler-ом: %v\nargs=%v", f.Name, ee.Err, args)
+				}
+			}
+
+			// 2. НЕЗАЯВЛЕННЫЙ флаг handler отвергает.
+			deps := newTestDeps()
+			positional := buildPositionalArgs(cs)
+			args := append(positional, "--zzz-undeclared-test-flag")
+			ee := handler(ctx, deps, args, false)
+			if ee.Err == nil {
+				t.Errorf("anti-drift: незаявленный флаг не отвергнут handler-ом (ожидалась ошибка 'неизвестный флаг'); args=%v", args)
+			} else if !strings.Contains(ee.Err.Error(), "неизвестный флаг") {
+				t.Errorf("anti-drift: незаявленный флаг дал другую ошибку (не 'неизвестный флаг'): %v\nargs=%v", ee.Err, args)
+			}
+		})
+	}
+}
+
+// lookupHandlerByPath — возвращает handler-функцию для пути команды.
+// search → searchHandlerFn; ["rooms","list"] → routes["rooms"]["list"].
+func lookupHandlerByPath(path []string) handlerFn {
+	if len(path) == 1 && path[0] == "search" {
+		return searchHandlerFn
+	}
+	if len(path) == 2 {
+		if verbs, ok := routes[path[0]]; ok {
+			return verbs[path[1]]
+		}
+	}
+	return nil
+}
+
+// buildPositionalArgs — минимальный набор позиционных для команды, чтобы handler
+// не упал с "ожидается <positional>" ДО парсинга флагов. Флаги парсятся ранее
+// positionals во всех handler-ах, но для надёжности даём валидные positionals.
+func buildPositionalArgs(cs cmdSpec) []string {
+	switch joinPath(cs.Path) {
+	case "rooms find":
+		return []string{"query"}
+	case "rooms search":
+		return []string{"term"}
+	case "chat show", "chat send":
+		return []string{"tok123"}
+	case "reactions get":
+		return []string{"tok123", "1"}
+	case "search":
+		return []string{"term"}
+	default:
+		return nil
+	}
+}
+
+// buildArgsForFlag — позиционные + конкретный флаг (с валидным значением для value-флага).
+func buildArgsForFlag(cs cmdSpec, f flagSpec) []string {
+	args := buildPositionalArgs(cs)
+	if f.Value == "" {
+		// boolean flag
+		args = append(args, f.Name)
+	} else {
+		// value flag — подбираем валидное значение по имени флага
+		args = append(args, f.Name, valueForFlag(f.Name))
+	}
+	return args
+}
+
+// valueForFlag — валидное значение для конкретного value-флага, которое handler
+// примет без ошибки парсинга (например, --type 2, --last 5, --reply-to 1).
+func valueForFlag(name string) string {
+	switch name {
+	case "--type":
+		return "2"
+	case "--last", "--limit":
+		return "5"
+	case "--reply-to":
+		return "1"
+	case "--since":
+		return "1h" // валидный относительный формат — parseSinceAt разберёт, handler дойдёт до ResolveRoom
+	default:
+		return "x" // произвольная строка для --name/--from/--user/--file/--reference-id
 	}
 }
