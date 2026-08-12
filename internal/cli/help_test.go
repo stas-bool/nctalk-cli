@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"bytes"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -184,5 +186,209 @@ func TestIsValueFlag(t *testing.T) {
 	}
 	if isValueFlag("--zzz-unknown") {
 		t.Errorf("isValueFlag(--zzz-unknown): unknown должен трактоваться как boolean (safe)")
+	}
+}
+
+// TestHandleHelp_Routing — все случаи спеки §2 (exit-код, поток, ключевые строки).
+// Детальная проверка СОДЕРЖИМОГО — в TestHandleHelp_DetailedContent (следующий шаг);
+// здесь проверяем только routing: куда ушёл вывод, какой exit.
+func TestHandleHelp_Routing(t *testing.T) {
+	cases := []struct {
+		name       string
+		args       []string
+		wantExit   int
+		wantStream string // "stdout" | "stderr" | "any"
+	}{
+		// Успешный help → stdout, exit 0
+		{"help flag alone", []string{"--help"}, 0, "stdout"},
+		{"h flag alone", []string{"-h"}, 0, "stdout"},
+		{"help word alone", []string{"help"}, 0, "stdout"},
+		{"help word resource", []string{"help", "rooms"}, 0, "stdout"},
+		{"help word detailed", []string{"help", "rooms", "list"}, 0, "stdout"},
+		{"help word leaf", []string{"help", "search"}, 0, "stdout"},
+		{"cmd with help flag", []string{"rooms", "list", "--help"}, 0, "stdout"},
+		{"cmd with h flag", []string{"chat", "show", "-h"}, 0, "stdout"},
+		{"resource with help flag", []string{"rooms", "--help"}, 0, "stdout"},
+		{"flag before cmd", []string{"--help", "rooms", "list"}, 0, "stdout"},
+
+		// no-args → stderr, exit 1 (НЕ help-запрос, но HandleHelp обрабатывает)
+		{"no args nil", nil, 1, "stderr"},
+		{"no args empty", []string{}, 1, "stderr"},
+
+		// help с неизвестным путём → stderr, exit 1
+		{"help unknown resource", []string{"help", "nosuch"}, 1, "stderr"},
+		{"help unknown verb", []string{"rooms", "nosuch", "--help"}, 1, "stderr"},
+		{"help unknown leaf", []string{"help", "nosuch"}, 1, "stderr"},
+
+		// обычный flow — HandleHelp возвращает (false, 0); тест ниже
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deps := newTestDeps()
+			handled, code := HandleHelp(tc.args, deps)
+			if !handled {
+				t.Fatalf("HandleHelp(%v): want handled=true, got false", tc.args)
+			}
+			if code != tc.wantExit {
+				t.Errorf("HandleHelp(%v): exit: got %d, want %d", tc.args, code, tc.wantExit)
+			}
+			stdout := deps.Stdout.(*bytes.Buffer).String()
+			stderr := deps.Stderr.(*bytes.Buffer).String()
+			switch tc.wantStream {
+			case "stdout":
+				if stdout == "" {
+					t.Errorf("HandleHelp(%v): want non-empty stdout, got empty (stderr=%q)", tc.args, stderr)
+				}
+				if stderr != "" {
+					t.Errorf("HandleHelp(%v): want empty stderr, got %q", tc.args, stderr)
+				}
+			case "stderr":
+				if stderr == "" {
+					t.Errorf("HandleHelp(%v): want non-empty stderr, got empty (stdout=%q)", tc.args, stdout)
+				}
+				if stdout != "" {
+					t.Errorf("HandleHelp(%v): want empty stdout, got %q", tc.args, stdout)
+				}
+			}
+		})
+	}
+}
+
+// TestHandleHelp_NotHandled — обычные args без help-маркеров → (false, 0).
+func TestHandleHelp_NotHandled(t *testing.T) {
+	cases := [][]string{
+		{"rooms", "list"},
+		{"search", "foo"},
+		{"chat", "show", "tok", "--last", "50"},
+		{"--json", "rooms", "list"}, // --json — НЕ help-маркер
+	}
+	for _, args := range cases {
+		deps := newTestDeps()
+		handled, code := HandleHelp(args, deps)
+		if handled {
+			t.Errorf("HandleHelp(%v): want (false,0), got handled=true code=%d", args, code)
+		}
+		if code != 0 {
+			t.Errorf("HandleHelp(%v): code: want 0, got %d", args, code)
+		}
+	}
+}
+
+// TestHandleHelp_UnknownPathMessage — «неизвестная команда» + подсказка nctalk --help.
+func TestHandleHelp_UnknownPathMessage(t *testing.T) {
+	deps := newTestDeps()
+	_, code := HandleHelp([]string{"help", "nosuch"}, deps)
+	if code != 1 {
+		t.Fatalf("exit: got %d, want 1", code)
+	}
+	stderr := deps.Stderr.(*bytes.Buffer).String()
+	for _, want := range []string{"неизвестная команда", "nctalk --help"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr должен содержать %q; got %q", want, stderr)
+		}
+	}
+}
+
+// TestHandleHelp_GeneralContent — ключевые строки общего help (спека §3).
+func TestHandleHelp_GeneralContent(t *testing.T) {
+	deps := newTestDeps()
+	_, code := HandleHelp([]string{"--help"}, deps)
+	if code != 0 {
+		t.Fatalf("exit: got %d, want 0", code)
+	}
+	stdout := deps.Stdout.(*bytes.Buffer).String()
+	for _, want := range []string{
+		"nctalk", "Nextcloud Talk",
+		"Использование:",
+		"rooms list", "rooms find", "rooms search",
+		"chat show", "chat send",
+		"reactions get", "search",
+		"NEXTCLOUD_URL", "NEXTCLOUD_LOGIN", "NEXTCLOUD_PASS", "NEXTCLOUD_TIMEOUT",
+		"Exit-коды",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("general help: stdout не содержит %q\nвывод=\n%s", want, stdout)
+		}
+	}
+}
+
+// TestHandleHelp_DetailedContent — для каждой из 7 команд проверяем: имя команды,
+// заголовок, usage, каждый флаг, описание флага, --json, примеры.
+func TestHandleHelp_DetailedContent(t *testing.T) {
+	for _, cs := range cmdSpecs {
+		t.Run(joinPath(cs.Path), func(t *testing.T) {
+			deps := newTestDeps()
+			args := append(append([]string{}, cs.Path...), "--help")
+			_, code := HandleHelp(args, deps)
+			if code != 0 {
+				t.Fatalf("exit: got %d, want 0", code)
+			}
+			stdout := deps.Stdout.(*bytes.Buffer).String()
+			// Имя команды и short-описание
+			if !strings.Contains(stdout, joinPath(cs.Path)) {
+				t.Errorf("не содержит имя команды %q\nвывод=\n%s", joinPath(cs.Path), stdout)
+			}
+			if !strings.Contains(stdout, cs.Short) {
+				t.Errorf("не содержит short-описание %q\nвывод=\n%s", cs.Short, stdout)
+			}
+			// Usage
+			if !strings.Contains(stdout, "Использование:") {
+				t.Errorf("не содержит 'Использование:'\nвывод=\n%s", stdout)
+			}
+			// Каждый флаг и его описание
+			for _, f := range cs.Flags {
+				if !strings.Contains(stdout, f.Name) {
+					t.Errorf("не содержит флаг %q\nвывод=\n%s", f.Name, stdout)
+				}
+				if !strings.Contains(stdout, f.Desc) {
+					t.Errorf("не содержит описание флага %q: %q\nвывод=\n%s", f.Name, f.Desc, stdout)
+				}
+			}
+			// --json (глобальный) присутствует всегда
+			if !strings.Contains(stdout, "--json") {
+				t.Errorf("не содержит глобальный --json\nвывод=\n%s", stdout)
+			}
+			// Примеры (если есть)
+			for _, ex := range cs.Examples {
+				if !strings.Contains(stdout, ex) {
+					t.Errorf("не содержит пример %q\nвывод=\n%s", ex, stdout)
+				}
+			}
+		})
+	}
+}
+
+// TestHandleHelp_ResourceContent — help по ресурсу содержит его verbs.
+func TestHandleHelp_ResourceContent(t *testing.T) {
+	deps := newTestDeps()
+	_, code := HandleHelp([]string{"help", "rooms"}, deps)
+	if code != 0 {
+		t.Fatalf("exit: got %d, want 0", code)
+	}
+	stdout := deps.Stdout.(*bytes.Buffer).String()
+	for _, want := range []string{"rooms", "list", "find", "search", "nctalk rooms <команда> --help"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("resource help rooms: не содержит %q\nвывод=\n%s", want, stdout)
+		}
+	}
+}
+
+// TestHandleHelp_NoArgsGeneralToStderr — no-args → общий help в stderr (НЕ stdout).
+func TestHandleHelp_NoArgsGeneralToStderr(t *testing.T) {
+	deps := newTestDeps()
+	_, code := HandleHelp(nil, deps)
+	if code != 1 {
+		t.Fatalf("exit: got %d, want 1 (no-args)", code)
+	}
+	stderr := deps.Stderr.(*bytes.Buffer).String()
+	stdout := deps.Stdout.(*bytes.Buffer).String()
+	if stdout != "" {
+		t.Errorf("no-args: stdout должен быть пуст, got %q", stdout)
+	}
+	// stderr содержит тот же общий help (не короткое сообщение об ошибке).
+	for _, want := range []string{"nctalk", "Использование:", "NEXTCLOUD_URL"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("no-args stderr должен содержать %q; got %q", want, stderr)
+		}
 	}
 }
