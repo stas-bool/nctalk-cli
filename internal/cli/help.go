@@ -40,7 +40,7 @@ type cmdSpec struct {
 // --name включён только в тех командах, где handler его парсит.
 //
 // ВНИЗУ: каждая правка флагов в handler-е обязана сопровождаться правкой здесь;
-// regression-защита — TestCmdSpecs_FlagsExactly и TestAntiDrift_Handler (Task 4).
+// regression-защита — TestCmdSpecs_FlagsExactly и TestAntiDrift_HandlerMatchesDeclaration.
 var cmdSpecs = []cmdSpec{
 	{
 		Path:        []string{"rooms", "list"},
@@ -163,14 +163,7 @@ func pathsEqual(a, b []string) bool {
 // joinPath — "rooms list" для ["rooms","list"], "search" для ["search"].
 // Используется в render-функциях и тестах.
 func joinPath(p []string) string {
-	out := ""
-	for i, s := range p {
-		if i > 0 {
-			out += " "
-		}
-		out += s
-	}
-	return out
+	return strings.Join(p, " ")
 }
 
 // isHelpRequest — спека §5 (порядок разбора) и §2 (правила help-форм).
@@ -262,6 +255,17 @@ func HandleHelp(args []string, deps Deps) (handled bool, exit int) {
 	helpReq, path := isHelpRequest(args)
 	if !helpReq {
 		return false, 0
+	}
+
+	// Нормализация leaf-путей (фикс UX-асимметрии для leaf-команд с positional):
+	// `search foo --help` → computePath даст ["search","foo"], но search — leaf
+	// без verb-уровня, её positional не должен расширять путь. Если path[0] —
+	// известная leaf-команда (findSpec([path[0]]) != nil), усекаем path до [path[0]].
+	// Для 2-уровневых команд (rooms/chat/reactions) findSpec([resource]) всегда
+	// nil (paths в cmdSpecs — 2-токенные) → усечения не происходит, "rooms list"
+	// сохраняется.
+	if len(path) > 1 && findSpec(path[:1]) != nil {
+		path = path[:1]
 	}
 
 	// Класс help по длине пути (спека §2):

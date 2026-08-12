@@ -211,6 +211,11 @@ func TestHandleHelp_Routing(t *testing.T) {
 		{"cmd with h flag", []string{"chat", "show", "-h"}, 0, "stdout"},
 		{"resource with help flag", []string{"rooms", "--help"}, 0, "stdout"},
 		{"flag before cmd", []string{"--help", "rooms", "list"}, 0, "stdout"},
+		// leaf с positional: search foo --help → help по search (нормализация leaf-пути)
+		{"leaf with positional", []string{"search", "foo", "--help"}, 0, "stdout"},
+		{"help word leaf with positional", []string{"help", "search", "foo"}, 0, "stdout"},
+		// --json — не help-маркер; вырезается из path, общий help
+		{"json then help", []string{"--json", "--help"}, 0, "stdout"},
 
 		// no-args → stderr, exit 1 (НЕ help-запрос, но HandleHelp обрабатывает)
 		{"no args nil", nil, 1, "stderr"},
@@ -430,42 +435,44 @@ func TestAntiDrift_HelpMatchesDeclaration(t *testing.T) {
 	}
 }
 
-// tokeniseFlags — находит все --[a-z][a-z-]* токены в тексте (грубый парсинг).
+// tokeniseFlags — извлекает имена флагов только из секции "Флаги:" help-текста.
+// Регулярная структура строк секции: "  <name>[ <value>]  <description>".
+// Изоляция секции защищает от ложных срабатываний, если в прозе примеров или
+// usage когда-либо законно упомянется --что-то (например, «аналогично --silent
+// у chat send»). Глобальный --json попадает сюда же — он рендерится в секции.
 func tokeniseFlags(s string) []string {
 	var out []string
-	cur := ""
-	flush := func() {
-		if cur != "" {
-			out = append(out, cur)
-			cur = ""
+	inFlags := false
+	for _, line := range strings.Split(s, "\n") {
+		trim := strings.TrimSpace(line)
+		if trim == "Флаги:" {
+			inFlags = true
+			continue
 		}
-	}
-	for i := 0; i < len(s); i++ {
-		if i+1 < len(s) && s[i] == '-' && s[i+1] == '-' {
-			flush()
-			cur = "--"
-			i++
-			for i+1 < len(s) {
-				c := s[i+1]
-				if (c >= 'a' && c <= 'z') || c == '-' {
-					cur += string(c)
-					i++
-				} else {
-					break
-				}
-			}
-			flush()
+		if !inFlags {
+			continue
+		}
+		if trim == "" { // пустая строка — конец секции
+			break
+		}
+		fields := strings.Fields(line)
+		if len(fields) > 0 && strings.HasPrefix(fields[0], "--") {
+			out = append(out, fields[0])
 		}
 	}
 	return out
 }
 
 // TestAntiDrift_HandlerMatchesDeclaration — для каждой команды: handler
-// принимает КАЖДЫЙ заявленный в cmdSpecs флаг (без ошибки "неизвестный флаг") И
-// отвергает любой незаявленный --*-флаг (с ошибкой "неизвестный флаг"). Спека §6 prong 2.
+// принимает КАЖДЫЙ заявленный в cmdSpecs флаг (prong 1) И отвергает незаявленный
+// флаг (prong 2 — каноническое имя --zzz-undeclared-test-flag; prong 3 — словарь
+// «опасных» имён из cmdSpecs, чтобы поймать перенос флага между командами).
+// Спека §6 prong 2.
 //
-// Ловит класс «флаг в декларации, но handler его не парсит» (тот самый баг с
-// rooms find --include-former и rooms search --limit из review спеки) и обратный.
+// Ловит класс «флаг в декларации, но handler его не парсит» (prong 1; тот самый
+// баг с rooms find --include-former и rooms search --limit из review спеки) и
+// обратный «флаг у handler-а есть, а в cs.Flags забыли» (prong 3 — для имён,
+// заявленных в какой-либо ДРУГОЙ команде).
 func TestAntiDrift_HandlerMatchesDeclaration(t *testing.T) {
 	ctx := context.Background()
 	for _, cs := range cmdSpecs {
@@ -506,6 +513,37 @@ func TestAntiDrift_HandlerMatchesDeclaration(t *testing.T) {
 				t.Errorf("anti-drift: незаявленный флаг не отвергнут handler-ом (ожидалась ошибка 'неизвестный флаг'); args=%v", args)
 			} else if !strings.Contains(ee.Err.Error(), "неизвестный флаг") {
 				t.Errorf("anti-drift: незаявленный флаг дал другую ошибку (не 'неизвестный флаг'): %v\nargs=%v", ee.Err, args)
+			}
+
+			// 3. Словарный перебор: handler отвергает каждое "опасное" имя флага
+			// (заявленное в какой-либо ДРУГОЙ команде), не входящее в cs.Flags
+			// этой команды. Ловит исторический класс drift-а: разработчик
+			// перенёс флаг между handler-ами (или добавил handler-у флаг, уже
+			// заявленный где-то ещё) и забыл обновить cs.Flags здесь. Канонический
+			// want в TestCmdSpecs_FlagsExactly такого не ловит — он сверяет cs.Flags
+			// с hardcoded каноном, а не поведение handler-а с cs.Flags.
+			declared := map[string]bool{}
+			for _, f := range cs.Flags {
+				declared[f.Name] = true
+			}
+			for _, other := range cmdSpecs {
+				for _, f := range other.Flags {
+					if declared[f.Name] {
+						continue
+					}
+					deps := newTestDeps()
+					// chat send читает stdin до ResolveRoom: даём тело, чтобы
+					// handler дошёл до парсинга флагов (флаги парсятся раньше,
+					// но так безопаснее — semantics не зависит от tty/stdin).
+					if joinPath(cs.Path) == "chat send" {
+						deps.Stdin = strings.NewReader("anti-drift body")
+					}
+					args := append(buildPositionalArgs(cs), f.Name)
+					ee := handler(ctx, deps, args, false)
+					if ee.Err == nil || !strings.Contains(ee.Err.Error(), "неизвестный флаг") {
+						t.Errorf("anti-drift: флаг %q не заявлен для %s, но handler его принял (ожидалась 'неизвестный флаг'); args=%v", f.Name, joinPath(cs.Path), args)
+					}
+				}
 			}
 		})
 	}
