@@ -10,6 +10,8 @@
 package cli
 
 import (
+	"fmt"
+	"io"
 	"strings"
 )
 
@@ -234,6 +236,159 @@ func isValueFlag(flagName string) bool {
 			if strings.TrimPrefix(f.Name, "--") == name {
 				return f.Value != ""
 			}
+		}
+	}
+	return false
+}
+
+// HandleHelp — спека §2/§5.
+//
+// Проверяет args: help-запрос, no-args или обычный flow (спека §5).
+// Возвращает (true, code) если args — help/no-args случай (уже напечатано
+// в deps.Stdout или deps.Stderr). Deps.Client при этом НЕ используется.
+// Возвращает (false, 0) — обычный flow; caller должен вызвать config.Load/cli.Run.
+//
+// Спека §2 (exit-коды и потоки):
+//   - успешный help (с распознанным путём) → deps.Stdout, exit 0
+//   - пустые args (no-args) → общий help в deps.Stderr, exit 1
+//   - help с неизвестным путём → "неизвестная команда" + подсказка, deps.Stderr, exit 1
+func HandleHelp(args []string, deps Deps) (handled bool, exit int) {
+	// no-args → общий help в stderr, exit 1 (отдельный случай, не help-запрос).
+	if len(args) == 0 {
+		renderGeneral(deps.Stderr)
+		return true, ExitGeneric
+	}
+
+	helpReq, path := isHelpRequest(args)
+	if !helpReq {
+		return false, 0
+	}
+
+	// Класс help по длине пути (спека §2):
+	//   path == [] → общий help (stdout, exit 0)
+	//   path == [resource] → help по ресурсу (stdout, exit 0)
+	//   path == [resource, verb] → детальный (stdout, exit 0)
+	//   path == [leaf] → детальный по leaf-команде (stdout, exit 0)
+	//   невалидный путь → stderr + exit 1
+	switch len(path) {
+	case 0:
+		renderGeneral(deps.Stdout)
+		return true, ExitOK
+	case 1:
+		// Может быть ресурсом (rooms/chat/reactions) или leaf-командой (search).
+		if spec := findSpec(path); spec != nil {
+			renderDetailed(deps.Stdout, spec)
+			return true, ExitOK
+		}
+		if isResourceName(path[0]) {
+			renderResource(deps.Stdout, path[0])
+			return true, ExitOK
+		}
+	case 2:
+		if spec := findSpec(path); spec != nil {
+			renderDetailed(deps.Stdout, spec)
+			return true, ExitOK
+		}
+	}
+	// Невалидный путь — спека §2 последняя строка таблицы.
+	fmt.Fprintf(deps.Stderr, "nctalk: неизвестная команда %q\n", strings.Join(path, " "))
+	fmt.Fprintln(deps.Stderr, "смотрите: nctalk --help")
+	return true, ExitGeneric
+}
+
+// isResourceName проверяет, есть ли resource в таблице routes (rooms/chat/reactions).
+func isResourceName(name string) bool {
+	_, ok := routes[name]
+	return ok
+}
+
+// renderGeneral — общий help (спека §3).
+func renderGeneral(w io.Writer) {
+	fmt.Fprintln(w, "nctalk — тонкий CLI над Nextcloud Talk (Spreed)")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Использование:")
+	fmt.Fprintln(w, "  nctalk <команда> [flags]")
+	fmt.Fprintln(w, "  nctalk <команда> --help    помощь по команде")
+	fmt.Fprintln(w, "  nctalk --help              эта справка")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Команды:")
+	for _, cs := range cmdSpecs {
+		// Выровненные отступы: ширина = max ширина пути.
+		fmt.Fprintf(w, "  %-25s %s\n", joinPath(cs.Path), cs.Short)
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Глобальные флаги:")
+	fmt.Fprintln(w, "  --json                    вывод в JSON (в любой позиции)")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Окружение:")
+	fmt.Fprintln(w, "  NEXTCLOUD_URL             адрес сервера (https://...)")
+	fmt.Fprintln(w, "  NEXTCLOUD_LOGIN           логин")
+	fmt.Fprintln(w, "  NEXTCLOUD_PASS            app-password (только env)")
+	fmt.Fprintln(w, "  NEXTCLOUD_TIMEOUT         таймаут HTTP (по умолчанию 30s)")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Exit-коды: 0 — успех, 1 — общая ошибка/сеть/401/5xx,")
+	fmt.Fprintln(w, "           2 — не найдено, 3 — неоднозначное совпадение.")
+}
+
+// renderResource — help по ресурсу: заголовок + список verbs (спека §4 последний абзац).
+func renderResource(w io.Writer, resource string) {
+	fmt.Fprintf(w, "nctalk %s — команды ресурса\n", resource)
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Команды:")
+	for _, cs := range cmdSpecs {
+		if len(cs.Path) == 2 && cs.Path[0] == resource {
+			fmt.Fprintf(w, "  %s %-10s %s\n", resource, cs.Path[1], cs.Short)
+		}
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "Смотрите: nctalk %s <команда> --help\n", resource)
+}
+
+// renderDetailed — детальный help по команде (спека §4).
+func renderDetailed(w io.Writer, spec *cmdSpec) {
+	cmd := joinPath(spec.Path)
+	fmt.Fprintf(w, "nctalk %s — %s\n", cmd, spec.Short)
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Использование:")
+	if spec.UsageExtras != "" {
+		fmt.Fprintf(w, "  nctalk %s %s [flags]\n", cmd, spec.UsageExtras)
+	} else {
+		fmt.Fprintf(w, "  nctalk %s [flags]\n", cmd)
+	}
+	fmt.Fprintln(w)
+	if hasRoomResolve(spec) {
+		fmt.Fprintln(w, "<room> — token комнаты позиционно, либо --name для разрешения по имени.")
+		fmt.Fprintln(w)
+	}
+	if len(spec.Flags) > 0 {
+		fmt.Fprintln(w, "Флаги:")
+		for _, f := range spec.Flags {
+			name := f.Name
+			if f.Value != "" {
+				name = f.Name + " " + f.Value
+			}
+			fmt.Fprintf(w, "  %-22s  %s\n", name, f.Desc)
+		}
+		fmt.Fprintln(w, "  --json                  вывод в JSON")
+		fmt.Fprintln(w)
+	} else {
+		fmt.Fprintln(w, "Флаги:")
+		fmt.Fprintln(w, "  --json                  вывод в JSON")
+		fmt.Fprintln(w)
+	}
+	if len(spec.Examples) > 0 {
+		fmt.Fprintln(w, "Примеры:")
+		for _, ex := range spec.Examples {
+			fmt.Fprintf(w, "  %s\n", ex)
+		}
+	}
+}
+
+// hasRoomResolve — есть ли у команды флаг --name (признак room-resolution).
+func hasRoomResolve(spec *cmdSpec) bool {
+	for _, f := range spec.Flags {
+		if f.Name == "--name" {
+			return true
 		}
 	}
 	return false
