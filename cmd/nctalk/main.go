@@ -20,18 +20,24 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, os.Stdin))
 }
 
-// run — связка config → client → cli (план Task 5.1, спека §5/§9).
+// run — связка help → config → client → cli (спека 2026-08-12 §5).
 //
-// Возвращает exit-код для os.Exit. Ошибки config.Load печатаются в stderr
-// одной строкой с префиксом "nctalk:". Сообщения config.Load содержат только
-// ИМЕНА env-переменных, но не их значения — поэтому вывод безопасен (креды не
-// утекают). Все сетевые/OCS-ошибки приходят из client-слоя уже sanitized
-// (без URL userinfo/query, без заголовка Authorization) — см. client.sanitizeErr.
+// help перехватывается СТРОГО ДО config.Load: nctalk --help / nctalk help ... /
+// nctalk <cmd> --help / nctalk (no-args) работают без NEXTCLOUD_* и не создают
+// клиент. Deps.Client при help-вызове не нужен (HandleHelp его не трогает).
 //
-// args/stdout/stderr/stdin передаются параметрами (а не берутся из os.* прямо
-// в теле) — это позволяет e2e-тестам в main_test.go подменять потоки на
-// *bytes.Buffer и подавать любые аргументы CLI, не трогая реальные os.Stdout.
+// Возвращает exit-код для os.Exit. Ошибки config.Load печатаются в stderr одной
+// строкой с префиксом "nctalk:" (без значений env-переменных — см. config.Load).
 func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
+	// Спека §5: HandleHelp решает «help-запрос / no-args / обычный flow».
+	// При handled=true — выход с кодом help; config.Load/client/cli.Run не идут.
+	if handled, code := cli.HandleHelp(args, cli.Deps{
+		Stdout: stdout,
+		Stderr: stderr,
+	}); handled {
+		return code
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintln(stderr, "nctalk: "+err.Error())
