@@ -9,6 +9,7 @@
 - Credentials only via environment variables (app-password), never in flags or files
 - Pure Go 1.21 stdlib, CGO-free single binary
 - Experimental: terminal WebRTC audio calls — `nctalk-call` (pipe/agent mode), `nctalk-talk` (TUI)
+- [MIT License](LICENSE)
 
 ```sh
 go install github.com/stas-bool/nctalk-cli/cmd/nctalk@latest
@@ -247,3 +248,7 @@ ffmpeg -f audiotoolbox -list_devices true -i ""   # output → NCTALK_AUDIO_DEVI
 ```
 
 Exit-коды — те же (`0`/`1`/`2`/`3`). В не-терминале (pipe) TUI уходит в fallback-режим без raw-mode/alt-screen и пишет статус построчно в stdout — это позволяет гонять его в интеграционных тестах.
+
+## Лицензия
+
+MIT — см. [`LICENSE`](LICENSE).
