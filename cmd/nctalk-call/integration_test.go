@@ -43,7 +43,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stas/nctalk/internal/call/media"
+	"github.com/stas-bool/nctalk-cli/internal/call/media"
 )
 
 // TestSpike_AudioBothDirections — spike-gate (спека §12).

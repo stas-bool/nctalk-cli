@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stas/nctalk/internal/config"
-	"github.com/stas/nctalk/internal/transport"
+	"github.com/stas-bool/nctalk-cli/internal/config"
+	"github.com/stas-bool/nctalk-cli/internal/transport"
 )
 
 // testCfg собирает Config с указанным baseURL и фиксированными тестовыми

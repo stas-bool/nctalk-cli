@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/stas/nctalk/internal/call/media/ogg"
+	"github.com/stas-bool/nctalk-cli/internal/call/media/ogg"
 )
 
 // ---- Контракт PCM (фиксированный, спека §6/§8) ----

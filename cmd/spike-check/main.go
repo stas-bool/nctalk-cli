@@ -20,7 +20,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/stas/nctalk/internal/call/media"
+	"github.com/stas-bool/nctalk-cli/internal/call/media"
 )
 
 func main() {

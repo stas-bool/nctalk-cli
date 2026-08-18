@@ -10,7 +10,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/stas/nctalk/internal/client"
+	"github.com/stas-bool/nctalk-cli/internal/client"
 )
 
 // TalkClient — минимальный интерфейс, покрывающий 7 методов реального

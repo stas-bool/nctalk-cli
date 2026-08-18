@@ -7,9 +7,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/stas/nctalk/internal/cli"
-	"github.com/stas/nctalk/internal/client"
-	"github.com/stas/nctalk/internal/config"
+	"github.com/stas-bool/nctalk-cli/internal/cli"
+	"github.com/stas-bool/nctalk-cli/internal/client"
+	"github.com/stas-bool/nctalk-cli/internal/config"
 )
 
 // main — точка входа. Делегирует в run и оборачивает результат в os.Exit.

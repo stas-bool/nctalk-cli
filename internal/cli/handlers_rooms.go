@@ -14,8 +14,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/stas/nctalk/internal/client"
-	"github.com/stas/nctalk/internal/render"
+	"github.com/stas-bool/nctalk-cli/internal/client"
+	"github.com/stas-bool/nctalk-cli/internal/render"
 )
 
 // roomsListHandler — реализация `rooms list` (спека §6).

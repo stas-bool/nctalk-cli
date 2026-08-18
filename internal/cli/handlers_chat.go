@@ -17,8 +17,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/stas/nctalk/internal/client"
-	"github.com/stas/nctalk/internal/render"
+	"github.com/stas-bool/nctalk-cli/internal/client"
+	"github.com/stas-bool/nctalk-cli/internal/render"
 )
 
 // chatShowHandler — реализация `chat show <room>` (спека §6, §8). Читает

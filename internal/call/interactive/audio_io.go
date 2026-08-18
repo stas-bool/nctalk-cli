@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/stas/nctalk/internal/call/media"
-	"github.com/stas/nctalk/internal/call/media/ogg"
+	"github.com/stas-bool/nctalk-cli/internal/call/media"
+	"github.com/stas-bool/nctalk-cli/internal/call/media/ogg"
 )
 
 // ---- MicSource: микрофон → raw Opus ----

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stas/nctalk/internal/client"
+	"github.com/stas-bool/nctalk-cli/internal/client"
 )
 
 // errMock — маркер: ни один stub-handler сейчас не должен доходить до клиентских

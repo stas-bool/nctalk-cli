@@ -12,9 +12,9 @@ import (
 	"time"
 
 	"github.com/pion/webrtc/v4"
-	"github.com/stas/nctalk/internal/call/agent"
-	"github.com/stas/nctalk/internal/call/signaling"
-	"github.com/stas/nctalk/internal/config"
+	"github.com/stas-bool/nctalk-cli/internal/call/agent"
+	"github.com/stas-bool/nctalk-cli/internal/call/signaling"
+	"github.com/stas-bool/nctalk-cli/internal/config"
 )
 
 // agentRunner — внутренняя точка инъекции для тестов (production = agent.Run).

@@ -3,7 +3,7 @@ package render
 import (
 	"regexp"
 
-	"github.com/stas/nctalk/internal/client"
+	"github.com/stas-bool/nctalk-cli/internal/client"
 )
 
 // placeholderRe находит плейсхолдеры вида {key}, где key начинается с буквы/цифры

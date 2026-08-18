@@ -11,8 +11,8 @@ import (
 
 	"github.com/pion/webrtc/v4"
 	pionmedia "github.com/pion/webrtc/v4/pkg/media"
-	"github.com/stas/nctalk/internal/call/media"
-	"github.com/stas/nctalk/internal/call/signaling"
+	"github.com/stas-bool/nctalk-cli/internal/call/media"
+	"github.com/stas-bool/nctalk-cli/internal/call/signaling"
 )
 
 // ---- Моки AudioSource / AudioSink (НЕ экспортируются) ----

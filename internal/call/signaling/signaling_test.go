@@ -29,8 +29,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stas/nctalk/internal/exit"
-	"github.com/stas/nctalk/internal/transport"
+	"github.com/stas-bool/nctalk-cli/internal/exit"
+	"github.com/stas-bool/nctalk-cli/internal/transport"
 )
 
 // ---- helpers ----
@@ -1064,8 +1064,8 @@ func TestSignalingDoesNotImportCLIorRender(t *testing.T) {
 		t.Fatalf("go list -deps: %v", err)
 	}
 	for _, line := range strings.Split(string(out), "\n") {
-		if strings.Contains(line, "github.com/stas/nctalk/internal/cli") ||
-			strings.Contains(line, "github.com/stas/nctalk/internal/render") {
+		if strings.Contains(line, "github.com/stas-bool/nctalk-cli/internal/cli") ||
+			strings.Contains(line, "github.com/stas-bool/nctalk-cli/internal/render") {
 			t.Errorf("signaling не должен зависеть от cli/render: найдено %q", line)
 		}
 	}

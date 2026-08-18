@@ -20,8 +20,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stas/nctalk/internal/call/weblogin"
-	"github.com/stas/nctalk/internal/transport"
+	"github.com/stas-bool/nctalk-cli/internal/call/weblogin"
+	"github.com/stas-bool/nctalk-cli/internal/transport"
 )
 
 // TestIntegration_Login_Docker проверяет, что weblogin.Login реально получает

@@ -42,11 +42,11 @@ import (
 
 	"github.com/pion/webrtc/v4"
 	pionmedia "github.com/pion/webrtc/v4/pkg/media"
-	"github.com/stas/nctalk/internal/call/media"
-	"github.com/stas/nctalk/internal/call/peer"
-	"github.com/stas/nctalk/internal/call/signaling"
-	"github.com/stas/nctalk/internal/exit"
-	"github.com/stas/nctalk/internal/transport"
+	"github.com/stas-bool/nctalk-cli/internal/call/media"
+	"github.com/stas-bool/nctalk-cli/internal/call/peer"
+	"github.com/stas-bool/nctalk-cli/internal/call/signaling"
+	"github.com/stas-bool/nctalk-cli/internal/exit"
+	"github.com/stas-bool/nctalk-cli/internal/transport"
 )
 
 // ---- DI: маленькие интерфейсы в package agent ----

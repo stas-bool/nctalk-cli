@@ -1,6 +1,6 @@
 package client
 
-import "github.com/stas/nctalk/internal/transport"
+import "github.com/stas-bool/nctalk-cli/internal/transport"
 
 // aliases.go — type alias для обратной совместимости существующих тестов и
 // кода, который ссылается на client.OCSError. После выноса типа в

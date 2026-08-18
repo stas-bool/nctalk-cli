@@ -20,8 +20,8 @@ import (
 	"testing"
 
 	"github.com/pion/webrtc/v4"
-	"github.com/stas/nctalk/internal/call/capability"
-	"github.com/stas/nctalk/internal/transport"
+	"github.com/stas-bool/nctalk-cli/internal/call/capability"
+	"github.com/stas-bool/nctalk-cli/internal/transport"
 )
 
 // ---- helpers ----

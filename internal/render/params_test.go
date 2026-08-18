@@ -3,7 +3,7 @@ package render
 import (
 	"testing"
 
-	"github.com/stas/nctalk/internal/client"
+	"github.com/stas-bool/nctalk-cli/internal/client"
 )
 
 // TestSubstituteParams — table-driven проверка подстановки messageParameters

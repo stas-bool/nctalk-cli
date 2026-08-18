@@ -20,9 +20,9 @@ import (
 	"os"
 	"testing"
 
-	"github.com/stas/nctalk/internal/call/capability"
-	"github.com/stas/nctalk/internal/call/weblogin"
-	"github.com/stas/nctalk/internal/transport"
+	"github.com/stas-bool/nctalk-cli/internal/call/capability"
+	"github.com/stas-bool/nctalk-cli/internal/call/weblogin"
+	"github.com/stas-bool/nctalk-cli/internal/transport"
 )
 
 // TestIntegration_Settings_Docker — после фикса бага #2 capability.Settings

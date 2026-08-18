@@ -14,7 +14,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/stas/nctalk/internal/render"
+	"github.com/stas-bool/nctalk-cli/internal/render"
 )
 
 // reactionsGetHandler — реализация `reactions get <room> <messageId>` (спека §6).

@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/stas/nctalk/internal/client"
-	"github.com/stas/nctalk/internal/render"
+	"github.com/stas-bool/nctalk-cli/internal/client"
+	"github.com/stas-bool/nctalk-cli/internal/render"
 )
 
 // searchHandler — реализация `search <term>` (спека §6): глобальный поиск

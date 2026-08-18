@@ -13,7 +13,7 @@ package room
 import (
 	"context"
 
-	"github.com/stas/nctalk/internal/client"
+	"github.com/stas-bool/nctalk-cli/internal/client"
 )
 
 // RoomLister — минимальная зависимость от клиента: нужен только FindRooms.
