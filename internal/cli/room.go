@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/stas/nctalk/internal/render"
-	"github.com/stas/nctalk/internal/room"
+	"github.com/stas-bool/nctalk-cli/internal/render"
+	"github.com/stas-bool/nctalk-cli/internal/room"
 )
 
 // ResolveRoom — тонкая обёртка над room.ResolveRoom для backcompat команд

@@ -13,7 +13,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/stas/nctalk/internal/transport"
+	"github.com/stas-bool/nctalk-cli/internal/transport"
 )
 
 // Exit-коды по спеке §7.

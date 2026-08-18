@@ -14,7 +14,7 @@ import (
 	"encoding/json"
 	"io"
 
-	"github.com/stas/nctalk/internal/client"
+	"github.com/stas-bool/nctalk-cli/internal/client"
 )
 
 // writeJSON маршалит value в w с отступом 2 пробела (спека §6 --json).

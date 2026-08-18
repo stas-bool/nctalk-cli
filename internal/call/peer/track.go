@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/pion/webrtc/v4"
-	"github.com/stas/nctalk/internal/call/media"
+	"github.com/stas-bool/nctalk-cli/internal/call/media"
 )
 
 // handleIncomingTrack — pion OnTrack handler (вызывается из горутины pion при

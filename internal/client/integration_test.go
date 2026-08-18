@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stas/nctalk/internal/config"
+	"github.com/stas-bool/nctalk-cli/internal/config"
 )
 
 // integrationTimeout — пер-тестовый потолок времени на один сетевой сценарий.

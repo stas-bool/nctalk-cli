@@ -3,7 +3,7 @@ package signaling
 import (
 	"encoding/json"
 
-	"github.com/stas/nctalk/internal/transport"
+	"github.com/stas-bool/nctalk-cli/internal/transport"
 )
 
 // Auth — псевдоним для transport.Auth, чтобы потребители signaling (peer-слой,

@@ -27,15 +27,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/stas/nctalk/internal/call/agent"
-	"github.com/stas/nctalk/internal/call/capability"
-	"github.com/stas/nctalk/internal/call/signaling"
-	"github.com/stas/nctalk/internal/call/weblogin"
-	"github.com/stas/nctalk/internal/client"
-	"github.com/stas/nctalk/internal/config"
-	"github.com/stas/nctalk/internal/exit"
-	"github.com/stas/nctalk/internal/room"
-	"github.com/stas/nctalk/internal/transport"
+	"github.com/stas-bool/nctalk-cli/internal/call/agent"
+	"github.com/stas-bool/nctalk-cli/internal/call/capability"
+	"github.com/stas-bool/nctalk-cli/internal/call/signaling"
+	"github.com/stas-bool/nctalk-cli/internal/call/weblogin"
+	"github.com/stas-bool/nctalk-cli/internal/client"
+	"github.com/stas-bool/nctalk-cli/internal/config"
+	"github.com/stas-bool/nctalk-cli/internal/exit"
+	"github.com/stas-bool/nctalk-cli/internal/room"
+	"github.com/stas-bool/nctalk-cli/internal/transport"
 )
 
 // InCall-флаги Nextcloud Talk (спека §6). Локальные константы — agent хранит

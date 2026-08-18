@@ -3,7 +3,7 @@ package client
 import (
 	"net/http"
 
-	"github.com/stas/nctalk/internal/transport"
+	"github.com/stas-bool/nctalk-cli/internal/transport"
 )
 
 // redact.go — thin re-exports после переезда санитайз-функций в internal/transport

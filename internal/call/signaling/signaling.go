@@ -36,8 +36,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/stas/nctalk/internal/exit"
-	"github.com/stas/nctalk/internal/transport"
+	"github.com/stas-bool/nctalk-cli/internal/exit"
+	"github.com/stas-bool/nctalk-cli/internal/transport"
 )
 
 // signalingDebug — отладочные логи signaling-парсера. Молчат по умолчанию;

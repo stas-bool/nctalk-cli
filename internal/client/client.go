@@ -23,8 +23,8 @@ import (
 	"net/http"
 	"net/url"
 
-	"github.com/stas/nctalk/internal/config"
-	"github.com/stas/nctalk/internal/transport"
+	"github.com/stas-bool/nctalk-cli/internal/config"
+	"github.com/stas-bool/nctalk-cli/internal/transport"
 )
 
 // TalkClient — HTTP-клиент Nextcloud Talk.

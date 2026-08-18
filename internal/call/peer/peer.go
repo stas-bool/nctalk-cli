@@ -27,8 +27,8 @@ import (
 	"sync/atomic"
 
 	"github.com/pion/webrtc/v4"
-	"github.com/stas/nctalk/internal/call/media"
-	"github.com/stas/nctalk/internal/call/signaling"
+	"github.com/stas-bool/nctalk-cli/internal/call/media"
+	"github.com/stas-bool/nctalk-cli/internal/call/signaling"
 )
 
 // Config для New. ICEServers — из capability сервера (Task 2.10), НЕ из env:

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stas/nctalk/internal/client"
+	"github.com/stas-bool/nctalk-cli/internal/client"
 )
 
 // containsAll проверяет, что out содержит все подстроки want.

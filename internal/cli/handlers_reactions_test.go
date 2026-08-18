@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stas/nctalk/internal/client"
+	"github.com/stas-bool/nctalk-cli/internal/client"
 )
 
 // reactionsSpyClient — заглушка TalkClient для тестов `reactions get`.

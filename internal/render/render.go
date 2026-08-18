@@ -16,7 +16,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/stas/nctalk/internal/client"
+	"github.com/stas-bool/nctalk-cli/internal/client"
 )
 
 // newTabwriter создаёт табрайтер с общими для всех таблиц параметрами:

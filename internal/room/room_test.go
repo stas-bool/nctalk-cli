@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/stas/nctalk/internal/client"
+	"github.com/stas-bool/nctalk-cli/internal/client"
 )
 
 // mockLister — заглушка RoomLister для тестов ResolveRoom. Считает вызовы

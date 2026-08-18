@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/stas/nctalk/internal/call/media"
+	"github.com/stas-bool/nctalk-cli/internal/call/media"
 )
 
 // muteSource — перехватывает media.AudioSource. При muted — крутит inner.ReadSample

@@ -30,7 +30,7 @@ import (
 	"net/http"
 
 	"github.com/pion/webrtc/v4"
-	"github.com/stas/nctalk/internal/transport"
+	"github.com/stas-bool/nctalk-cli/internal/transport"
 )
 
 // Auth — псевдоним для transport.Auth (как в signaling): потребителям capability

@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/stas/nctalk/internal/transport"
+	"github.com/stas-bool/nctalk-cli/internal/transport"
 )
 
 // requestTokenRe извлекает requesttoken из HTML логин-формы Nextcloud. Формат —

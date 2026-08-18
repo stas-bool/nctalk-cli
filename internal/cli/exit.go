@@ -9,7 +9,7 @@
 //_layer direction: cli → exit (НЕ наоборот, иначе цикл импортов).
 package cli
 
-import "github.com/stas/nctalk/internal/exit"
+import "github.com/stas-bool/nctalk-cli/internal/exit"
 
 // ExitError — алиас для exit.ExitError (см. комментарий выше). Аlias в Go —
 // это ТОТ ЖЕ тип (не wrapper), поэтому существующий код вида

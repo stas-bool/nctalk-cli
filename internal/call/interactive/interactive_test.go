@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stas/nctalk/internal/call/agent"
+	"github.com/stas-bool/nctalk-cli/internal/call/agent"
 )
 
 // fakeView — запись всех Update-вызовов для тестов.

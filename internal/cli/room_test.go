@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/stas/nctalk/internal/client"
+	"github.com/stas-bool/nctalk-cli/internal/client"
 )
 
 // roomMockClient — заглушка TalkClient для тестов обёртки cli.ResolveRoom.

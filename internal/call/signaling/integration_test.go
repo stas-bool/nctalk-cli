@@ -31,10 +31,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stas/nctalk/internal/call/weblogin"
-	"github.com/stas/nctalk/internal/config"
-	"github.com/stas/nctalk/internal/exit"
-	"github.com/stas/nctalk/internal/transport"
+	"github.com/stas-bool/nctalk-cli/internal/call/weblogin"
+	"github.com/stas-bool/nctalk-cli/internal/config"
+	"github.com/stas-bool/nctalk-cli/internal/exit"
+	"github.com/stas-bool/nctalk-cli/internal/transport"
 )
 
 const signalingPollTimeout = 5 * time.Second  // потолок ожидания signaling-событий
