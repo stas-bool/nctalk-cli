@@ -117,6 +117,16 @@ echo "тихо"  | nctalk chat send kytxaiyc --silent               # без у�
 
 Вывод: `id` отправленного сообщения.
 
+### `chat edit <room> <messageId>` — отредактировать сообщение
+
+```sh
+echo "исправлено" | nctalk chat edit kytxaiyc 2927      # новый текст из stdin (по умолчанию)
+nctalk chat edit kytxaiyc 2927 --file new.txt          # новый текст из файла
+nctalk chat edit --name "Команда" 2927 --file new.txt  # комнату по имени
+```
+
+Вывод: `id` отредактированного сообщения. Правки ограничивает сервер (ошибки 400/403/404/405 показывает сервер): свои сообщения — в течение 24 часов после отправки, чужие — только модератору, тип — comment.
+
 ### `reactions get <room> <messageId>` — кто поставил реакции
 
 ```sh
