@@ -619,6 +619,40 @@ func TestEditMessage_OCSError(t *testing.T) {
 	}
 }
 
+// TestEditMessage_ResponseWithoutParent_FormatDrift — сервер ответил 200, но
+// в ocs.data нет parent (или parent.id=0) — drift формата ответа. Контракт:
+// ошибка, а НЕ молчаливый (0, nil) с фиктивным id=0 и exit 0 у CLI. Формат
+// PUT-ответа экзотичен (системное сообщение с parent, дизайн §3) — unit-уровень
+// обязан ловить расхождение, не полагаясь только на integration-тест под флагом.
+func TestEditMessage_ResponseWithoutParent_FormatDrift(t *testing.T) {
+	cases := []struct {
+		name string
+		data any
+	}{
+		{"нет parent (только системное сообщение)", map[string]any{"id": 5101}},
+		{"пустой parent без id", map[string]any{"parent": map[string]any{}}},
+		{"data=null", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts, _ := chatEditServer(t, ocsBody(t, 200, "OK", tc.data))
+			defer ts.Close()
+
+			c := NewTalkClient(testCfg(ts.URL))
+			id, err := c.EditMessage(context.Background(), "tok", 2927, EditMessageOpts{Message: "x"})
+			if err == nil {
+				t.Fatal("err = nil, want ошибка drift-формата (нет parent.id)")
+			}
+			if id != 0 {
+				t.Errorf("id: got %d, want 0 (при ошибке фиктивный id не возвращаем)", id)
+			}
+			if !strings.Contains(err.Error(), "parent.id") {
+				t.Errorf("err: got %q, want содержит 'parent.id'", err.Error())
+			}
+		})
+	}
+}
+
 // TestEditMessage_Guards — пустое сообщение и неположительный messageId —
 // клиентские ошибки ДО сети (дизайн §4): лог запросов пуст, сервер не дёргаем.
 func TestEditMessage_Guards(t *testing.T) {
