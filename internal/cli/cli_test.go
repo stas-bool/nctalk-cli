@@ -34,6 +34,9 @@ func (m *mockTalkClient) GetChat(_ context.Context, _ string, _ client.GetChatOp
 func (m *mockTalkClient) SendMessage(_ context.Context, _ string, _ client.SendMessageOpts) (int, error) {
 	return 0, errMock
 }
+func (m *mockTalkClient) EditMessage(_ context.Context, _ string, _ int, _ client.EditMessageOpts) (int, error) {
+	return 0, errMock
+}
 func (m *mockTalkClient) GetReactions(_ context.Context, _ string, _ int) (map[string][]client.ReactionActor, error) {
 	return nil, errMock
 }
