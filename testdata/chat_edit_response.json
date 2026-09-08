@@ -1,0 +1,48 @@
+{
+  "ocs": {
+    "meta": {
+      "status": "ok",
+      "statuscode": 200,
+      "message": "OK"
+    },
+    "data": {
+      "id": 5101,
+      "token": "tok123",
+      "actorType": "users",
+      "actorId": "alice",
+      "actorDisplayName": "Alice",
+      "timestamp": 1757300000,
+      "message": "Message edited by you",
+      "messageParameters": {
+        "actor": { "type": "user", "id": "alice", "name": "Alice" }
+      },
+      "systemMessage": "message_edited",
+      "messageType": "system",
+      "isReplyable": false,
+      "referenceId": "",
+      "expirationTimestamp": 0,
+      "silent": false,
+      "parent": {
+        "id": 2927,
+        "token": "tok123",
+        "actorType": "users",
+        "actorId": "alice",
+        "actorDisplayName": "Alice",
+        "timestamp": 1757290000,
+        "message": "исправленный текст",
+        "messageParameters": {},
+        "systemMessage": "",
+        "messageType": "comment",
+        "isReplyable": true,
+        "referenceId": "",
+        "expirationTimestamp": 0,
+        "reactions": { "👍": 2 },
+        "lastEditActorType": "users",
+        "lastEditActorId": "alice",
+        "lastEditActorDisplayName": "Alice",
+        "lastEditTimestamp": 1757300000,
+        "silent": false
+      }
+    }
+  }
+}
