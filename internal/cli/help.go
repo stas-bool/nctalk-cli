@@ -34,7 +34,7 @@ type cmdSpec struct {
 	Examples    []string
 }
 
-// cmdSpecs — единый источник правды: 7 команд базового CLI.
+// cmdSpecs — единый источник правды: 8 команд базового CLI.
 // Порядок соответствует общему help (спека §3). Флаги — строго по handler-ам
 // (handlers_rooms.go, handlers_chat.go, handlers_reactions.go, handlers_search.go);
 // --name включён только в тех командах, где handler его парсит.
@@ -107,6 +107,19 @@ var cmdSpecs = []cmdSpec{
 		Examples: []string{
 			"echo \"hi\" | nctalk chat send abc123",
 			"nctalk chat send --name \"Команда\" --file msg.txt",
+		},
+	},
+	{
+		Path:        []string{"chat", "edit"},
+		Short:       "отредактировать отправленное сообщение (stdin или --file)",
+		UsageExtras: "<room> <messageId>",
+		Flags: []flagSpec{
+			{Name: "--name", Value: "<имя>", Desc: "разрешить комнату по имени (вместо token)"},
+			{Name: "--file", Value: "<путь>", Desc: "взять тело из файла (иначе stdin)"},
+		},
+		Examples: []string{
+			"echo \"исправлено\" | nctalk chat edit abc123 100",
+			"nctalk chat edit --name \"Команда\" 100 --file new.txt",
 		},
 	},
 	{
