@@ -57,6 +57,8 @@ nctalk chat edit <room> <messageId> [flags]
   - 1 позиционный без `--name` → ошибка exit `1` «ожидается <room> <messageId>»;
   - 0 позиционных без `--name` → ошибка exit `1` «ожидается <room> <messageId>
     или --name <имя> <messageId>»;
+  - 0 позиционных с `--name` → та же ошибка exit `1` (нет `<messageId>`) —
+    default-ветка шаблона `reactions get` покрывает обе комбинации нуля;
   - лишние позиционные (третий и далее) игнорируются.
 - Тело нового текста:
   - stdin по умолчанию (`io.ReadAll(deps.Stdin)`, при nil — `os.Stdin`);
@@ -87,11 +89,11 @@ nctalk chat edit <room> <messageId> [flags]
 | `404` OCS (комната или сообщение не найдены) · 0 совпадений `--name` | `2` |
 | >1 совпадение `--name` | `3` |
 
-Серверные отказа правки (все — OCS-error с текстом сервера, exit `1`):
-`400` (сообщение старше 24 часов или правка запрещена), `403` (чужое сообщение,
-не модератор; read-only комната), `405` (не обычное comment-сообщение),
-`412` (lobby). Клиент ничего из этого не предугадывает — просто показывает
-ошибку сервера.
+Серверные отказа правки (основные, не исчерпывающе; все — OCS-error с текстом
+сервера, exit `1`): `400` (сообщение старше 24 часов или правка запрещена),
+`403` (чужое сообщение, не модератор; read-only комната), `405` (не обычное
+comment-сообщение), `412` (lobby), `413` (текст правки слишком длинный).
+Клиент ничего из этого не предугадывает — просто показывает ошибку сервера.
 
 ## 3. API-контракт (Talk chat-API)
 
@@ -172,9 +174,13 @@ type editMessageResp struct {
   7. вывод id через `render.NewMessageID{,JSON}` по `jsonOut`.
 - Роутинг: `"edit": chatEditHandler` в `routes["chat"]` (`internal/cli/cli.go`);
   подсказка «ожидается verb (list/find/search/show/send/get)» дополняется `edit`.
-- Help: запись в `cmdSpecs` (`internal/cli/help.go`) — единый источник правды;
-  general/resource/detailed help и anti-drift тесты (`TestCmdSpecs_...`,
-  `TestAntiDrift_...`) подхватывают декларацию автоматически.
+- Help: запись в `cmdSpecs` (`internal/cli/help.go`, позиция — сразу после
+  `chat send`: порядок слайса = порядок общего help) — единый источник правды;
+  general/resource/detailed help и анти-drift тесты (`TestCmdSpecs_CoverAllRoutes`,
+  `TestHandleHelp_DetailedContent`, `TestAntiDrift_...`) подхватывают декларацию
+  автоматически. Исключение — два канона с hardcoded-перечнем команд,
+  `TestCmdSpecs_OrderMatchesHelpOrder` и `TestCmdSpecs_FlagsExactly`: они
+  падают при добавлении восьмой команды и правятся руками (шаги — §6).
 
   ```
   Path: ["chat", "edit"]
@@ -193,6 +199,17 @@ type editMessageResp struct {
 - README: команда в списке/доках команд (полная RU-документация уже в README —
   добавить секцию `chat edit` по образцу `chat send`).
 - CLAUDE.md: «7 команд» → «8 команд».
+- `docs/integration-run.md`: сейчас описывает `NCTALK_INTEGRATION_SEND` как
+  флаг исключительно `TestIntegration_SendMessage` (шапка, таблица env, пример
+  запуска, раздел «Безопасность», таблица тестов) — новый edit-мутационный тест
+  под тем же флагом делает эти места неточными. Дополнить: семантика флага
+  «мутационные SendMessage/EditMessage», строка edit-теста в таблицу, пример
+  запуска.
+- Комментарии-счётчики «7 команд/7 методов» в коде: `internal/cli/help.go`
+  (док-комментарий cmdSpecs), `internal/cli/cli.go` (интерфейс TalkClient),
+  `internal/cli/cli_test.go`, `internal/cli/help_test.go` — заменить на 8.
+  Комментарии, не поведение, но это тот же drift, который проект ловит
+  анти-drift-тестами.
 
 ## 6. Тестирование
 
@@ -210,8 +227,21 @@ type editMessageResp struct {
   невалидный `messageId` (клиент не звался), неизвестный флаг, `--name`
   (однозначно/неоднозначно/ноль → 0/3/2), OCS 404 → exit 2, OCS 403 → exit 1
   с текстом сервера, лишние позиционные игнорируются.
-- **help (`internal/cli/help_test.go`):** автоматически анти-drift'ом после
-  добавления в `cmdSpecs` (декларация ↔ handler ↔ help-тексты).
+- **help (`internal/cli/help_test.go`):** детальные/анти-drift проверки
+  (декларация ↔ handler ↔ help-тексты) покрывают `chat edit` автоматически
+  после добавления в `cmdSpecs`, но тест-инфраструктуру дополняем руками:
+  - канон `TestCmdSpecs_OrderMatchesHelpOrder`: вставить `"chat edit"` после
+    `"chat send"` (тест сверяет и длину слайса, и порядок — сам не подхватит);
+  - канон `TestCmdSpecs_FlagsExactly`: ключ `"chat edit": {"--name", "--file"}`
+    (иначе `t.Fatalf` «неизвестный путь»);
+  - `buildPositionalArgs`: кейс `"chat edit"` → `["tok123", "1"]` (по образцу
+    `reactions get`), иначе handler не получает валидных позиционных и prong-и
+    анти-drift'а вырождаются в ошибку «ожидается <room> <messageId>»;
+  - спец-кейс непустого Stdin в `TestAntiDrift_HandlerMatchesDeclaration`
+    (сейчас `joinPath(cs.Path) == "chat send"`) расширить на `chat edit`:
+    edit читает тело ДО ResolveRoom и при nil-Stdin fallback-ает на os.Stdin —
+    без тела prong 1 для `--name` рискует зависанием на TTY (та же причина,
+    по которой кейс вводили для send).
 - **Интеграционный (`internal/client/integration_test.go`, build-тег
   `integration`):** цикл под существующими мутационными флагами
   `NCTALK_INTEGRATION_SEND=1` + `NCTALK_INTEGRATION_ROOM` (новых env не
