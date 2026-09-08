@@ -69,6 +69,7 @@ var routes = map[string]map[string]handlerFn{
 	"chat": {
 		"show": chatShowHandler,
 		"send": chatSendHandler,
+		"edit": chatEditHandler,
 	},
 	"reactions": {
 		"get": reactionsGetHandler,
@@ -117,7 +118,7 @@ func Run(args []string, deps Deps) int {
 
 	// rooms/chat/reactions — двухуровневый разбор: args[0]=resource, args[1]=verb.
 	if len(rest) == 0 {
-		fmt.Fprintf(deps.Stderr, "nctalk %s: ожидается verb (list/find/search/show/send/get)\n", resource)
+		fmt.Fprintf(deps.Stderr, "nctalk %s: ожидается verb (list/find/search/show/send/edit/get)\n", resource)
 		return ExitGeneric
 	}
 
