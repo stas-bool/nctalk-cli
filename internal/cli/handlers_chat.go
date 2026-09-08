@@ -239,6 +239,44 @@ func parseSinceAt(s string, now time.Time) (int64, error) {
 	return render.ParseSince(s)
 }
 
+// readMessageBody — общий блок чтения тела сообщения для `chat send` и
+// `chat edit` (источник единый: stdin по умолчанию или --file, дизайн
+// 2026-09-08 §2). Возвращает готовый текст или ошибку с префиксом cmd:
+//   - --file <path> → os.ReadFile, файл читается целиком;
+//   - иначе → io.ReadAll(deps.Stdin), при deps.Stdin==nil fallback на os.Stdin
+//     (production-путь: main не проставляет Stdin; тесты кладут свой io.Reader);
+//   - срезается РОВНО ОДИН завершающий перевод строки (\n или \r\n):
+//     `echo "hi" | nctalk chat send` отправил бы "hi\n" (с сохранением сервером
+//     \n); многострочные тела (с \n внутри) валидны — пачку не тримим;
+//   - пустое тело (пустой stdin/файл или только перевод строки) — ошибка
+//     пользователя, не сети; клиент не зовём.
+func readMessageBody(deps Deps, fileFlag, cmd string) (string, error) {
+	var body []byte
+	var readErr error
+	if fileFlag != "" {
+		body, readErr = os.ReadFile(fileFlag)
+	} else {
+		stdin := deps.Stdin
+		if stdin == nil {
+			stdin = os.Stdin
+		}
+		body, readErr = io.ReadAll(stdin)
+	}
+	if readErr != nil {
+		return "", fmt.Errorf("%s: не удалось прочитать тело: %w", cmd, readErr)
+	}
+	text := string(body)
+	if strings.HasSuffix(text, "\r\n") {
+		text = text[:len(text)-2]
+	} else if strings.HasSuffix(text, "\n") {
+		text = text[:len(text)-1]
+	}
+	if len(text) == 0 {
+		return "", fmt.Errorf("%s: тело сообщения пусто", cmd)
+	}
+	return text, nil
+}
+
 // chatSendHandler — реализация `chat send <room>` (спека §6 chat send).
 //
 // Отправляет сообщение в комнату <room>. Тело сообщения берётся из stdin
@@ -339,36 +377,10 @@ func chatSendHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 
 	// 3. Чтение тела ДО ResolveRoom: пустое тело отсекается без единого
 	// сетевого вызова (ни FindRooms, ни SendMessage) — это явно требует спека
-	// и DoD Task 4.4.
-	var body []byte
-	var readErr error
-	if fileFlag != "" {
-		body, readErr = os.ReadFile(fileFlag)
-	} else {
-		stdin := deps.Stdin
-		if stdin == nil {
-			// Production-путь: main не проставляет Stdin, fallback на реальный
-			// os.Stdin. Тесты всегда кладут свой io.Reader.
-			stdin = os.Stdin
-		}
-		body, readErr = io.ReadAll(stdin)
-	}
-	if readErr != nil {
-		return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat send: не удалось прочитать тело: %w", readErr)}
-	}
-	// Срезаем ОДИН завершающий перевод строки: `echo "hi" | nctalk chat send`
-	// отправил бы "hi\n" (с сохранением сервером \n). Многострочные тела (с \n
-	// внутри) валидны — поэтому тримим ровно один trailing \n / \r\n, не пачку.
-	text := string(body)
-	if strings.HasSuffix(text, "\r\n") {
-		text = text[:len(text)-2]
-	} else if strings.HasSuffix(text, "\n") {
-		text = text[:len(text)-1]
-	}
-	if len(text) == 0 {
-		// Пустое stdin/файл (или только перевод строки) — ошибка пользователя,
-		// не сети; клиент не зовём.
-		return ExitError{Code: ExitGeneric, Err: errors.New("chat send: тело сообщения пусто")}
+	// и DoD Task 4.4. Общий блок с chat edit — readMessageBody.
+	text, err := readMessageBody(deps, fileFlag, "chat send")
+	if err != nil {
+		return ExitError{Code: ExitGeneric, Err: err}
 	}
 
 	// 4. Разрешение <room>: positional token (primary) или --name (поиск).
@@ -483,32 +495,11 @@ func chatEditHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 	}
 
 	// 3. Чтение тела ДО ResolveRoom: пустое тело отсекается без единого
-	// сетевого вызова (ни FindRooms, ни EditMessage) — идентично chat send.
-	var body []byte
-	var readErr error
-	if fileFlag != "" {
-		body, readErr = os.ReadFile(fileFlag)
-	} else {
-		stdin := deps.Stdin
-		if stdin == nil {
-			// Production-путь: main не проставляет Stdin, fallback на os.Stdin.
-			stdin = os.Stdin
-		}
-		body, readErr = io.ReadAll(stdin)
-	}
-	if readErr != nil {
-		return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat edit: не удалось прочитать тело: %w", readErr)}
-	}
-	// Срезаем ОДИН завершающий перевод строки (\n или \r\n); многострочные
-	// тела валидны — внутренние переводы сохраняются.
-	text := string(body)
-	if strings.HasSuffix(text, "\r\n") {
-		text = text[:len(text)-2]
-	} else if strings.HasSuffix(text, "\n") {
-		text = text[:len(text)-1]
-	}
-	if len(text) == 0 {
-		return ExitError{Code: ExitGeneric, Err: errors.New("chat edit: тело сообщения пусто")}
+	// сетевого вызова (ни FindRooms, ни EditMessage) — общий блок с chat send
+	// (readMessageBody): stdin/--file, трим одного trailing \n/\r\n.
+	text, err := readMessageBody(deps, fileFlag, "chat edit")
+	if err != nil {
+		return ExitError{Code: ExitGeneric, Err: err}
 	}
 
 	// 4. Парсинг messageId: невалид/неположительный → exit 1 ДО сети (ни

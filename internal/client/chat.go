@@ -277,6 +277,8 @@ type editMessageResp struct {
 //
 // Контракт:
 //   - opts.Message == "" или messageId <= 0 → клиентская ошибка ДО сети;
+//   - ответ без parent.id (drift формата) → ошибка, а НЕ молчаливый (0, nil)
+//     с фиктивным id=0 и exit 0 у CLI;
 //   - серверные отказа (400 старше 24ч, 403 чужое/read-only, 404, 405, 412)
 //     не предугадываем — приходят как *OCSError с текстом сервера (doOCS);
 //   - серверные ограничения (свои сообщения, 24 часа, тип comment) клиент
@@ -301,6 +303,14 @@ func (c *TalkClient) EditMessage(ctx context.Context, token string, messageId in
 	var out editMessageResp
 	if _, err := c.doOCS(ctx, http.MethodPut, p, nil, bytes.NewReader(body), true, &out); err != nil {
 		return 0, err
+	}
+	// Защита от drift формата ответа: 200/202 без parent (или с parent.id=0)
+	// декодируется молча в нулевое значение. Формат PUT-ответа не проверен на
+	// живом API (дизайн §3) и фиксируется в основном integration-тестом под
+	// флагом — без этого guard-а drift дал бы бесшумный успех с фиктивным
+	// id=0 (CLI напечатал бы 0 с exit 0).
+	if out.Parent.Id <= 0 {
+		return 0, errors.New("client: EditMessage: неожиданный формат ответа (нет parent.id)")
 	}
 	return out.Parent.Id, nil
 }
