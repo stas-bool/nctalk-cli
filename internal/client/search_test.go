@@ -424,3 +424,55 @@ func TestSearchMessages_LimitClampedAndPerson(t *testing.T) {
 		t.Errorf("на первом запросе cursor не должен передаваться, got %q", gotCursor)
 	}
 }
+
+// TestSearchMessages_FromClientSideFilter — живой сервер (2026-09-09)
+// ИГНОРИРУЕТ query-параметр person: с person=alice приходят entry чужих
+// авторов. From обязан дополнительно фильтроваться на клиенте по
+// attributes.actorId (как клиентский --from у chat show, спека §6).
+func TestSearchMessages_FromClientSideFilter(t *testing.T) {
+	entry := func(actor string) map[string]any {
+		return map[string]any{
+			"title":       "Autor " + actor,
+			"subline":     "msg",
+			"resourceUrl": "https://nc.example.com/call/tok#message_1",
+			"attributes": map[string]any{
+				"conversation": "tok",
+				"messageId":    "1",
+				"actorType":    "users",
+				"actorId":      actor,
+				"timestamp":    "1752710400",
+			},
+		}
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(ocsBody(t, 200, "OK", map[string]any{
+			"isPaginated": false,
+			"entries":     []map[string]any{entry("alice"), entry("bob"), entry("alice"), entry("carol")},
+		}))
+	}))
+	defer ts.Close()
+
+	c := NewTalkClient(testCfg(ts.URL))
+	res, err := c.SearchMessages(context.Background(), "hello", SearchMessagesOpts{From: "alice"})
+	if err != nil {
+		t.Fatalf("SearchMessages: %v", err)
+	}
+	if got, want := len(res), 2; got != want {
+		t.Fatalf("len(res) = %d, want %d: сервер прислал 2 entry alice + 2 чужих, клиентский фильтр From должен оставить только alice", got, want)
+	}
+	for i, r := range res {
+		if r.Attributes.ActorId != "alice" {
+			t.Errorf("res[%d].ActorId = %q, want %q (From=alice)", i, r.Attributes.ActorId, "alice")
+		}
+	}
+
+	// Без From фильтр не действует: возвращаются все 4 entry.
+	resAll, err := c.SearchMessages(context.Background(), "hello", SearchMessagesOpts{})
+	if err != nil {
+		t.Fatalf("SearchMessages без From: %v", err)
+	}
+	if got, want := len(resAll), 4; got != want {
+		t.Errorf("len(resAll) без From = %d, want %d", got, want)
+	}
+}
