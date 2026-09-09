@@ -940,3 +940,22 @@ func TestRoomsParticipantsHandlerEmptyInput(t *testing.T) {
 		t.Fatalf("клиент не должен зваться: find=%d participants=%d", len(spy.findCalls), len(spy.participantsCalls))
 	}
 }
+
+// TestRoomsParticipantsViaRun — `rooms participants TOK123` через Run:
+// роутинг, handler, сортировка и таблица (end-to-end без сети).
+func TestRoomsParticipantsViaRun(t *testing.T) {
+	spy := &roomsSpyClient{participantsResult: participantsFixture()}
+	deps := newRoomsDeps(spy)
+
+	code := Run([]string{"rooms", "participants", "TOK123"}, deps)
+	if code != ExitOK {
+		t.Fatalf("Run code: got %d, want %d", code, ExitOK)
+	}
+	if len(spy.participantsCalls) != 1 || spy.participantsCalls[0].token != "TOK123" {
+		t.Fatalf("GetParticipants: got %+v, want 1 вызов с TOK123", spy.participantsCalls)
+	}
+	out := deps.Stdout.(*bytes.Buffer).String()
+	if !strings.Contains(out, "ИМЯ") || !strings.Contains(out, "anna.s") {
+		t.Fatalf("stdout: ожидается таблица участников; got %q", out)
+	}
+}
