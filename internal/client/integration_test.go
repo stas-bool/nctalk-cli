@@ -183,9 +183,9 @@ func TestIntegration_SearchMessages(t *testing.T) {
 }
 
 // TestIntegration_GetReactions проверяет reactions-эндпоинт на реальном
-// сообщении (спека §6 `reactions get`, §12). Берём первое сообщение с Id > 0 из
-// GetChat — гарантированно существующее. Если у него нет реакций (пустая map),
-// содержимое не проверяем — это нормальный сценарий «реакций нет».
+// сообщении (спека §6 `reactions get`, §12). Берём первое comment-сообщение с
+// Id > 0 из GetChat. Если у него нет реакций (пустая map), содержимое не
+// проверяем — это нормальный сценарий «реакций нет».
 func TestIntegration_GetReactions(t *testing.T) {
 	c := integrationClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
@@ -205,17 +205,19 @@ func TestIntegration_GetReactions(t *testing.T) {
 		t.Fatalf("GetChat: %v", err)
 	}
 
-	// Ищем сообщение с Id > 0 — у системных сообщений Id может быть 0/маленьким,
-	// нам нужна валидная цель для GET /reaction/{token}/{messageId}.
+	// Ищем comment-сообщение с Id > 0. Только comment: сервер отвечает 404
+	// на GET /reaction/{token}/{messageId} для system-сообщений (найдено живым
+	// прогоном 2026-09-09: последнее сообщение комнаты оказалось system — тест
+	// падал, хотя фича цела).
 	var msgId int
 	for _, m := range msgs {
-		if m.Id > 0 {
+		if m.Id > 0 && m.MessageType == "comment" {
 			msgId = m.Id
 			break
 		}
 	}
 	if msgId == 0 {
-		t.Skip("в выбранной комнате нет сообщений с Id > 0 — пропуск GetReactions")
+		t.Skip("в выбранной комнате нет comment-сообщений с Id > 0 — пропуск GetReactions")
 	}
 	t.Logf("выбрано сообщение id=%d в token=%s", msgId, token)
 
