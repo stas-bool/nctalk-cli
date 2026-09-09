@@ -23,9 +23,13 @@ type Room struct {
 	DisplayName    string   `json:"displayName"`
 	UnreadMessages int      `json:"unreadMessages"`
 	ActorType      string   `json:"actorType"`
-	// ActorId — идентификатор ЧЕЛОВЕКА (НЕ displayName). Для type=1 (one-to-one)
-	// содержит собеседника, а не текущего пользователя (спека §6, §12).
+	// ActorId — actorId ОТВЕТА /v4/room: у всех комнат это ТЕКУЩИЙ
+	// пользователь (владелец сессии), НЕ собеседник (живой сервер 2026-09-09).
 	ActorId string `json:"actorId"`
+	// Name — поле name ответа. Для type=1/4 (one-to-one и её former) содержит
+	// actorId СОБЕСЕДНИКА — это то, что ищет rooms find --user. Для групповых/
+	// публичных пусто (живой сервер 2026-09-09).
+	Name string `json:"name"`
 	// LastMessage — последнее сообщение в комнате; nil, если сообщений ещё не
 	// было. Тип Message определён в types.go и здесь НЕ дублируется.
 	LastMessage *Message `json:"lastMessage,omitempty"`
@@ -67,9 +71,11 @@ func (c *TalkClient) ListRooms(ctx context.Context, opts ListRoomsOpts) ([]Room,
 // Пустой query математически совпадает с любой строкой, поэтому сам по себе
 // фильтра не делает — удобно для поиска «только по actorId».
 //
-// actorId — необязательный фильтр; при непустом дополнительно требуется точное
-// совпадение r.ActorId == actorId (спека §8: --user принимает actorId; для
-// type=1 one-to-one ActorId — собеседник, не текущий пользователь).
+// actorId — необязательный фильтр собеседника личного чата; при непустом
+// дополнительно требуется точное совпадение r.Name == actorId (спека §8:
+// --user принимает actorId собеседника; собеседник one-to-one лежит в поле
+// name ответа, actorId ответа — всегда текущий пользователь, живой сервер
+// 2026-09-09).
 //
 // Поиск идёт по ВСЕМ комнатам, включая former (типы 4/5/6): список
 // запрашивается с IncludeFormer=true. Правило «exit 3 / неоднозначно» — слой
@@ -87,8 +93,9 @@ func (c *TalkClient) FindRooms(ctx context.Context, query, actorId string) ([]Ro
 		if !strings.Contains(strings.ToLower(r.DisplayName), q) {
 			continue
 		}
-		// Точный фильтр по ActorId — только когда actorId задан явно.
-		if actorId != "" && r.ActorId != actorId {
+		// Точный фильтр по собеседнику 1:1 (поле name) — только когда actorId
+		// задан явно.
+		if actorId != "" && r.Name != actorId {
 			continue
 		}
 		out = append(out, r)

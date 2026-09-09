@@ -69,9 +69,13 @@ func TestListRooms_AllFieldsMapped(t *testing.T) {
 	if one.ActorType != "users" {
 		t.Errorf("type=1 ActorType: got %q, want %q", one.ActorType, "users")
 	}
-	// Ключевая проверка (спека §12): для one-to-one actorId — собеседник.
-	if one.ActorId != "bob" {
-		t.Errorf("type=1 ActorId: got %q, want %q (должен быть собеседник)", one.ActorId, "bob")
+	// Ключевая проверка (живой сервер 2026-09-09): actorId ответа — текущий
+	// пользователь, собеседник one-to-one — в поле name.
+	if one.ActorId != "me" {
+		t.Errorf("type=1 ActorId: got %q, want %q (текущий пользователь)", one.ActorId, "me")
+	}
+	if one.Name != "bob" {
+		t.Errorf("type=1 Name (собеседник): got %q, want %q", one.Name, "bob")
 	}
 	// LastMessage должен смаппиться как *Message с вложенными параметрами.
 	if one.LastMessage == nil {
@@ -218,8 +222,8 @@ func TestListRooms_FormerIncluded(t *testing.T) {
 			if r.Token != "tok-former-1to1" {
 				t.Errorf("former Token: got %q, want %q", r.Token, "tok-former-1to1")
 			}
-			if r.ActorId != "carol" {
-				t.Errorf("former ActorId: got %q, want %q", r.ActorId, "carol")
+			if r.Name != "carol" {
+				t.Errorf("former Name (собеседник): got %q, want %q", r.Name, "carol")
 			}
 		}
 	}
@@ -310,11 +314,12 @@ func TestFindRooms(t *testing.T) {
 					}
 				}
 			}
-			// При заданном actorId ВСЕ возвращённые комнаты обязаны иметь его.
+			// При заданном actorId ВСЕ возвращённые комнаты обязаны иметь его
+			// в поле Name (собеседник 1:1; actorId ответа — текущий юзер).
 			if tc.actorId != "" {
 				for _, r := range rooms {
-					if r.ActorId != tc.actorId {
-						t.Errorf("ActorId: got %q, want %q (фильтр по actorId нарушен)", r.ActorId, tc.actorId)
+					if r.Name != tc.actorId {
+						t.Errorf("Name (собеседник): got %q, want %q (фильтр по actorId нарушен)", r.Name, tc.actorId)
 					}
 				}
 			}

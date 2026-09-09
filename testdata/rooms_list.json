@@ -12,7 +12,7 @@
         "displayName": "Bob Bobson",
         "unreadMessages": 3,
         "actorType": "users",
-        "actorId": "bob",
+        "actorId": "me",
         "lastMessage": {
           "id": 9001,
           "actorType": "users",
@@ -30,7 +30,8 @@
           "threadId": 0,
           "expirationTimestamp": 0,
           "token": "tok-1to1-bob"
-        }
+        },
+        "name": "bob"
       },
       {
         "type": 2,
@@ -38,7 +39,7 @@
         "displayName": "Team Chat",
         "unreadMessages": 0,
         "actorType": "users",
-        "actorId": "alice",
+        "actorId": "me",
         "lastMessage": {
           "id": 8001,
           "actorType": "users",
@@ -63,7 +64,8 @@
           "threadId": 0,
           "expirationTimestamp": 0,
           "token": "tok-team"
-        }
+        },
+        "name": ""
       },
       {
         "type": 3,
@@ -71,7 +73,7 @@
         "displayName": "Public Room",
         "unreadMessages": 5,
         "actorType": "users",
-        "actorId": "alice",
+        "actorId": "me",
         "lastMessage": {
           "id": 7001,
           "actorType": "guests",
@@ -89,7 +91,8 @@
           "threadId": 0,
           "expirationTimestamp": 0,
           "token": "tok-public"
-        }
+        },
+        "name": ""
       },
       {
         "type": 4,
@@ -97,7 +100,7 @@
         "displayName": "Former 1:1",
         "unreadMessages": 0,
         "actorType": "users",
-        "actorId": "carol",
+        "actorId": "me",
         "lastMessage": {
           "id": 6001,
           "actorType": "users",
@@ -115,7 +118,8 @@
           "threadId": 0,
           "expirationTimestamp": 0,
           "token": "tok-former-1to1"
-        }
+        },
+        "name": "carol"
       },
       {
         "type": 2,
@@ -123,7 +127,7 @@
         "displayName": "Project X",
         "unreadMessages": 2,
         "actorType": "users",
-        "actorId": "alice",
+        "actorId": "me",
         "lastMessage": {
           "id": 5001,
           "actorType": "users",
@@ -133,7 +137,9 @@
           "systemMessage": "",
           "message": "апдейт по задаче",
           "messageParameters": [],
-          "reactions": { "❤️": 1 },
+          "reactions": {
+            "❤️": 1
+          },
           "referenceId": "",
           "timestamp": 1718000300,
           "isReplyable": true,
@@ -141,7 +147,8 @@
           "threadId": 0,
           "expirationTimestamp": 0,
           "token": "tok-projx"
-        }
+        },
+        "name": ""
       }
     ]
   }
