@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-`nctalk` — тонкий CLI-клиент над Nextcloud Talk (Spreed) поверх OCS-API на Go 1.21 (только stdlib). Потребитель — агент (через skill-обёртку) и человек в терминале. Бизнес-логику клиент не содержит — только примитивы (8 команд). Эталон контракта команд, exit-кодов и поведения — **спека** `docs/superpowers/specs/2026-07-17-nctalk-cli-design.md` (базовые 7 команд) и дельта `docs/superpowers/specs/2026-09-08-nctalk-chat-edit-design.md` (`chat edit`; читай при любой правке поведения).
+`nctalk` — тонкий CLI-клиент над Nextcloud Talk (Spreed) поверх OCS-API на Go 1.21 (только stdlib). Потребитель — агент (через skill-обёртку) и человек в терминале. Бизнес-логику клиент не содержит — только примитивы (9 команд). Эталон контракта команд, exit-кодов и поведения — **спека** `docs/superpowers/specs/2026-07-17-nctalk-cli-design.md` (базовые 7 команд) и дельта `docs/superpowers/specs/2026-09-08-nctalk-chat-edit-design.md` (`chat edit`; читай при любой правке поведения).
 
 > 📞 **Аудио-звонки WebRTC** (`nctalk-call`/`nctalk-talk`) — эксперимент (spike-first), уже в `main`. `nctalk-call` прошёл spike-gate (двусторонний звонок на Docker Talk 20.1.11); `nctalk-talk` (TUI) реализован (Этап 4), автотесты зелёные. См. секцию «Аудио-звонки WebRTC» ниже и спеки `docs/superpowers/specs/2026-07-19-nctalk-call-design.md` (pipe/агент) и `2026-07-21-nctalk-talk-tui-design.md` (TUI).
 
