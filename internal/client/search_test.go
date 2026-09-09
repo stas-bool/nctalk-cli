@@ -181,8 +181,9 @@ func TestSearchRooms_LimitOmittedWhenNonPositive(t *testing.T) {
 
 // searchMessagesFixtureServer поднимает httptest-сервер, отдающий
 // testdata/search_messages_page1.json при запросе БЕЗ cursor (или с неизвестным
-// cursor) и testdata/search_messages_page2.json при cursor=cursor-page2.
-// Эмулирует серверную пагинацию talk-message provider'а (спека §6, §8).
+// cursor) и testdata/search_messages_page2.json при cursor=2.
+// Эмулирует серверную пагинацию talk-message provider'а (спека §6, §8);
+// формат полей — как на живом сервере (cursor ЧИСЛОМ, 2026-09-09).
 // Необязательный счётчик calls инкрементируется на каждый запрос.
 func searchMessagesFixtureServer(t *testing.T, calls *int32) *httptest.Server {
 	t.Helper()
@@ -199,8 +200,8 @@ func searchMessagesFixtureServer(t *testing.T, calls *int32) *httptest.Server {
 			atomic.AddInt32(calls, 1)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		// cursor=cursor-page2 → вторая страница (isPaginated=false).
-		if r.URL.Query().Get("cursor") == "cursor-page2" {
+		// cursor=2 → вторая страница (isPaginated=false).
+		if r.URL.Query().Get("cursor") == "2" {
 			_, _ = w.Write(body2)
 			return
 		}
@@ -298,7 +299,7 @@ func TestSearchMessages_AllCapFivePages(t *testing.T) {
 		"resourceUrl": "https://nc.example.com/call/tok#message_1",
 		"attributes": map[string]any{
 			"conversation": "tok",
-			"messageId":    1,
+			"messageId":    "1", // живой сервер отдаёт messageId строкой (2026-09-09)
 			"actorType":    "users",
 			"actorId":      "alice",
 			"timestamp":    "1752710400",
@@ -306,7 +307,7 @@ func TestSearchMessages_AllCapFivePages(t *testing.T) {
 	}
 	body := ocsBody(t, 200, "OK", map[string]any{
 		"isPaginated": true,
-		"cursor":      "more",
+		"cursor":      5, // живой сервер отдаёт cursor ЧИСЛОМ (2026-09-09)
 		"entries":     []map[string]any{entry},
 	})
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
