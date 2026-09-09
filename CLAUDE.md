@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-`nctalk` — тонкий CLI-клиент над Nextcloud Talk (Spreed) поверх OCS-API на Go 1.21 (только stdlib). Потребитель — агент (через skill-обёртку) и человек в терминале. Бизнес-логику клиент не содержит — только примитивы (8 команд). Эталон контракта команд, exit-кодов и поведения — **спека** `docs/superpowers/specs/2026-07-17-nctalk-cli-design.md` (читай при любой правке поведения).
+`nctalk` — тонкий CLI-клиент над Nextcloud Talk (Spreed) поверх OCS-API на Go 1.21 (только stdlib). Потребитель — агент (через skill-обёртку) и человек в терминале. Бизнес-логику клиент не содержит — только примитивы (8 команд). Эталон контракта команд, exit-кодов и поведения — **спека** `docs/superpowers/specs/2026-07-17-nctalk-cli-design.md` (базовые 7 команд) и дельта `docs/superpowers/specs/2026-09-08-nctalk-chat-edit-design.md` (`chat edit`; читай при любой правке поведения).
 
 > 📞 **Аудио-звонки WebRTC** (`nctalk-call`/`nctalk-talk`) — эксперимент (spike-first), уже в `main`. `nctalk-call` прошёл spike-gate (двусторонний звонок на Docker Talk 20.1.11); `nctalk-talk` (TUI) реализован (Этап 4), автотесты зелёные. См. секцию «Аудио-звонки WebRTC» ниже и спеки `docs/superpowers/specs/2026-07-19-nctalk-call-design.md` (pipe/агент) и `2026-07-21-nctalk-talk-tui-design.md` (TUI).
 
@@ -26,14 +26,14 @@ export NEXTCLOUD_URL=https://nc.example.org NEXTCLOUD_LOGIN=... NEXTCLOUD_PASS=.
 ./nctalk rooms list
 ```
 
-Интеграционные тесты на боевом сервере — за build-тегом `integration` (не входят в `go test ./...`), требуют env-кредов; мутация (`SendMessage`) — под флагом `NCTALK_INTEGRATION_SEND=1` + `NCTALK_INTEGRATION_ROOM`. Подробно: `docs/integration-run.md`.
+Интеграционные тесты на боевом сервере — за build-тегом `integration` (не входят в `go test ./...`), требуют env-кредов; мутации (`SendMessage`/`EditMessage`) — под флагом `NCTALK_INTEGRATION_SEND=1` + `NCTALK_INTEGRATION_ROOM`. Подробно: `docs/integration-run.md`.
 
 ## Архитектура
 
 Четыре слоя, строго однонаправленные: **config → client → cli → render**. main.go только связывает их через тестируемую `run(args, stdout, stderr, stdin) int` (вся логика вне `os.Exit`, чтобы тестировать вывод в `*bytes.Buffer`).
 
 - **`internal/config`** — читает env (`NEXTCLOUD_URL/LOGIN/PASS/TIMEOUT`), нормализует URL (трим trailing slash, схлопывание `//`, запрет userinfo в URL, схема http/https). Сообщения об ошибках содержат **только имена env-переменных, никогда значения**.
-- **`internal/client`** — ядро `TalkClient`. Ничего не знает про CLI/вывод. Методы над OCS: `ListRooms/FindRooms/SearchRooms/GetChat/SendMessage/GetReactions/SearchMessages`. Зависит от интерфейса `httpDoer` → мокируется в тестах. Единый транспорт `doOCS(ctx, method, path, query url.Values, body, mutate, out) (http.Header, error)` собирает URL, Basic-auth + заголовки `OCS-APIRequest: true`/`Accept: application/json`, разворачивает конверт `ocs.data`, возвращает заголовки ответа (нужно для пагинации).
+- **`internal/client`** — ядро `TalkClient`. Ничего не знает про CLI/вывод. Методы над OCS: `ListRooms/FindRooms/SearchRooms/GetChat/SendMessage/EditMessage/GetReactions/SearchMessages`. Зависит от интерфейса `httpDoer` → мокируется в тестах. Единый транспорт `doOCS(ctx, method, path, query url.Values, body, mutate, out) (http.Header, error)` собирает URL, Basic-auth + заголовки `OCS-APIRequest: true`/`Accept: application/json`, разворачивает конверт `ocs.data`, возвращает заголовки ответа (нужно для пагинации).
 - **`internal/cli`** — роутер `<resource> <verb>` (таблица `routes` в `cli.go`); `search` — special-case без verb-уровня. Глобальный `--json` извлекается до роутинга и передаётся хендлерам как `jsonOut`. `Deps{Client, Stdout, Stderr, Stdin, Now}` — потоки/время инъектируются (тесты кладут `bytes.Buffer`). Контракт `TalkClient`-интерфейса — compile-time проверка `var _ TalkClient = (*client.TalkClient)(nil)` (рассинхрон методов роняет сборку).
 - **`internal/render`** — текстовые таблицы и `--json`; `SubstituteParams` (подстановка плейсхолдеров), `ParseSince`/`ParseRelativeAt` (относительное время `1h`/`2d`), `FormatTime`.
 
@@ -45,6 +45,7 @@ export NEXTCLOUD_URL=https://nc.example.org NEXTCLOUD_LOGIN=... NEXTCLOUD_PASS=.
 - **Пагинация `GetChat`**: курсор следующей страницы — из **заголовка ответа `X-Chat-Last-Given`** (не из тела, не зависит от порядка new→old); стоп при пустом/неизменившемся заголовке; `304`/`204` = пусто/конец истории (трактовать как пустую страницу, без decode-ошибки). Серверу шлём `setReadMarker=0` (чтение не сбрасывает unread) и `limit=min(opts.Limit, 200)`.
 - **Фильтры `chat show`**: `--from`/`--since` — клиентские (серверного фильтра по автору/времени в chat-API нет). `--last=0` означает «не задан» → потолок cap 200 при наличии `--from`/`--since`, иначе дефолт 20. System-сообщения скрыты по умолчанию (`--system` показывает).
 - **`*client.OCSError{Code}`**: `Code` = OCS `meta.statusCode`; HTTP 404 (включая серверный `998` «Invalid query») нормализуется в `Code=404`.
+- **`chat edit` / `EditMessage`** (PUT `/chat/{token}/{messageId}`, спека 2026-09-08): ответ сервера — **системное сообщение, где обновлённое лежит в `parent`**; id для вывода берём из `ocs.data.parent.id` (НЕ эхо аргумента) и guard `parent.id <= 0` обязателен — иначе format-drift даёт молчаливый `0` с exit 0 (регресс-тест `TestEditMessage_ResponseWithoutParent_FormatDrift`). Чтение тела (общий `readMessageBody`: stdin/`--file`, трим одного `\n`) — ДО `ResolveRoom`, пустое тело отсекается без сети. Распределение позиционных `<room> <messageId>` — как у `reactions get` (1 позиционный при `--name` = `messageId`). Ограничения правки (24 ч, свои/модератор, comment-only) — серверные, клиент не дублирует. Мутация проверена на живом API 2026-09-09 (`TestIntegration_EditMessage` PASS).
 
 ## Аудио-звонки WebRTC (эксперимент, уже в `main`)
 
@@ -75,4 +76,4 @@ NCTALK_INTEGRATION_CALL=1 NCTALK_INTEGRATION_ROOM=<token> ./nctalk-call <room>  
 
 ## Документы
 
-`docs/superpowers/` — `specs/` (эталон контракта: `2026-07-17-nctalk-cli-design.md` — базовый CLI; `2026-07-19-nctalk-call-design.md` — звонки pipe/агент; `2026-07-21-nctalk-talk-tui-design.md` — звонки TUI), `plans/` (декомпозиция реализации), `reviews/` (code-review). `docs/integration-run.md` — запуск интеграционных тестов. Актуальный state звонков — `docs/session-state/2026-07-21-nctalk-calls.md` (вне git).
+`docs/superpowers/` — `specs/` (эталон контракта: `2026-07-17-nctalk-cli-design.md` — базовый CLI; `2026-09-08-nctalk-chat-edit-design.md` — `chat edit`; `2026-07-19-nctalk-call-design.md` — звонки pipe/агент; `2026-07-21-nctalk-talk-tui-design.md` — звонки TUI), `plans/` (декомпозиция реализации), `reviews/` (code-review). `docs/integration-run.md` — запуск интеграционных тестов. Актуальный state звонков — `docs/session-state/2026-07-21-nctalk-calls.md` (вне git).

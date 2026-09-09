@@ -4,7 +4,7 @@
 
 `nctalk` is a thin terminal CLI for [Nextcloud Talk](https://github.com/nextcloud/spreed) (Spreed) built on top of the OCS API.
 
-- 7 primitives over rooms, chat, reactions and search — no business logic, composable in scripts
+- 8 primitives over rooms, chat, reactions and search — no business logic, composable in scripts
 - Machine-friendly: `--json` on every command, predictable exit codes (`0`/`1`/`2`/`3`)
 - Credentials only via environment variables (app-password), never in flags or files
 - Pure Go 1.21 stdlib, CGO-free single binary
@@ -24,7 +24,7 @@ nctalk rooms list
 <a name="nctalk-ru"></a>
 # nctalk (рус.)
 
-Тонкий CLI-клиент над **Nextcloud Talk** (приложение Spreed) поверх OCS-API. Только примитивы: список/поиск чатов, чтение и отправка сообщений, реакции, поиск. Основной потребитель — агент (через skill-обёртку), вторичный — человек в терминале. Бизнес-логики не содержит.
+Тонкий CLI-клиент над **Nextcloud Talk** (приложение Spreed) поверх OCS-API. Только примитивы: список/поиск чатов, чтение, отправка и редактирование сообщений, реакции, поиск. Основной потребитель — агент (через skill-обёртку), вторичный — человек в терминале. Бизнес-логики не содержит.
 
 Написан на Go 1.21 (только стандартная библиотека).
 
