@@ -47,6 +47,9 @@ func (m *searchSpyClient) EditMessage(_ context.Context, _ string, _ int, _ clie
 func (m *searchSpyClient) GetReactions(_ context.Context, _ string, _ int) (map[string][]client.ReactionActor, error) {
 	return nil, errMock
 }
+func (m *searchSpyClient) GetParticipants(_ context.Context, _ string) ([]client.Participant, error) {
+	return nil, errMock
+}
 func (m *searchSpyClient) SearchMessages(_ context.Context, term string, opts client.SearchMessagesOpts) ([]client.MessageResult, error) {
 	m.gotTerm = term
 	m.gotOpts = opts

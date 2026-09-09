@@ -41,7 +41,7 @@ CGO). Тег `-tags=integration` обязателен — без него фай
 
 ```sh
 CGO_ENABLED=0 go test -tags=integration ./internal/client/... -v \
-  -run 'TestIntegration_(ListRooms|SearchRooms|GetChat|SearchMessages|GetReactions)'
+  -run 'TestIntegration_(ListRooms|SearchRooms|GetChat|SearchMessages|GetReactions|GetParticipants)'
 ```
 
 ### По одному сценарию
@@ -52,6 +52,7 @@ CGO_ENABLED=0 go test -tags=integration ./internal/client/... -v -run TestIntegr
 CGO_ENABLED=0 go test -tags=integration ./internal/client/... -v -run TestIntegration_GetChat
 CGO_ENABLED=0 go test -tags=integration ./internal/client/... -v -run TestIntegration_SearchMessages
 CGO_ENABLED=0 go test -tags=integration ./internal/client/... -v -run TestIntegration_GetReactions
+CGO_ENABLED=0 go test -tags=integration ./internal/client/... -v -run TestIntegration_GetParticipants
 ```
 
 ### Мутация (отправка и правка сообщений)
@@ -80,8 +81,8 @@ CGO_ENABLED=0 go test ./...   # без -tags=integration
 ## Безопасность сценариев
 
 - **Читающие** (`ListRooms`, `SearchRooms`, `GetChat`, `SearchMessages`,
-  `GetReactions`) — GET-запросы, состояние сервера не меняют. Безопасны для
-  прогона на production-аккаунте.
+  `GetReactions`, `GetParticipants`) — GET-запросы, состояние сервера не меняют.
+  Безопасны для прогона на production-аккаунте.
 - **Мутация** (`SendMessage`/`EditMessage`) — POST/PUT в чат; выполняются только
   в токен, заданный в `NCTALK_INTEGRATION_ROOM`, и только при
   `NCTALK_INTEGRATION_SEND=1`. Удалять тестовые сообщения нужно вручную — тесты
@@ -96,6 +97,7 @@ CGO_ENABLED=0 go test ./...   # без -tags=integration
 | `TestIntegration_GetChat`   | `/ocs/v2.php/apps/spreed/api/v1/chat/{token}`   | `Limit=5` → `len <= 5`; маппинг `Message.Token` и `Timestamp > 0`.    |
 | `TestIntegration_SearchMessages` | Unified `talk-message`                     | Безошибочный ответ; `Attributes.Timestamp` — валидный int64 (`>= 0`). |
 | `TestIntegration_GetReactions` | `/ocs/v2.php/apps/spreed/api/v1/reaction/{token}/{id}` | Non-nil map; если реакции есть — у каждой есть актёры.      |
+| `TestIntegration_GetParticipants` | `/ocs/v2.php/apps/spreed/api/v4/room/{token}/participants` | `>= 1` участник; непустые `actorId`/`actorType`; есть `participantType=1` (владелец). |
 | `TestIntegration_SendMessage` | POST `/chat/{token}`                          | Возвращает `id > 0`. Мутация — под флагом.                            |
 | `TestIntegration_EditMessage` | PUT `/chat/{token}/{messageId}`             | `parent.id == id`; `GetChat` видит новый текст. Мутация — под флагом. |
 
