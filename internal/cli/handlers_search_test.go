@@ -41,6 +41,9 @@ func (m *searchSpyClient) GetChat(_ context.Context, _ string, _ client.GetChatO
 func (m *searchSpyClient) SendMessage(_ context.Context, _ string, _ client.SendMessageOpts) (int, error) {
 	return 0, errMock
 }
+func (m *searchSpyClient) EditMessage(_ context.Context, _ string, _ int, _ client.EditMessageOpts) (int, error) {
+	return 0, errMock
+}
 func (m *searchSpyClient) GetReactions(_ context.Context, _ string, _ int) (map[string][]client.ReactionActor, error) {
 	return nil, errMock
 }

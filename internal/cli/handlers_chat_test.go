@@ -50,6 +50,16 @@ type chatSpyClient struct {
 	sendId  int
 	sendErr error
 
+	// EditMessage-запись (chat edit)
+	gotEditToken string
+	gotEditId    int
+	gotEditOpts  client.EditMessageOpts
+	editCalls    int
+
+	// EditMessage-результат
+	editId  int
+	editErr error
+
 	// FindRooms-результат (для --name)
 	findRooms []client.Room
 	findErr   error
@@ -68,6 +78,14 @@ func (m *chatSpyClient) SendMessage(_ context.Context, token string, opts client
 	m.gotSendToken = token
 	m.gotSendOpts = opts
 	return m.sendId, m.sendErr
+}
+
+func (m *chatSpyClient) EditMessage(_ context.Context, token string, messageId int, opts client.EditMessageOpts) (int, error) {
+	m.editCalls++
+	m.gotEditToken = token
+	m.gotEditId = messageId
+	m.gotEditOpts = opts
+	return m.editId, m.editErr
 }
 
 func (m *chatSpyClient) FindRooms(_ context.Context, _, _ string) ([]client.Room, error) {
@@ -864,5 +882,248 @@ func TestChatSendStdinTrimsTrailingNewline(t *testing.T) {
 	}
 	if want := "line1\nline2"; spy3.gotSendOpts.Message != want {
 		t.Errorf("multiline: Message got %q, want %q (внутренние \\n должны сохраниться)", spy3.gotSendOpts.Message, want)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// chat edit (дизайн 2026-09-08)
+// -----------------------------------------------------------------------------
+
+// TestChatEdit — table-driven по контракту `chat edit` (дизайн §2/§6): вывод id
+// (текстовый режим), пустое тело и невалидный messageId — без вызова клиента,
+// неизвестный флаг, --name (1/0/2 совпадения → 0/2/3), OCS 404 → 2, OCS 403 → 1,
+// лишние позиционные игнорируются, трим одного trailing newline, --file, =формы.
+// JSON-ветка — отдельно в TestChatEdit_JSONOutput (writeJSON печатает с отступами,
+// точное строковое сравнение в таблице хрупко).
+func TestChatEdit(t *testing.T) {
+	cases := []struct {
+		name          string
+		args          []string
+		stdin         string
+		editId        int
+		editErr       error
+		findRooms     []client.Room
+		wantCode      int
+		wantEditCalls int
+		wantFindCalls int    // FindRooms: 1 для кейсов с --name (ResolveRoom зовёт поиск), иначе 0
+		wantStdout    string // точное совпадение (пустая строка — проверить как пустое)
+		checkStdout   bool
+		wantErrSubstr string // подстрока в ee.Err ("" — не проверять)
+	}{
+		{
+			name: "stdin тело → успех, stdout id", args: []string{"TOK", "2927"}, stdin: "исправлено",
+			editId: 555, wantCode: ExitOK, wantEditCalls: 1, wantStdout: "555\n", checkStdout: true,
+		},
+		{
+			name: "трейлинг \\n срезается", args: []string{"TOK", "2927"}, stdin: "hi\n",
+			editId: 1, wantCode: ExitOK, wantEditCalls: 1,
+		},
+		{
+			name: "многострочное тело сохраняется", args: []string{"TOK", "2927"}, stdin: "line1\nline2\n",
+			editId: 1, wantCode: ExitOK, wantEditCalls: 1,
+		},
+		{
+			name: "--name= форма + позиционный messageId", args: []string{"2927", "--name=proj"}, stdin: "x",
+			findRooms: []client.Room{{Type: 1, Token: "NAMETOK", DisplayName: "Project", ActorId: "u-1"}},
+			editId:    7, wantCode: ExitOK, wantEditCalls: 1, wantFindCalls: 1,
+		},
+		{
+			name: "лишние позиционные игнорируются", args: []string{"TOK", "2927", "junk"}, stdin: "x",
+			editId: 3, wantCode: ExitOK, wantEditCalls: 1,
+		},
+		{
+			name: "пустое тело → exit 1 без сети", args: []string{"TOK", "2927"}, stdin: "",
+			wantCode: ExitGeneric, wantEditCalls: 0, wantErrSubstr: "пусто",
+		},
+		{
+			name: "тело только \\n → exit 1", args: []string{"TOK", "2927"}, stdin: "\n",
+			wantCode: ExitGeneric, wantEditCalls: 0, wantErrSubstr: "пусто",
+		},
+		{
+			name: "messageId не число → exit 1 до сети", args: []string{"TOK", "abc"}, stdin: "x",
+			wantCode: ExitGeneric, wantEditCalls: 0, wantErrSubstr: "целое число",
+		},
+		{
+			name: "messageId <= 0 → exit 1 до сети", args: []string{"TOK", "0"}, stdin: "x",
+			wantCode: ExitGeneric, wantEditCalls: 0, wantErrSubstr: "положительное",
+		},
+		{
+			name: "неизвестный флаг → exit 1", args: []string{"TOK", "2927", "--silent"}, stdin: "x",
+			wantCode: ExitGeneric, wantEditCalls: 0, wantErrSubstr: "неизвестный флаг",
+		},
+		{
+			name: "1 позиционный без --name → exit 1", args: []string{"2927"}, stdin: "x",
+			wantCode: ExitGeneric, wantEditCalls: 0, wantErrSubstr: "ожидается <room> <messageId>",
+		},
+		{
+			name: "0 позиционных без --name → exit 1", args: []string{}, stdin: "x",
+			wantCode: ExitGeneric, wantEditCalls: 0, wantErrSubstr: "ожидается <room> <messageId> или --name",
+		},
+		{
+			name: "0 позиционных с --name → exit 1 (нет messageId)", args: []string{"--name", "proj"}, stdin: "x",
+			wantCode: ExitGeneric, wantEditCalls: 0, wantErrSubstr: "ожидается <room> <messageId> или --name",
+		},
+		{
+			name: "--name 0 совпадений → exit 2", args: []string{"2927", "--name", "нету"}, stdin: "x",
+			findRooms: []client.Room{}, wantCode: ExitNotFound, wantEditCalls: 0, wantFindCalls: 1,
+		},
+		{
+			name: "--name 2 совпадения → exit 3", args: []string{"2927", "--name", "тест"}, stdin: "x",
+			findRooms: []client.Room{
+				{Type: 1, Token: "T1", DisplayName: "Первый", ActorId: "u-a"},
+				{Type: 2, Token: "T2", DisplayName: "Второй", ActorId: "u-b"},
+			},
+			wantCode: ExitAmbiguous, wantEditCalls: 0, wantFindCalls: 1,
+		},
+		{
+			name: "OCS 404 от EditMessage → exit 2", args: []string{"TOK", "2927"}, stdin: "x",
+			editErr: &client.OCSError{Code: 404, Message: "message not found"},
+			wantCode: ExitNotFound, wantEditCalls: 1,
+		},
+		{
+			name: "OCS 403 от EditMessage → exit 1 с текстом сервера", args: []string{"TOK", "2927"}, stdin: "x",
+			editErr: &client.OCSError{Code: 403, Message: "not allowed to edit"},
+			wantCode: ExitGeneric, wantEditCalls: 1, wantErrSubstr: "not allowed to edit",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := &chatSpyClient{editId: tc.editId, editErr: tc.editErr, findRooms: tc.findRooms}
+			deps := newChatSendDeps(spy, strings.NewReader(tc.stdin))
+
+			ee := chatEditHandler(context.Background(), deps, tc.args, false)
+			if ee.Code != tc.wantCode {
+				t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, tc.wantCode, ee.Err)
+			}
+			if spy.editCalls != tc.wantEditCalls {
+				t.Errorf("EditMessage calls: got %d, want %d", spy.editCalls, tc.wantEditCalls)
+			}
+			// wantFindCalls, а не «0 при wantEditCalls==0»: кейсы --name с 0/2
+			// совпадениями требуют вызова FindRooms (это единственный источник
+			// кодов 2/3) — безликая проверка «FindRooms не звался» ложно ругалась
+			// бы на корректной реализации.
+			if spy.findCalls != tc.wantFindCalls {
+				t.Errorf("FindRooms calls: got %d, want %d", spy.findCalls, tc.wantFindCalls)
+			}
+			if tc.wantErrSubstr != "" && (ee.Err == nil || !strings.Contains(ee.Err.Error(), tc.wantErrSubstr)) {
+				t.Errorf("err: got %v, want содержит %q", ee.Err, tc.wantErrSubstr)
+			}
+			if tc.checkStdout {
+				if out := deps.Stdout.(*bytes.Buffer).String(); out != tc.wantStdout {
+					t.Errorf("stdout: got %q, want %q", out, tc.wantStdout)
+				}
+			}
+		})
+	}
+}
+
+// TestChatEdit_PassesArguments — позиционные <room> <messageId> и тело доходят
+// до EditMessage; id вывода берётся из ответа клиента (не эхо входного).
+func TestChatEdit_PassesArguments(t *testing.T) {
+	spy := &chatSpyClient{editId: 999}
+	deps := newChatSendDeps(spy, strings.NewReader("исправлено"))
+
+	ee := chatEditHandler(context.Background(), deps, []string{"TOK", "2927"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	if spy.gotEditToken != "TOK" {
+		t.Errorf("token: got %q, want %q", spy.gotEditToken, "TOK")
+	}
+	if spy.gotEditId != 2927 {
+		t.Errorf("messageId: got %d, want 2927", spy.gotEditId)
+	}
+	if spy.gotEditOpts.Message != "исправлено" {
+		t.Errorf("Message: got %q, want %q", spy.gotEditOpts.Message, "исправлено")
+	}
+	if out := deps.Stdout.(*bytes.Buffer).String(); out != "999\n" {
+		t.Errorf("stdout: got %q, want %q (id из ответа клиента)", out, "999\n")
+	}
+}
+
+// TestChatEdit_JSONOutput — jsonOut=true → в stdout валидный JSON {"id": <int>}
+// (render.NewMessageIDJSON, тот же вывод, что у chat send; проверка через
+// json.Unmarshal — по образцу TestChatSendStdinJSON).
+func TestChatEdit_JSONOutput(t *testing.T) {
+	spy := &chatSpyClient{editId: 42}
+	deps := newChatSendDeps(spy, strings.NewReader("json body"))
+
+	ee := chatEditHandler(context.Background(), deps, []string{"TOK", "2927"}, true)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	raw := deps.Stdout.(*bytes.Buffer).Bytes()
+	var got struct {
+		Id int `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("stdout не валидный JSON: %v; raw=%s", err, raw)
+	}
+	if got.Id != 42 {
+		t.Errorf("json.id: got %d, want 42", got.Id)
+	}
+}
+
+// TestChatEdit_TrimsOneTrailingNewline — срезается РОВНО ОДИН завершающий
+// \n / \r\n; внутренние переводы строк сохраняются (идентично chat send).
+func TestChatEdit_TrimsOneTrailingNewline(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stdin string
+		want  string
+	}{
+		{"unix", "hi\n", "hi"},
+		{"crlf", "hi\r\n", "hi"},
+		{"multiline", "line1\nline2\n", "line1\nline2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := &chatSpyClient{editId: 1}
+			deps := newChatSendDeps(spy, strings.NewReader(tc.stdin))
+
+			ee := chatEditHandler(context.Background(), deps, []string{"TOK", "2927"}, false)
+			if ee.Code != ExitOK {
+				t.Fatalf("%s: code got %d, want %d (err=%v)", tc.name, ee.Code, ExitOK, ee.Err)
+			}
+			if spy.gotEditOpts.Message != tc.want {
+				t.Errorf("%s: Message got %q, want %q", tc.name, spy.gotEditOpts.Message, tc.want)
+			}
+		})
+	}
+}
+
+// TestChatEdit_File — тело из --file <path> (временный файл), stdin не читается.
+func TestChatEdit_File(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "new.txt")
+	if err := os.WriteFile(path, []byte("new-body"), 0o600); err != nil {
+		t.Fatalf("write temp file: %v", err)
+	}
+	spy := &chatSpyClient{editId: 5}
+	deps := newChatSendDeps(spy, strings.NewReader(""))
+
+	ee := chatEditHandler(context.Background(), deps, []string{"TOK", "2927", "--file", path}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	if spy.editCalls != 1 || spy.gotEditOpts.Message != "new-body" {
+		t.Errorf("EditMessage: calls=%d Message=%q, want 1 и %q", spy.editCalls, spy.gotEditOpts.Message, "new-body")
+	}
+}
+
+// TestChatEdit_NamePositionalConflict — заданы и token, и --name → приоритет у
+// token, --name игнорируется с предупреждением в stderr (поведение ResolveRoom).
+func TestChatEdit_NamePositionalConflict(t *testing.T) {
+	spy := &chatSpyClient{editId: 1}
+	deps := newChatSendDeps(spy, strings.NewReader("x"))
+
+	ee := chatEditHandler(context.Background(), deps, []string{"TOK", "2927", "--name", "ignored"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	if spy.gotEditToken != "TOK" {
+		t.Errorf("token: got %q, want %q (positional выигрывает)", spy.gotEditToken, "TOK")
+	}
+	if stderr := deps.Stderr.(*bytes.Buffer).String(); !strings.Contains(stderr, "приоритет у token") {
+		t.Errorf("stderr должен содержать предупреждение о конфликте; got %q", stderr)
 	}
 }

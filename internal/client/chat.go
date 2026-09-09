@@ -245,3 +245,72 @@ func (c *TalkClient) SendMessage(ctx context.Context, token string, opts SendMes
 	}
 	return out.Id, nil
 }
+
+// EditMessageOpts — параметры EditMessage (дизайн 2026-09-08 §4, `chat edit`).
+type EditMessageOpts struct {
+	// Message — новый текст сообщения, ОБЯЗАТЕЛЬНЫЙ. Пустая строка → клиентская
+	// ошибка ДО сетевого вызова (не тратим запрос).
+	Message string
+}
+
+// editMessageReq — форма JSON-тела запроса chat edit: единственное поле message
+// (документация Talk, Chat API «Editing a Chat Message»).
+type editMessageReq struct {
+	Message string `json:"message"`
+}
+
+// editMessageResp — минимальная форма ocs.data ответа chat edit. Сервер
+// возвращает ПОЛНОЕ системное сообщение о правке (systemMessage=message_edited),
+// в поле parent — ОБНОВЛЁННОЕ сообщение. Документация явно предупреждает:
+// системное сообщение предназначено для обновления кэша клиентов, не для
+// отображения — поэтому из ответа разбираем только parent.id (= входной id).
+type editMessageResp struct {
+	Parent struct {
+		Id int `json:"id"`
+	} `json:"parent"`
+}
+
+// EditMessage редактирует уже отправленное сообщение messageId в комнате token
+// (PUT chat/{token}/{messageId}, дизайн 2026-09-08 §3/§4) и возвращает id
+// отредактированного сообщения из ответа сервера (ocs.data.parent.id) — НЕ эхом
+// входного аргумента.
+//
+// Контракт:
+//   - opts.Message == "" или messageId <= 0 → клиентская ошибка ДО сети;
+//   - ответ без parent.id (drift формата) → ошибка, а НЕ молчаливый (0, nil)
+//     с фиктивным id=0 и exit 0 у CLI;
+//   - серверные отказа (400 старше 24ч, 403 чужое/read-only, 404, 405, 412)
+//     не предугадываем — приходят как *OCSError с текстом сервера (doOCS);
+//   - серверные ограничения (свои сообщения, 24 часа, тип comment) клиент
+//     не дублирует (тонкий клиент, дизайн §1 Out of scope).
+func (c *TalkClient) EditMessage(ctx context.Context, token string, messageId int, opts EditMessageOpts) (int, error) {
+	// Клиентская валидация до сети — дубль CLI-guard-ов, защищает прямые вызовы.
+	if opts.Message == "" {
+		return 0, errors.New("client: EditMessage: пустое сообщение (opts.Message обязательно)")
+	}
+	if messageId <= 0 {
+		return 0, fmt.Errorf("client: EditMessage: messageId ожидает положительное число, получено %d", messageId)
+	}
+	body, err := json.Marshal(editMessageReq{Message: opts.Message})
+	if err != nil {
+		// Практически недостижимо, но пропускаем через sanitizeErr единообразно
+		// с SendMessage.
+		return 0, sanitizeErr(fmt.Errorf("client: не удалось собрать тело EditMessage: %w", err))
+	}
+	// token и messageId — отдельные path-сегменты: PathEscape токена,
+	// messageId форматируем через strconv.Itoa (целое — безопасно без эскейпа).
+	p := pathChat + "/" + url.PathEscape(token) + "/" + strconv.Itoa(messageId)
+	var out editMessageResp
+	if _, err := c.doOCS(ctx, http.MethodPut, p, nil, bytes.NewReader(body), true, &out); err != nil {
+		return 0, err
+	}
+	// Защита от drift формата ответа: 200/202 без parent (или с parent.id=0)
+	// декодируется молча в нулевое значение. Формат PUT-ответа не проверен на
+	// живом API (дизайн §3) и фиксируется в основном integration-тестом под
+	// флагом — без этого guard-а drift дал бы бесшумный успех с фиктивным
+	// id=0 (CLI напечатал бы 0 с exit 0).
+	if out.Parent.Id <= 0 {
+		return 0, errors.New("client: EditMessage: неожиданный формат ответа (нет parent.id)")
+	}
+	return out.Parent.Id, nil
+}

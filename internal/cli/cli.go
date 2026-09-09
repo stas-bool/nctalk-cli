@@ -13,7 +13,7 @@ import (
 	"github.com/stas-bool/nctalk-cli/internal/client"
 )
 
-// TalkClient — минимальный интерфейс, покрывающий 7 методов реального
+// TalkClient — минимальный интерфейс, покрывающий 8 методов реального
 // *client.TalkClient. Нужен для mockability: в production в Deps.Client
 // кладётся *client.TalkClient, в тестах — заглушка.
 type TalkClient interface {
@@ -22,6 +22,7 @@ type TalkClient interface {
 	SearchRooms(ctx context.Context, term string, limit int) ([]client.ConversationResult, error)
 	GetChat(ctx context.Context, token string, opts client.GetChatOpts) ([]client.Message, error)
 	SendMessage(ctx context.Context, token string, opts client.SendMessageOpts) (int, error)
+	EditMessage(ctx context.Context, token string, messageId int, opts client.EditMessageOpts) (int, error)
 	GetReactions(ctx context.Context, token string, messageId int) (map[string][]client.ReactionActor, error)
 	SearchMessages(ctx context.Context, term string, opts client.SearchMessagesOpts) ([]client.MessageResult, error)
 }
@@ -68,6 +69,7 @@ var routes = map[string]map[string]handlerFn{
 	"chat": {
 		"show": chatShowHandler,
 		"send": chatSendHandler,
+		"edit": chatEditHandler,
 	},
 	"reactions": {
 		"get": reactionsGetHandler,
@@ -116,7 +118,7 @@ func Run(args []string, deps Deps) int {
 
 	// rooms/chat/reactions — двухуровневый разбор: args[0]=resource, args[1]=verb.
 	if len(rest) == 0 {
-		fmt.Fprintf(deps.Stderr, "nctalk %s: ожидается verb (list/find/search/show/send/get)\n", resource)
+		fmt.Fprintf(deps.Stderr, "nctalk %s: ожидается verb (list/find/search/show/send/edit/get)\n", resource)
 		return ExitGeneric
 	}
 

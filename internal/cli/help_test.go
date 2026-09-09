@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// TestCmdSpecs_CoverAllRoutes — cmdSpecs обязана содержать ровно те же 7 команд,
+// TestCmdSpecs_CoverAllRoutes — cmdSpecs обязана содержать ровно те же 8 команд,
 // что и таблица routes + searchHandlerFn (спека §6 anti-drift на уровне маршрутов).
 // Защита от drift: если добавить команду в routes и забыть в cmdSpecs (или наоборот) — тест падает.
 func TestCmdSpecs_CoverAllRoutes(t *testing.T) {
@@ -38,7 +38,7 @@ func TestCmdSpecs_CoverAllRoutes(t *testing.T) {
 func TestCmdSpecs_OrderMatchesHelpOrder(t *testing.T) {
 	want := []string{
 		"rooms list", "rooms find", "rooms search",
-		"chat show", "chat send",
+		"chat show", "chat send", "chat edit",
 		"reactions get",
 		"search",
 	}
@@ -62,6 +62,7 @@ func TestCmdSpecs_FlagsExactly(t *testing.T) {
 		"rooms search":   {},
 		"chat show":      {"--name", "--last", "--from", "--since", "--system"},
 		"chat send":      {"--name", "--reply-to", "--reference-id", "--silent", "--file"},
+		"chat edit":      {"--name", "--file"},
 		"reactions get":  {"--name"},
 		"search":         {"--from", "--limit", "--all"},
 	}
@@ -318,7 +319,7 @@ func TestHandleHelp_GeneralContent(t *testing.T) {
 	}
 }
 
-// TestHandleHelp_DetailedContent — для каждой из 7 команд проверяем: имя команды,
+// TestHandleHelp_DetailedContent — для каждой из 8 команд проверяем: имя команды,
 // заголовок, usage, каждый флаг, описание флага, --json, примеры.
 func TestHandleHelp_DetailedContent(t *testing.T) {
 	for _, cs := range cmdSpecs {
@@ -485,15 +486,16 @@ func TestAntiDrift_HandlerMatchesDeclaration(t *testing.T) {
 			// 1. Каждый ЗАЯВЛЕННЫЙ флаг handler принимает.
 			for _, f := range cs.Flags {
 				deps := newTestDeps()
-				// chat send читает тело ДО ResolveRoom: при nil Stdin (дефолт
-				// newTestDeps) handler fallback-ает на os.Stdin — в CI обычно
-				// мгновенный EOF («тело пусто» → ExitGeneric), но на tty stdin
-				// может зависнуть, и semantics prong 1 ослабляется (handler
-				// падает до проверки семантики флага). Даём непустое Stdin-тело
-				// для chat send — handler доходит до mockTalkClient.SendMessage
-				// (errMock, тоже не «неизвестный флаг»). Для --file это shimmer
-				// (handler идёт через os.ReadFile, но Stdin безвреден).
-				if joinPath(cs.Path) == "chat send" {
+				// chat send и chat edit читают тело ДО ResolveRoom: при nil
+				// Stdin (дефолт newTestDeps) handler fallback-ает на os.Stdin —
+				// в CI обычно мгновенный EOF («тело пусто» → ExitGeneric), но на
+				// tty stdin может зависнуть, и semantics prong 1 ослабляется
+				// (handler падает до проверки семантики флага). Даём непустое
+				// Stdin-тело для chat send и chat edit — handler доходит до
+				// mockTalkClient.SendMessage/EditMessage (errMock, тоже не
+				// «неизвестный флаг»). Для --file это shimmer (handler идёт
+				// через os.ReadFile, но Stdin безвреден).
+				if p := joinPath(cs.Path); p == "chat send" || p == "chat edit" {
 					deps.Stdin = strings.NewReader("anti-drift body")
 				}
 				args := buildArgsForFlag(cs, f)
@@ -532,10 +534,11 @@ func TestAntiDrift_HandlerMatchesDeclaration(t *testing.T) {
 						continue
 					}
 					deps := newTestDeps()
-					// chat send читает stdin до ResolveRoom: даём тело, чтобы
-					// handler дошёл до парсинга флагов (флаги парсятся раньше,
-					// но так безопаснее — semantics не зависит от tty/stdin).
-					if joinPath(cs.Path) == "chat send" {
+					// chat send и chat edit читают stdin до ResolveRoom: даём
+					// тело, чтобы handler дошёл до парсинга флагов (флаги
+					// парсятся раньше, но так безопаснее — semantics не зависит
+					// от tty/stdin).
+					if p := joinPath(cs.Path); p == "chat send" || p == "chat edit" {
 						deps.Stdin = strings.NewReader("anti-drift body")
 					}
 					args := append(buildPositionalArgs(cs), f.Name)
@@ -574,6 +577,8 @@ func buildPositionalArgs(cs cmdSpec) []string {
 		return []string{"term"}
 	case "chat show", "chat send":
 		return []string{"tok123"}
+	case "chat edit":
+		return []string{"tok123", "1"}
 	case "reactions get":
 		return []string{"tok123", "1"}
 	case "search":

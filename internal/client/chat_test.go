@@ -2,10 +2,13 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -485,5 +488,188 @@ func TestSendMessage_OCSError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid replyTo") {
 		t.Errorf("err: got %q, want contains 'invalid replyTo'", err.Error())
+	}
+}
+
+// -----------------------------------------------------------------------------
+// EditMessage (chat edit, дизайн 2026-09-08)
+// -----------------------------------------------------------------------------
+
+// chatEditReq — слепок одного запроса к chat-эндпоинту, для asserts EditMessage.
+type chatEditReq struct {
+	method      string
+	path        string
+	body        string
+	contentType string
+}
+
+// chatEditReqLog — потокобезопасный лог запросов к chat-эндпоинту.
+type chatEditReqLog struct {
+	mu   sync.Mutex
+	reqs []chatEditReq
+}
+
+func (l *chatEditReqLog) record(r chatEditReq) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.reqs = append(l.reqs, r)
+}
+
+func (l *chatEditReqLog) snapshot() []chatEditReq {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]chatEditReq, len(l.reqs))
+	copy(out, l.reqs)
+	return out
+}
+
+// chatEditServer поднимает httptest-сервер, отвечающий на любой запрос телом
+// respBody (успех — фикстура реального формата; ошибки — ocsBody со statusCode)
+// и логирующий method/path/Content-Type/тело запроса.
+func chatEditServer(t *testing.T, respBody []byte) (*httptest.Server, *chatEditReqLog) {
+	t.Helper()
+	log := &chatEditReqLog{}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+		}
+		log.record(chatEditReq{
+			method:      r.Method,
+			path:        r.URL.Path,
+			body:        string(body),
+			contentType: r.Header.Get("Content-Type"),
+		})
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(respBody)
+	})), log
+}
+
+// TestEditMessage_Success — PUT chat/{token}/{messageId}, тело {"message":...},
+// заголовок Content-Type: application/json (mutate=true). Фикстура реального
+// формата → метод вернул parent.id (2927), а НЕ id системного сообщения (5101) —
+// это фиксация контракта формата ответа (дизайн §3).
+func TestEditMessage_Success(t *testing.T) {
+	fixture, err := os.ReadFile(filepath.Join("..", "..", "testdata", "chat_edit_response.json"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	ts, log := chatEditServer(t, fixture)
+	defer ts.Close()
+
+	c := NewTalkClient(testCfg(ts.URL))
+	id, err := c.EditMessage(context.Background(), "tok", 2927, EditMessageOpts{Message: "исправленный текст"})
+	if err != nil {
+		t.Fatalf("EditMessage: %v", err)
+	}
+	if got, want := id, 2927; got != want {
+		t.Errorf("id: got %d, want %d (parent.id, НЕ id системного сообщения 5101)", got, want)
+	}
+	reqs := log.snapshot()
+	if got, want := len(reqs), 1; got != want {
+		t.Fatalf("запросов: got %d, want %d", got, want)
+	}
+	r := reqs[0]
+	if r.method != http.MethodPut {
+		t.Errorf("method: got %q, want PUT", r.method)
+	}
+	const wantPath = "/ocs/v2.php/apps/spreed/api/v1/chat/tok/2927"
+	if r.path != wantPath {
+		t.Errorf("path: got %q, want %q", r.path, wantPath)
+	}
+	if !strings.Contains(r.body, `"message":"исправленный текст"`) {
+		t.Errorf("body: нет \"message\":\"исправленный текст\": %q", r.body)
+	}
+	if r.contentType != "application/json" {
+		t.Errorf("Content-Type: got %q, want application/json (mutate=true)", r.contentType)
+	}
+}
+
+// TestEditMessage_OCSError — серверные отказа правки (400 старше 24ч, 403 чужое
+// сообщение/read-only, 404 не найдено, 405 не comment) приходят как *OCSError
+// с кодом и текстом сервера (стандартная обработка doOCS, дизайн §2/§3).
+func TestEditMessage_OCSError(t *testing.T) {
+	cases := []struct {
+		code int
+		msg  string
+	}{
+		{400, "message is too old"},
+		{403, "not allowed to edit"},
+		{404, "message not found"},
+		{405, "not a normal chat message"},
+	}
+	for _, tc := range cases {
+		t.Run(strconv.Itoa(tc.code), func(t *testing.T) {
+			ts, _ := chatEditServer(t, ocsBody(t, tc.code, tc.msg, nil))
+			defer ts.Close()
+
+			c := NewTalkClient(testCfg(ts.URL))
+			_, err := c.EditMessage(context.Background(), "tok", 2927, EditMessageOpts{Message: "x"})
+			if err == nil {
+				t.Fatalf("err = nil, want OCSError с кодом %d", tc.code)
+			}
+			var oe *OCSError
+			if !errors.As(err, &oe) || oe.Code != tc.code {
+				t.Errorf("err: got %v, want *OCSError{Code:%d}", err, tc.code)
+			}
+			if !strings.Contains(err.Error(), tc.msg) {
+				t.Errorf("err: got %q, want содержит %q", err.Error(), tc.msg)
+			}
+		})
+	}
+}
+
+// TestEditMessage_ResponseWithoutParent_FormatDrift — сервер ответил 200, но
+// в ocs.data нет parent (или parent.id=0) — drift формата ответа. Контракт:
+// ошибка, а НЕ молчаливый (0, nil) с фиктивным id=0 и exit 0 у CLI. Формат
+// PUT-ответа экзотичен (системное сообщение с parent, дизайн §3) — unit-уровень
+// обязан ловить расхождение, не полагаясь только на integration-тест под флагом.
+func TestEditMessage_ResponseWithoutParent_FormatDrift(t *testing.T) {
+	cases := []struct {
+		name string
+		data any
+	}{
+		{"нет parent (только системное сообщение)", map[string]any{"id": 5101}},
+		{"пустой parent без id", map[string]any{"parent": map[string]any{}}},
+		{"data=null", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts, _ := chatEditServer(t, ocsBody(t, 200, "OK", tc.data))
+			defer ts.Close()
+
+			c := NewTalkClient(testCfg(ts.URL))
+			id, err := c.EditMessage(context.Background(), "tok", 2927, EditMessageOpts{Message: "x"})
+			if err == nil {
+				t.Fatal("err = nil, want ошибка drift-формата (нет parent.id)")
+			}
+			if id != 0 {
+				t.Errorf("id: got %d, want 0 (при ошибке фиктивный id не возвращаем)", id)
+			}
+			if !strings.Contains(err.Error(), "parent.id") {
+				t.Errorf("err: got %q, want содержит 'parent.id'", err.Error())
+			}
+		})
+	}
+}
+
+// TestEditMessage_Guards — пустое сообщение и неположительный messageId —
+// клиентские ошибки ДО сети (дизайн §4): лог запросов пуст, сервер не дёргаем.
+func TestEditMessage_Guards(t *testing.T) {
+	ts, log := chatEditServer(t, ocsBody(t, 200, "OK", nil))
+	defer ts.Close()
+
+	c := NewTalkClient(testCfg(ts.URL))
+	if _, err := c.EditMessage(context.Background(), "tok", 2927, EditMessageOpts{Message: ""}); err == nil {
+		t.Error("пустое Message: err = nil, want клиентская ошибка")
+	}
+	if _, err := c.EditMessage(context.Background(), "tok", 0, EditMessageOpts{Message: "x"}); err == nil {
+		t.Error("messageId=0: err = nil, want клиентская ошибка")
+	}
+	if _, err := c.EditMessage(context.Background(), "tok", -1, EditMessageOpts{Message: "x"}); err == nil {
+		t.Error("messageId=-1: err = nil, want клиентская ошибка")
+	}
+	if got := len(log.snapshot()); got != 0 {
+		t.Errorf("запросов: got %d, want 0 (guard-ы отсекают ДО сети)", got)
 	}
 }

@@ -72,6 +72,9 @@ func (m *roomsSpyClient) GetChat(_ context.Context, _ string, _ client.GetChatOp
 func (m *roomsSpyClient) SendMessage(_ context.Context, _ string, _ client.SendMessageOpts) (int, error) {
 	return 0, errMock
 }
+func (m *roomsSpyClient) EditMessage(_ context.Context, _ string, _ int, _ client.EditMessageOpts) (int, error) {
+	return 0, errMock
+}
 func (m *roomsSpyClient) GetReactions(_ context.Context, _ string, _ int) (map[string][]client.ReactionActor, error) {
 	return nil, errMock
 }

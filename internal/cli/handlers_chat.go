@@ -1,8 +1,8 @@
 package cli
 
-// handlers_chat.go — реализации команд `chat show` (Task 4.3) и `chat send`
-// (Task 4.4, пока stub). Сигнатуры handler-функций фиксированы схемой роутинга
-// cli.go (handlerFn).
+// handlers_chat.go — реализации команд `chat show` (Task 4.3), `chat send`
+// (Task 4.4, пока stub) и `chat edit` (дизайн 2026-09-08). Сигнатуры
+// handler-функций фиксированы схемой роутинга cli.go (handlerFn).
 //
 // Разбор флагов — ручной (scan args), без flag-пакета (спека §3). Глобальный
 // --json уже вынесен в jsonOut слоем Run (cli.go extractJSON).
@@ -239,6 +239,44 @@ func parseSinceAt(s string, now time.Time) (int64, error) {
 	return render.ParseSince(s)
 }
 
+// readMessageBody — общий блок чтения тела сообщения для `chat send` и
+// `chat edit` (источник единый: stdin по умолчанию или --file, дизайн
+// 2026-09-08 §2). Возвращает готовый текст или ошибку с префиксом cmd:
+//   - --file <path> → os.ReadFile, файл читается целиком;
+//   - иначе → io.ReadAll(deps.Stdin), при deps.Stdin==nil fallback на os.Stdin
+//     (production-путь: main не проставляет Stdin; тесты кладут свой io.Reader);
+//   - срезается РОВНО ОДИН завершающий перевод строки (\n или \r\n):
+//     `echo "hi" | nctalk chat send` отправил бы "hi\n" (с сохранением сервером
+//     \n); многострочные тела (с \n внутри) валидны — пачку не тримим;
+//   - пустое тело (пустой stdin/файл или только перевод строки) — ошибка
+//     пользователя, не сети; клиент не зовём.
+func readMessageBody(deps Deps, fileFlag, cmd string) (string, error) {
+	var body []byte
+	var readErr error
+	if fileFlag != "" {
+		body, readErr = os.ReadFile(fileFlag)
+	} else {
+		stdin := deps.Stdin
+		if stdin == nil {
+			stdin = os.Stdin
+		}
+		body, readErr = io.ReadAll(stdin)
+	}
+	if readErr != nil {
+		return "", fmt.Errorf("%s: не удалось прочитать тело: %w", cmd, readErr)
+	}
+	text := string(body)
+	if strings.HasSuffix(text, "\r\n") {
+		text = text[:len(text)-2]
+	} else if strings.HasSuffix(text, "\n") {
+		text = text[:len(text)-1]
+	}
+	if len(text) == 0 {
+		return "", fmt.Errorf("%s: тело сообщения пусто", cmd)
+	}
+	return text, nil
+}
+
 // chatSendHandler — реализация `chat send <room>` (спека §6 chat send).
 //
 // Отправляет сообщение в комнату <room>. Тело сообщения берётся из stdin
@@ -339,36 +377,10 @@ func chatSendHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 
 	// 3. Чтение тела ДО ResolveRoom: пустое тело отсекается без единого
 	// сетевого вызова (ни FindRooms, ни SendMessage) — это явно требует спека
-	// и DoD Task 4.4.
-	var body []byte
-	var readErr error
-	if fileFlag != "" {
-		body, readErr = os.ReadFile(fileFlag)
-	} else {
-		stdin := deps.Stdin
-		if stdin == nil {
-			// Production-путь: main не проставляет Stdin, fallback на реальный
-			// os.Stdin. Тесты всегда кладут свой io.Reader.
-			stdin = os.Stdin
-		}
-		body, readErr = io.ReadAll(stdin)
-	}
-	if readErr != nil {
-		return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat send: не удалось прочитать тело: %w", readErr)}
-	}
-	// Срезаем ОДИН завершающий перевод строки: `echo "hi" | nctalk chat send`
-	// отправил бы "hi\n" (с сохранением сервером \n). Многострочные тела (с \n
-	// внутри) валидны — поэтому тримим ровно один trailing \n / \r\n, не пачку.
-	text := string(body)
-	if strings.HasSuffix(text, "\r\n") {
-		text = text[:len(text)-2]
-	} else if strings.HasSuffix(text, "\n") {
-		text = text[:len(text)-1]
-	}
-	if len(text) == 0 {
-		// Пустое stdin/файл (или только перевод строки) — ошибка пользователя,
-		// не сети; клиент не зовём.
-		return ExitError{Code: ExitGeneric, Err: errors.New("chat send: тело сообщения пусто")}
+	// и DoD Task 4.4. Общий блок с chat edit — readMessageBody.
+	text, err := readMessageBody(deps, fileFlag, "chat send")
+	if err != nil {
+		return ExitError{Code: ExitGeneric, Err: err}
 	}
 
 	// 4. Разрешение <room>: positional token (primary) или --name (поиск).
@@ -401,6 +413,125 @@ func chatSendHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 	}
 
 	// 6. Вывод id по ветке jsonOut (спека §6).
+	if jsonOut {
+		if err := render.NewMessageIDJSON(deps.Stdout, id); err != nil {
+			return ExitError{Code: ExitGeneric, Err: err}
+		}
+	} else {
+		if err := render.NewMessageID(deps.Stdout, id); err != nil {
+			return ExitError{Code: ExitGeneric, Err: err}
+		}
+	}
+	return ExitError{Code: ExitOK}
+}
+
+// chatEditHandler — реализация `chat edit <room> <messageId>` (дизайн
+// 2026-09-08 §2/§5): правка уже отправленного сообщения. Тело нового текста —
+// как у chat send (stdin по умолчанию, --file как альтернатива), распределение
+// позиционных <room> <messageId> — как у reactions get.
+//
+// Порядок шагов (дизайн §5): флаги → позиционные → чтение тела (ДО ResolveRoom;
+// пустое → exit 1 без сети) → парсинг messageId (exit 1 до сети) → ResolveRoom
+// (коды 2/3) → EditMessage → вывод id.
+//
+// Других флагов НЕТ: --silent/--reply-to/--reference-id для правки бессмысленны
+// (дизайн §2) и отвергаются как неизвестные.
+//
+// Вывод: id отредактированного сообщения из ОТВЕТА сервера (parent.id), а не
+// эхо входного аргумента: текстом `<int>\n` или `{"id": <int>}` при --json —
+// тот же вывод, что у chat send (render.NewMessageID{,JSON}).
+func chatEditHandler(ctx context.Context, deps Deps, args []string, jsonOut bool) ExitError {
+	// 1. Разбор флагов: ручной scan (без flag-пакета, спека §3), обе формы
+	// `--flag value` и `--flag=value` — единообразно с chatSend.
+	var (
+		positionals []string
+		nameFlag    string
+		fileFlag    string
+	)
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--name":
+			if i+1 >= len(args) {
+				return ExitError{Code: ExitGeneric, Err: errors.New("chat edit: --name требует значение")}
+			}
+			nameFlag = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--name="):
+			nameFlag = strings.TrimPrefix(a, "--name=")
+		case a == "--file":
+			if i+1 >= len(args) {
+				return ExitError{Code: ExitGeneric, Err: errors.New("chat edit: --file требует значение (путь)")}
+			}
+			fileFlag = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--file="):
+			fileFlag = strings.TrimPrefix(a, "--file=")
+		case strings.HasPrefix(a, "--"):
+			return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat edit: неизвестный флаг %q", a)}
+		default:
+			// Позиционные — <room> и <messageId>; распределение ниже.
+			positionals = append(positionals, a)
+		}
+	}
+
+	// 2. Распределение positionals — единообразно с reactions get (дизайн §2):
+	//   - >=2 → первый = <room> (token), второй = <messageId>; заданный при этом
+	//     --name игнорируется с предупреждением (поведение ResolveRoom);
+	//   - 1 + --name → позиционный это <messageId>, комната по --name;
+	//   - 1 без --name → нехватка;
+	//   - 0 (с --name или без) → нехватка (default-ветка покрывает обе).
+	var roomPos, msgIdRaw string
+	switch {
+	case len(positionals) >= 2:
+		roomPos = positionals[0]
+		msgIdRaw = positionals[1]
+	case len(positionals) == 1 && nameFlag != "":
+		msgIdRaw = positionals[0]
+	case len(positionals) == 1:
+		return ExitError{Code: ExitGeneric, Err: errors.New("chat edit: ожидается <room> <messageId>")}
+	default:
+		return ExitError{Code: ExitGeneric, Err: errors.New("chat edit: ожидается <room> <messageId> или --name <имя> <messageId>")}
+	}
+
+	// 3. Чтение тела ДО ResolveRoom: пустое тело отсекается без единого
+	// сетевого вызова (ни FindRooms, ни EditMessage) — общий блок с chat send
+	// (readMessageBody): stdin/--file, трим одного trailing \n/\r\n.
+	text, err := readMessageBody(deps, fileFlag, "chat edit")
+	if err != nil {
+		return ExitError{Code: ExitGeneric, Err: err}
+	}
+
+	// 4. Парсинг messageId: невалид/неположительный → exit 1 ДО сети (ни
+	// FindRooms, ни EditMessage — дизайн §2).
+	messageId, err := strconv.Atoi(msgIdRaw)
+	if err != nil {
+		return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat edit: <messageId> ожидает целое число, получено %q", msgIdRaw)}
+	}
+	if messageId <= 0 {
+		return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat edit: <messageId> ожидает положительное число, получено %d", messageId)}
+	}
+
+	// 5. Разрешение <room>: positional token (primary) или --name (поиск).
+	// ResolveRoom сам печатает кандидатов при неоднозначности и возвращает
+	// ExitAmbiguous/ExitNotFound как ExitError — пробрасываем код.
+	token, err := ResolveRoom(ctx, deps.Client, roomPos, nameFlag, deps.Stderr)
+	if err != nil {
+		var ee ExitError
+		if errors.As(err, &ee) {
+			return ee
+		}
+		return ExitError{Code: ExitGeneric, Err: err}
+	}
+
+	// 6. Правка. Ошибки приходят sanitized из client-слоя; OCS 404 (комната или
+	// сообщение не найдены) → exit 2, прочие (400/403/405/412/сеть/401) → exit 1.
+	id, err := deps.Client.EditMessage(ctx, token, messageId, client.EditMessageOpts{Message: text})
+	if err != nil {
+		return exitFromClientErr(err)
+	}
+
+	// 7. Вывод id по ветке jsonOut — тот же вывод, что у chat send.
 	if jsonOut {
 		if err := render.NewMessageIDJSON(deps.Stdout, id); err != nil {
 			return ExitError{Code: ExitGeneric, Err: err}
