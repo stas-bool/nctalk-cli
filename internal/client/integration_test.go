@@ -277,3 +277,63 @@ func TestIntegration_SendMessage(t *testing.T) {
 	}
 	t.Logf("отправлено, id=%d", id)
 }
+
+// TestIntegration_EditMessage — мутационный сценарий правки сообщения (дизайн
+// 2026-09-08 §6): цикл SendMessage → EditMessage → GetChat проверяет и саму
+// правку, и формат PUT-ответа (parent.id = id отредактированного сообщения —
+// единственное место, где контракт ответа виден на живом API). Защита та же,
+// что у TestIntegration_SendMessage: NCTALK_INTEGRATION_SEND=1 +
+// NCTALK_INTEGRATION_ROOM (новых env не вводим). Мусор (исправленное сообщение
+// + system-сообщение о правке) остаётся в тестовой комнате, убирается вручную.
+func TestIntegration_EditMessage(t *testing.T) {
+	if got := os.Getenv("NCTALK_INTEGRATION_SEND"); got != "1" {
+		t.Skip("NCTALK_INTEGRATION_SEND != 1 — пропускаю мутационный тест EditMessage")
+	}
+	token := os.Getenv("NCTALK_INTEGRATION_ROOM")
+	if token == "" {
+		t.Skip("NCTALK_INTEGRATION_ROOM не задан — пропускаю EditMessage (нет целевой тестовой комнаты)")
+	}
+
+	c := integrationClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
+	defer cancel()
+
+	// Уникальный суффикс — чтобы сообщения прогона не путались с прошлыми.
+	uniq := strconv.FormatInt(time.Now().Unix(), 10)
+	orig := "edit-before " + uniq
+	fixed := "edit-after " + uniq
+
+	id, err := c.SendMessage(ctx, token, SendMessageOpts{Message: orig})
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	t.Logf("отправлено id=%d: %q", id, orig)
+
+	editId, err := c.EditMessage(ctx, token, id, EditMessageOpts{Message: fixed})
+	if err != nil {
+		t.Fatalf("EditMessage(%d): %v", id, err)
+	}
+	// Контракт формата ответа: id берётся из ocs.data.parent.id и равен входному.
+	if editId != id {
+		t.Errorf("EditMessage: сервер вернул parent.id=%d, want %d (формат ответа отличается от документации?)", editId, id)
+	}
+
+	// Проверка нового текста через чтение истории.
+	msgs, err := c.GetChat(ctx, token, GetChatOpts{Limit: 20})
+	if err != nil {
+		t.Fatalf("GetChat: %v", err)
+	}
+	found := false
+	for _, m := range msgs {
+		if m.Id == id {
+			found = true
+			if m.Message != fixed {
+				t.Errorf("сообщение %d: текст %q, want %q (правка не применилась?)", id, m.Message, fixed)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("сообщение %d не найдено в последних %d сообщениях", id, len(msgs))
+	}
+}

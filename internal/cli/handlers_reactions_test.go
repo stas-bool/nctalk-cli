@@ -47,6 +47,9 @@ func (m *reactionsSpyClient) GetChat(_ context.Context, _ string, _ client.GetCh
 func (m *reactionsSpyClient) SendMessage(_ context.Context, _ string, _ client.SendMessageOpts) (int, error) {
 	return 0, errMock
 }
+func (m *reactionsSpyClient) EditMessage(_ context.Context, _ string, _ int, _ client.EditMessageOpts) (int, error) {
+	return 0, errMock
+}
 func (m *reactionsSpyClient) GetReactions(_ context.Context, token string, messageId int) (map[string][]client.ReactionActor, error) {
 	m.gotToken = token
 	m.gotMessageId = messageId
