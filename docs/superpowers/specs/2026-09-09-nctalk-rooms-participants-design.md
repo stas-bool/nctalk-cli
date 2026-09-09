@@ -34,6 +34,10 @@
   не входят в каноническую модель и в текстовый вывод.
 - Онлайн-статус по `lastPing` (эвристика «недавно пинговался») — используется только
   `sessionIds` (живая сессия = онлайн).
+- Поведение на former-комнате, разрезолвленной через `--name`: `FindRooms` ищет по всем
+  комнатам включая former (`IncludeFormer: true`), а в покинутой комнате запрашивающий —
+  не участник. Ожидаем OCS-ошибку → exit `1`/`2` по общему контракту, специальной
+  обработки нет; проверка на живом сервере — вне этой дельты.
 
 ## 2. Контракт команды
 
@@ -54,8 +58,10 @@ nctalk rooms participants <room> [flags]
 ### Вывод
 
 Текст — таблица в стиле `rooms list` (tabwriter, заголовок капсом), сортировка: роль
-(`participantType` по возрастанию) → имя (case-insensitive). Сортировка — клиентская,
-прецедент «клиентская пост-обработка» — фильтры `rooms list`:
+(`participantType` по возрастанию) → имя (case-insensitive; ключ сортировки —
+итоговое имя колонки: fallback `actorId` при пустом `displayName` применяется ДО
+сортировки, чтобы безымянные гости не скучковались как пустая строка). Сортировка —
+клиентская, прецедент «клиентская пост-обработка» — фильтры `rooms list`:
 
 ```
 ИМЯ                     РОЛЬ        ОНЛАЙН   ID
@@ -77,8 +83,9 @@ nctalk rooms participants <room> [flags]
 Сырой ответ API НЕ проксируется — тонкий клиент отдаёт каноническую модель (как `Room`).
 
 Пустой список участников → пустой stdout, exit `0`, одинаково для текста и `--json`
-(поисковая семантика `rooms list`; на практике недостижимо — сам запрашивающий всегда
-участник доступной ему комнаты).
+(поисковая семантика `rooms list`; на практике недостижимо при позиционном token — сам
+запрашивающий всегда участник доступной ему комнаты; исключение — former-комната,
+разрезолвленная через `--name`, см. Out of scope).
 
 ### Exit-коды (наследуют базовый контракт §7, без изменений)
 
@@ -123,7 +130,7 @@ GET /ocs/v2.php/apps/spreed/api/v4/room/{token}/participants
 // Participant — каноническое представление участника комнаты (спека-дельта §3–4).
 type Participant struct {
     ActorType       string   `json:"actorType"`       // "users" / "guests" / "emails" / ...
-    ActorId         string   `json:"actorId"`         // для guests — "guest::<anon-id>"
+    ActorId         string   `json:"actorId"`         // для guests — "guest::<anon-id>" (assumption, см. ниже)
     DisplayName     string   `json:"displayName"`     // может быть пустым (гость)
     ParticipantType int      `json:"participantType"` // 1–6, см. §3
     SessionIds      []string `json:"sessionIds"`      // непустой = онлайн
@@ -138,12 +145,20 @@ func (c *TalkClient) GetParticipants(ctx context.Context, token string) ([]Parti
   существующая константа `/ocs/v2.php/apps/spreed/api/v4/room`). Guard-ов до сети нет —
   read-only GET, как `GetReactions` (непустоту token гарантирует `ResolveRoom`).
 - Разбор: `doOCS` → `[]Participant`.
-- Нормализация после decode: `SessionIds == nil` → пустой слайс (детерминированный
-  `--json`: `[]`, не `null`) — прецедент non-nil map у `GetReactions`.
-- Пустой ответ сервера → пустой (non-nil) слайс, nil error.
+- Нормализация после decode: `SessionIds == nil` → пустой слайс; сам слайс участников
+  `nil` → пустой (его делает Unmarshal при `data: null` — guard `len(data)>0`
+  пропускает `RawMessage("null")`, прецедент nil-map у `GetReactions`).
+  Детерминированный `--json`: `[]`, не `null`.
+- Пустой ответ сервера (`data: []` ИЛИ `data: null`) → пустой (non-nil) слайс, nil
+  error.
 - OCS-error — стандартная обработка `doOCS` → `*client.OCSError` (404 → exit 2 в cli).
 - Метод добавляется в интерфейс `cli.TalkClient` (`internal/cli/cli.go`) — compile-time
-  проверка `var _ TalkClient = (*client.TalkClient)(nil)` ловит рассинхрон.
+  проверка `var _ TalkClient = (*client.TalkClient)(nil)` ловит рассинхрон. Это ломает
+  компиляцию всех существующих тестовых реализаций интерфейса — stub-правки в §6.
+- Формат гостевых полей (`actorId` "guest::<anon-id>", пустой `displayName`) —
+  assumption: источник — reactions-эндпоинт (`ReactionActor`) + документация; на этом
+  эндпоинте живьем не сверен (§3, живая выборка гостей не содержала). При первом живом
+  прогоне комнаты с гостем — сверить фактические поля.
 
 ## 5. Слой cli
 
@@ -154,8 +169,9 @@ func (c *TalkClient) GetParticipants(ctx context.Context, token string) ([]Parti
   2. первый позиционный = room, лишние игнорируются;
   3. `ResolveRoom(room, nameFlag)` — коды `1/2/3` сохраняются;
   4. `GetParticipants`;
-  5. сортировка `sort.SliceStable`: `ParticipantType` asc → `DisplayName`
-     case-insensitive asc (stable — равные сохраняют порядок сервера);
+  5. сортировка `sort.SliceStable`: `ParticipantType` asc → итоговое имя
+     (`DisplayName`, при пустом — `ActorId`) case-insensitive asc — ключ §2
+     (fallback до сортировки; stable — равные сохраняют порядок сервера);
   6. вывод: `render.ParticipantsTable` / `render.ParticipantsJSON` по `jsonOut`; пустой
      список → пустой stdout, exit `0` (как `rooms list`).
 - Роутинг: `"participants": roomsParticipantsHandler` в `routes["rooms"]`; подсказка
@@ -176,9 +192,11 @@ func (c *TalkClient) GetParticipants(ctx context.Context, token string) ([]Parti
 
   Детальные/resource help и анти-drift тесты (`TestCmdSpecs_CoverAllRoutes`,
   `TestHandleHelp_DetailedContent`, `TestAntiDrift_...`) подхватывают декларацию
-  автоматически. Исключение — три канона с hardcoded-структурой, правятся руками (шаги —
+  автоматически. Исключение — пять канонов с hardcoded-структурой, правятся руками (шаги —
   §6): `TestCmdSpecs_OrderMatchesHelpOrder`, `TestCmdSpecs_FlagsExactly`,
-  `buildPositionalArgs`.
+  `buildPositionalArgs` и два Run-level канона в `internal/cli/cli_test.go` —
+  `TestRunRoutesAllStubs`, `TestRunRoutesToCorrectHandler` (таблицы по 8 кейсов; без
+  добавления кейса новый verb не покрыт на уровне роутинга).
 - `render` (`render.go` / `render_json.go`):
   - `ParticipantsTable(w, ps)` — tabwriter, заголовок `ИМЯ\tРОЛЬ\tОНЛАЙН\tID`; имя —
     fallback `actorId` при пустом `displayName`; роль — текст по мапе §2 (маппинг живёт
@@ -191,31 +209,57 @@ func (c *TalkClient) GetParticipants(ctx context.Context, token string) ([]Parti
   команд, если список где-то перечисляет все команды.
 - CLAUDE.md: «8 команд» → «9 команд» (первый абзац).
 - `TODO.md`: удалить строку про участников (задача закрыта).
-- `docs/integration-run.md`: строка нового read-only теста в таблицу тестов (мутационная
-  семантика не меняется — флагов не добавляется).
 - Комментарии-счётчики «8 команд/8 методов» в коде: `internal/cli/help.go` (док-комментарий
   cmdSpecs), `internal/cli/cli.go` (интерфейс TalkClient), `internal/cli/cli_test.go`,
   `internal/cli/help_test.go` — заменить на 9. Комментарии, не поведение, но это тот же
-  drift, который проект ловит анти-drift-тестами.
+  drift, который проект ловит анти-drift-тестами. Исключение — `cli_test.go`: там
+  правка НЕ только комментарий, «все 8 команд» честен над таблицей из 8 кейсов только
+  вместе с добавлением кейсов в Run-level каноны (§6).
+- `docs/integration-run.md`: строка нового read-only теста в таблицу тестов + имя в
+  batch-регулярку «Все читающие сценарии» и в per-test примеры — иначе
+  документированный прогон «все read-only одной командой» не включит новый тест
+  (мутационная семантика не меняется — флагов не добавляется).
+- Skill-обёртка `nctalk` (`~/.claude/skills/nctalk/SKILL.md` — файл ВНЕ репозитория):
+  «8 примитивов» → 9, строка `rooms participants` в шпаргалку команд и в правило про
+  источники actorId — `rooms participants --json` становится самым прямым источником
+  actorId участников. Заявленный потребитель — агент через skill (CLAUDE.md); без
+  правки skill не узнает о девятой команде.
 
 ## 6. Тестирование
 
+- **Моки интерфейса (compile-правка, без неё пакет cli не соберётся с тестами):** stub
+  `GetParticipants` → `errMock` в пять существующих реализаций `TalkClient` в
+  тестах: `mockTalkClient` (`cli_test.go`), `chatSpyClient` (`handlers_chat_test.go`),
+  `reactionsSpyClient` (`handlers_reactions_test.go`), `searchSpyClient`
+  (`handlers_search_test.go`), `roomMockClient` (`room_test.go`); шестая —
+  `roomsSpyClient` (`handlers_rooms_test.go`) — получает полноценный spy (поля
+  result/err/calls — тот же паттерн, что у list/find/search): новым handler-тестам
+  нужен преднастраиваемый результат, errMock-стаб этого не даёт. У каждой compile-time
+  проверка `var _ TalkClient = (*...)(nil)`. `internal/room` не трогаем (свой
+  минимальный `RoomLister`).
 - **client (`internal/client/participants_test.go`):** httptest-сервер:
   - успех: фикстура реального формата (обезличенный ответ, снятый с живого 2026-09-09,
     §3) → декод всех семи полей; проверка метода/пути (`GET`,
     `room/{token}/participants`, PathEscape) и заголовков;
   - `sessionIds: null` → пустой слайс, не nil (нормализация);
-  - пустой `data: []` → пустой non-nil слайс, nil error;
+  - пустой `data: []` ИЛИ `data: null` → пустой non-nil слайс, nil error (`null`
+    проходит guard `len(data)>0` и обнуляет слайс — прецедент `GetReactions`);
   - OCS 404 → `*client.OCSError{Code:404}`.
-  - Фикстура в корневом `testdata/` (конвенция репо), реального формата. В фикстуру можно
-    добавить участника-гостя (`participantType=4`, пустой `displayName`) — по полям формат
-    идентичен (живая выборка гостей не содержала; значения 4–6 — документация, §3).
+  - Фикстура в корневом `testdata/` (конвенция репо), реального формата — без гостей.
+    Синтетический гость (`participantType=4`, пустой `displayName`) — только отдельной
+    фикстурой с пометкой «synthetic» в имени файла, НЕ строкой внутри основной
+    «реального формата»: формат гостевых полей — assumption (§4), а фикстуры обязаны
+    отражать реальный формат эндпоинта (инвариант CLAUDE.md). При первом живом прогоне
+    комнаты с гостем — сверить фактические поля и заменить синтетику обезличенным
+    реальным ответом.
 - **cli (`internal/cli/handlers_rooms_test.go`):** table-driven, клиент — mock:
   успех (stdout: сортировка роль→имя, fallback имени, тексты ролей, онлайн да/нет),
   `--json` (поля + `sessionIds` не null), пустой список → пустой stdout exit `0`,
   `--name` однозначно/неоднозначно/ноль → `0/3/2` (при 3/2 клиент не звался), OCS 404 →
-  exit `2`, OCS 403 → exit `1` с текстом сервера, неизвестный флаг → exit `1`, лишние
-  позиционные игнорируются, оба пусты (нет `<room>` и `--name`) → exit `1`.
+  exit `2`, OCS 403 → exit `1` с текстом сервера, неизвестный флаг → exit `1`, конфликт
+  positional + `--name` → предупреждение в stderr и комната = positional (поведение
+  `chat show`), лишние позиционные игнорируются, оба пусты (нет `<room>` и `--name`) →
+  exit `1`.
 - **help (`internal/cli/help_test.go`):** детальные/анти-drift проверки покрывают команду
   автоматически после добавления в `cmdSpecs`; тест-инфраструктура дополняется руками:
   - канон `TestCmdSpecs_OrderMatchesHelpOrder`: вставить `"rooms participants"` после
@@ -223,6 +267,12 @@ func (c *TalkClient) GetParticipants(ctx context.Context, token string) ([]Parti
   - канон `TestCmdSpecs_FlagsExactly`: ключ `"rooms participants": {"--name"}`;
   - `buildPositionalArgs`: кейс `"rooms participants"` → `["tok123"]` (иначе handler
     получает пустой позиционный → exit 1, и prong-и анти-drift'а вырождаются).
+- **Run-level каноны (`internal/cli/cli_test.go`):** кейс `{"rooms participants",
+  []string{"rooms", "participants", "tok"}}` в `TestRunRoutesAllStubs`; кейс
+  `{"rooms/participants", []string{"rooms", "participants", "TOK123"},
+  []string{"TOK123"}, ""}` в `TestRunRoutesToCorrectHandler` — новый verb получает
+  покрытие роутинга, а комментарий «все 8 команд» после замены счётчика на 9 остаётся
+  честным над таблицей.
 - **Интеграционный (`internal/client/integration_test.go`, build-тег `integration`,
   read-only — БЕЗ мутационных флагов, по образцу `TestIntegration_GetChat`):**
   token из `ListRooms` (первая комната); `GetParticipants` → ≥1 участника; у каждого
