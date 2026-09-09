@@ -227,7 +227,13 @@ func (c *TalkClient) SearchMessages(ctx context.Context, term string, opts Searc
 		// Маппим entries → MessageResult, нормализуя строковые числовые поля
 		// сервера в числа (спека §12): timestamp → int64, messageId → int.
 		// Некорректное/пустое значение → поле 0, поиск не валится.
+		// From фильтруется и НА КЛИЕНТЕ: живой сервер (2026-09-09) игнорирует
+		// query-параметр person, отдавая entry чужих авторов (см. тест
+		// TestSearchMessages_FromClientSideFilter).
 		for _, e := range data.Entries {
+			if opts.From != "" && e.Attributes.ActorId != opts.From {
+				continue
+			}
 			var mr MessageResult
 			mr.Title = e.Title
 			mr.Subline = e.Subline
