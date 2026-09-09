@@ -842,6 +842,27 @@ func TestRoomsParticipantsHandlerNameResolution(t *testing.T) {
 	}
 }
 
+// TestRoomsParticipantsHandlerNameEqualsForm — форма `--name=Команда` (без
+// пробела) разбирается так же, как `--name Команда` (прецедент — reactions,
+// TestReactionsGetHandlerNameEqualsForm).
+func TestRoomsParticipantsHandlerNameEqualsForm(t *testing.T) {
+	spy := &roomsSpyClient{
+		findResult: []client.Room{
+			{Type: 2, Token: "tok-1", DisplayName: "Команда"},
+		},
+		participantsResult: participantsFixture(),
+	}
+	deps := newRoomsDeps(spy)
+
+	ee := roomsParticipantsHandler(context.Background(), deps, []string{"--name=Команда"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	if len(spy.participantsCalls) != 1 || spy.participantsCalls[0].token != "tok-1" {
+		t.Fatalf("GetParticipants calls: got %+v, want 1 вызов с tok-1", spy.participantsCalls)
+	}
+}
+
 // TestRoomsParticipantsHandlerClientError — OCS 404 → exit 2; OCS 403 →
 // exit 1 с текстом сервера (спека §2, базовый контракт §7).
 func TestRoomsParticipantsHandlerClientError(t *testing.T) {
