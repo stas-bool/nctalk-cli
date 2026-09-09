@@ -1,0 +1,43 @@
+{
+  "ocs": {
+    "meta": {
+      "status": "ok",
+      "statuscode": 200,
+      "message": "OK"
+    },
+    "data": [
+      {
+        "roomToken": "tok-team",
+        "inCall": 0,
+        "lastPing": 1757401100,
+        "sessionIds": [],
+        "participantType": 1,
+        "attendeeId": 101,
+        "actorType": "users",
+        "actorId": "anna.s",
+        "displayName": "Анна Смирнова",
+        "permissions": 251,
+        "attendeePermissions": 0,
+        "attendeePin": "",
+        "phoneNumber": "",
+        "callId": ""
+      },
+      {
+        "roomToken": "tok-team",
+        "inCall": 0,
+        "lastPing": 1757401900,
+        "sessionIds": ["sess-g1"],
+        "participantType": 4,
+        "attendeeId": 104,
+        "actorType": "guests",
+        "actorId": "guest::anon-1",
+        "displayName": "",
+        "permissions": 0,
+        "attendeePermissions": 0,
+        "attendeePin": "",
+        "phoneNumber": "",
+        "callId": ""
+      }
+    ]
+  }
+}

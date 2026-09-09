@@ -1,0 +1,59 @@
+{
+  "ocs": {
+    "meta": {
+      "status": "ok",
+      "statuscode": 200,
+      "message": "OK"
+    },
+    "data": [
+      {
+        "roomToken": "tok-team",
+        "inCall": 0,
+        "lastPing": 1757401100,
+        "sessionIds": [],
+        "participantType": 1,
+        "attendeeId": 101,
+        "actorType": "users",
+        "actorId": "anna.s",
+        "displayName": "Анна Смирнова",
+        "permissions": 251,
+        "attendeePermissions": 0,
+        "attendeePin": "",
+        "phoneNumber": "",
+        "callId": ""
+      },
+      {
+        "roomToken": "tok-team",
+        "inCall": 0,
+        "lastPing": 1757401300,
+        "sessionIds": ["sess-2a", "sess-2b"],
+        "participantType": 2,
+        "attendeeId": 102,
+        "actorType": "users",
+        "actorId": "boris.k",
+        "displayName": "Борис Крылов",
+        "permissions": 0,
+        "attendeePermissions": 0,
+        "attendeePin": "",
+        "phoneNumber": "",
+        "callId": ""
+      },
+      {
+        "roomToken": "tok-team",
+        "inCall": 0,
+        "lastPing": 1757401200,
+        "sessionIds": ["sess-1a"],
+        "participantType": 3,
+        "attendeeId": 103,
+        "actorType": "users",
+        "actorId": "vera.t",
+        "displayName": "Вера Тимофеева",
+        "permissions": 0,
+        "attendeePermissions": 0,
+        "attendeePin": "",
+        "phoneNumber": "",
+        "callId": ""
+      }
+    ]
+  }
+}
