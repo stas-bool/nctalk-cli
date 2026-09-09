@@ -6,8 +6,9 @@
       "message": "OK"
     },
     "data": {
+      "name": "Messages",
       "isPaginated": true,
-      "cursor": "cursor-page2",
+      "cursor": 2,
       "entries": [
         {
           "title": "Alice",
@@ -16,7 +17,7 @@
           "iconSource": "",
           "attributes": {
             "conversation": "tok-team",
-            "messageId": 100,
+            "messageId": "100",
             "actorType": "users",
             "actorId": "alice",
             "timestamp": "1752710400"
@@ -29,7 +30,7 @@
           "iconSource": "",
           "attributes": {
             "conversation": "tok-team",
-            "messageId": 101,
+            "messageId": "101",
             "actorType": "users",
             "actorId": "bob",
             "timestamp": "1752710401"

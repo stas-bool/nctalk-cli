@@ -6,8 +6,8 @@
       "message": "OK"
     },
     "data": {
+      "name": "Messages",
       "isPaginated": false,
-      "cursor": "",
       "entries": [
         {
           "title": "Carol",
@@ -16,7 +16,7 @@
           "iconSource": "",
           "attributes": {
             "conversation": "tok-team",
-            "messageId": 200,
+            "messageId": "200",
             "actorType": "users",
             "actorId": "carol",
             "timestamp": "1752710500"

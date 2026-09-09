@@ -105,8 +105,8 @@ const maxSearchMessagesPages = 5
 //
 // Attributes — вложенный объект, поля маппятся из attributes:
 //   - Conversation ← conversation (это token);
-//   - MessageId    ← messageId (берётся НАПРЯМУЮ из attributes, без разбора
-//     resourceUrl);
+//   - MessageId    ← messageId (в JSON СТРОКА — нормализуется в int, как
+//     timestamp; resourceUrl не разбираем);
 //   - ActorType    ← actorType;
 //   - ActorId      ← actorId;
 //   - Timestamp    ← timestamp, НО в JSON это СТРОКА — нормализуется в int64
@@ -148,7 +148,7 @@ type searchMessagesEntry struct {
 	ResourceUrl string `json:"resourceUrl"`
 	Attributes  struct {
 		Conversation string `json:"conversation"`
-		MessageId    int    `json:"messageId"`
+		MessageId    string `json:"messageId"` // СТРОКА (живой сервер, 2026-09-09) — парсим в int в SearchMessages
 		ActorType    string `json:"actorType"`
 		ActorId      string `json:"actorId"`
 		Timestamp    string `json:"timestamp"` // СТРОКА — парсим в int64 в SearchMessages
@@ -158,8 +158,10 @@ type searchMessagesEntry struct {
 // searchMessagesData — тип-посредник для распаковки ocs.data ответа
 // pathSearchMessages. Как и у talk-conversations, data — ОБЪЕКТ с полем
 // entries[], плюс поля пагинации cursor/isPaginated (спека §6).
+// Cursor — ЧИСЛО на живом сервере (2026-09-09): номер следующей страницы;
+// 0/отсутствие = конца (вместе с isPaginated=false).
 type searchMessagesData struct {
-	Cursor      string                `json:"cursor"`
+	Cursor      int64                 `json:"cursor"`
 	IsPaginated bool                  `json:"isPaginated"`
 	Entries     []searchMessagesEntry `json:"entries"`
 }
@@ -173,9 +175,10 @@ type searchMessagesData struct {
 //   - Limit нормализуется: <1 → 10, >25 → 25 (спека §6 search);
 //   - From (actorId) маппится в person= ; пусто → параметр не передаётся;
 //   - пагинация: при All=false (дефолт) — ОДНА страница; при All=true перебираем
-//     cursor до isPaginated=false или пустого cursor, cap maxSearchMessagesPages=5
-//     (спека §6);
-//   - attributes.timestamp приходит СТРОКОЙ — нормализуется в int64 (спека §12);
+//     cursor (ЧИСЛО на живом сервере, 2026-09-09) до isPaginated=false или
+//     cursor=0, cap maxSearchMessagesPages=5 (спека §6);
+//   - attributes.timestamp и attributes.messageId приходят СТРОКАМИ —
+//     нормализуются в int64/int (живой сервер 2026-09-09, спека §12);
 //     при некорректном значении поле остаётся 0 (поиск не валится).
 //
 // Пустые entries → ненулевой пустой срез, nil error. Транспорт — единый
@@ -202,7 +205,7 @@ func (c *TalkClient) SearchMessages(ctx context.Context, term string, opts Searc
 	}
 
 	out := make([]MessageResult, 0)
-	cursor := ""
+	var cursor int64
 	for page := 0; page < maxPages; page++ {
 		// Собираем query: term и limit — всегда; person — при непустом From;
 		// cursor — со второй итерации (после получения cursor из ответа).
@@ -212,8 +215,8 @@ func (c *TalkClient) SearchMessages(ctx context.Context, term string, opts Searc
 		if opts.From != "" {
 			q.Set("person", opts.From)
 		}
-		if cursor != "" {
-			q.Set("cursor", cursor)
+		if cursor != 0 {
+			q.Set("cursor", strconv.FormatInt(cursor, 10))
 		}
 
 		var data searchMessagesData
@@ -221,15 +224,18 @@ func (c *TalkClient) SearchMessages(ctx context.Context, term string, opts Searc
 			return nil, err
 		}
 
-		// Маппим entries → MessageResult, нормализуя timestamp-строку в int64
-		// (спека §12). Некорректный/пустой timestamp → поле 0, поиск не валится.
+		// Маппим entries → MessageResult, нормализуя строковые числовые поля
+		// сервера в числа (спека §12): timestamp → int64, messageId → int.
+		// Некорректное/пустое значение → поле 0, поиск не валится.
 		for _, e := range data.Entries {
 			var mr MessageResult
 			mr.Title = e.Title
 			mr.Subline = e.Subline
 			mr.ResourceUrl = e.ResourceUrl
 			mr.Attributes.Conversation = e.Attributes.Conversation
-			mr.Attributes.MessageId = e.Attributes.MessageId
+			if id, err := strconv.Atoi(e.Attributes.MessageId); err == nil {
+				mr.Attributes.MessageId = id
+			}
 			mr.Attributes.ActorType = e.Attributes.ActorType
 			mr.Attributes.ActorId = e.Attributes.ActorId
 			if e.Attributes.Timestamp != "" {
@@ -241,8 +247,8 @@ func (c *TalkClient) SearchMessages(ctx context.Context, term string, opts Searc
 		}
 
 		// Стоп пагинации (спека §6): сервер сообщил конец (isPaginated=false)
-		// или не вернул cursor. Иначе — следующая итерация с новым cursor.
-		if !data.IsPaginated || data.Cursor == "" {
+		// или не вернул cursor (0/отсутствие). Иначе — следующая итерация.
+		if !data.IsPaginated || data.Cursor == 0 {
 			break
 		}
 		cursor = data.Cursor
