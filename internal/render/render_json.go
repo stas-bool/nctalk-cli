@@ -61,3 +61,10 @@ func NewMessageIDJSON(w io.Writer, id int) error {
 		Id int `json:"id"`
 	}{Id: id})
 }
+
+// ParticipantsJSON выводит []Participant как JSON-массив (спека-дельта
+// 2026-09-09 §2, --json). Сырой ответ API не проксируется — каноническая
+// модель, json-теги структур client определяют имена полей.
+func ParticipantsJSON(w io.Writer, ps []client.Participant) error {
+	return writeJSON(w, ps)
+}

@@ -55,6 +55,9 @@ func (m *reactionsSpyClient) GetReactions(_ context.Context, token string, messa
 	m.gotMessageId = messageId
 	return m.reactions, m.reactionsErr
 }
+func (m *reactionsSpyClient) GetParticipants(_ context.Context, _ string) ([]client.Participant, error) {
+	return nil, errMock
+}
 func (m *reactionsSpyClient) SearchMessages(_ context.Context, _ string, _ client.SearchMessagesOpts) ([]client.MessageResult, error) {
 	return nil, errMock
 }
