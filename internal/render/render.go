@@ -187,3 +187,59 @@ func Candidates(w io.Writer, rooms []client.Room) error {
 	}
 	return tw.Flush()
 }
+
+// participantRoleNames — тексты ролей по participantType (спека-дельта
+// 2026-09-09 §2–3: 1–6; значения 4–6 — из официальной документации Talk,
+// живой выборкой подтверждены только 1–3). Маппинг живёт в render — это
+// представление, не модель.
+var participantRoleNames = map[int]string{
+	1: "владелец",
+	2: "модератор",
+	3: "участник",
+	4: "гость",
+	5: "по ссылке",
+	6: "гость-модератор",
+}
+
+// participantRole — текст роли; неизвестное число (format-drift: новые
+// значения сервера) печатается самим числом, чтобы не ломать вывод.
+func participantRole(t int) string {
+	if s, ok := participantRoleNames[t]; ok {
+		return s
+	}
+	return strconv.Itoa(t)
+}
+
+// participantName — итоговое имя колонки ИМЯ: displayName, при пустом
+// (гость без имени) — actorId (тот же fallback, что в reactions get).
+func participantName(p client.Participant) string {
+	if p.DisplayName != "" {
+		return p.DisplayName
+	}
+	return p.ActorId
+}
+
+// ParticipantsTable выводит участников табличным форматом (спека-дельта
+// 2026-09-09 §2):
+//
+//	ИМЯ | РОЛЬ | ОНЛАЙН | ID
+//
+// Сортировку делает вызывающий (cli-слой) — здесь только представление.
+// ОНЛАЙН: непустой sessionIds = есть живая сессия.
+func ParticipantsTable(w io.Writer, ps []client.Participant) error {
+	tw := newTabwriter(w)
+	if _, err := fmt.Fprintln(tw, "ИМЯ\tРОЛЬ\tОНЛАЙН\tID"); err != nil {
+		return err
+	}
+	for _, p := range ps {
+		online := "нет"
+		if len(p.SessionIds) > 0 {
+			online = "да"
+		}
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
+			participantName(p), participantRole(p.ParticipantType), online, p.ActorId); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}

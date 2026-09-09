@@ -40,6 +40,9 @@ func (m *mockTalkClient) EditMessage(_ context.Context, _ string, _ int, _ clien
 func (m *mockTalkClient) GetReactions(_ context.Context, _ string, _ int) (map[string][]client.ReactionActor, error) {
 	return nil, errMock
 }
+func (m *mockTalkClient) GetParticipants(_ context.Context, _ string) ([]client.Participant, error) {
+	return nil, errMock
+}
 func (m *mockTalkClient) SearchMessages(_ context.Context, _ string, _ client.SearchMessagesOpts) ([]client.MessageResult, error) {
 	return nil, errMock
 }

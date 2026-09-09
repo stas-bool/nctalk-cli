@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,10 @@ type roomsSpyClient struct {
 	findErr      error
 	searchResult []client.ConversationResult
 	searchErr    error
+
+	participantsCalls  []participantsCall
+	participantsResult []client.Participant
+	participantsErr    error
 }
 
 type roomsListCall struct {
@@ -50,6 +55,11 @@ type roomsSearchCall struct {
 	limit int
 }
 
+// Spy-поля для rooms participants (спека-дельта 2026-09-09 §6):
+// GetParticipants записывает token каждого вызова и возвращает
+// преднастроенный результат/ошибку.
+type participantsCall struct{ token string }
+
 func (m *roomsSpyClient) ListRooms(_ context.Context, opts client.ListRoomsOpts) ([]client.Room, error) {
 	m.listCalls = append(m.listCalls, roomsListCall{opts: opts})
 	return m.listResult, m.listErr
@@ -63,6 +73,11 @@ func (m *roomsSpyClient) FindRooms(_ context.Context, query, actorId string) ([]
 func (m *roomsSpyClient) SearchRooms(_ context.Context, term string, limit int) ([]client.ConversationResult, error) {
 	m.searchCalls = append(m.searchCalls, roomsSearchCall{term: term, limit: limit})
 	return m.searchResult, m.searchErr
+}
+
+func (m *roomsSpyClient) GetParticipants(_ context.Context, token string) ([]client.Participant, error) {
+	m.participantsCalls = append(m.participantsCalls, participantsCall{token: token})
+	return m.participantsResult, m.participantsErr
 }
 
 // Неиспользуемые в rooms-тестах методы — возвращают errMock (маркер).
@@ -628,5 +643,300 @@ func TestRoomsSearchViaRun(t *testing.T) {
 	}
 	if got := spy.searchCalls[0]; got.term != "xy" || got.limit != 0 {
 		t.Fatalf("SearchRooms args: got (term=%q limit=%d), want (xy, 0)", got.term, got.limit)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// rooms participants (спека-дельта 2026-09-09)
+// -----------------------------------------------------------------------------
+
+// participantsFixture — перемешанный серверный порядок: покрывает сортировку
+// роль→имя, fallback имени (пустой displayName → actorId), все тексты ролей
+// включая неизвестное число (9), онлайн да/нет, гостя с пустым именем.
+func participantsFixture() []client.Participant {
+	return []client.Participant{
+		{ActorType: "users", ActorId: "vera.t", DisplayName: "Вера Тимофеева", ParticipantType: 3, SessionIds: []string{"sess-1"}, LastPing: 1757401200},
+		{ActorType: "users", ActorId: "anna.s", DisplayName: "Анна Смирнова", ParticipantType: 1, SessionIds: []string{}, LastPing: 1757401100},
+		{ActorType: "users", ActorId: "boris.k", DisplayName: "Борис Крылов", ParticipantType: 2, SessionIds: []string{"sess-2", "sess-3"}, LastPing: 1757401300},
+		{ActorType: "guests", ActorId: "guest::anon-9", DisplayName: "", ParticipantType: 3, SessionIds: nil},
+		{ActorType: "guests", ActorId: "guest::anon-1", DisplayName: "", ParticipantType: 4, SessionIds: nil},
+		{ActorType: "users", ActorId: "eva.l", DisplayName: "Ева Ссылкина", ParticipantType: 6, SessionIds: nil},
+		{ActorType: "users", ActorId: "zed.u", DisplayName: "Зиновий", ParticipantType: 9, SessionIds: nil},
+	}
+}
+
+// TestRoomsParticipantsHandlerText — текстовый вывод: заголовок капсом,
+// сортировка роль→имя (fallback имени ДО сортировки — латиница раньше
+// кириллицы: guest::anon-9 перед Верой в одной роли), тексты ролей
+// 1–6 и неизвестного числа, онлайн да/нет.
+func TestRoomsParticipantsHandlerText(t *testing.T) {
+	spy := &roomsSpyClient{participantsResult: participantsFixture()}
+	deps := newRoomsDeps(spy)
+
+	ee := roomsParticipantsHandler(context.Background(), deps, []string{"tok-abc"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	if len(spy.participantsCalls) != 1 || spy.participantsCalls[0].token != "tok-abc" {
+		t.Fatalf("GetParticipants calls: got %+v, want 1 вызов с tok-abc", spy.participantsCalls)
+	}
+
+	out := deps.Stdout.(*bytes.Buffer).String()
+	lines := strings.Split(out, "\n")
+	if len(lines) != 9 { // заголовок + 7 строк + хвост после финального \n
+		t.Fatalf("строк вывода: got %d, want 9\nвывод=\n%s", len(lines), out)
+	}
+	// Заголовок капсом, 4 колонки.
+	for _, h := range []string{"ИМЯ", "РОЛЬ", "ОНЛАЙН", "ID"} {
+		if !strings.Contains(lines[0], h) {
+			t.Errorf("заголовок не содержит %q\nвывод=\n%s", h, out)
+		}
+	}
+	// Ожидаемый порядок строк (роль asc → итоговое имя case-insensitive asc):
+	// Анна(1) → Борис(2) → guest::anon-9(3, латиница) → Вера(3) →
+	// guest::anon-1(4, гость без имени) → Ева(6) → Зиновий(9 → печатается «9»).
+	wantRows := []struct{ name, role, online, id string }{
+		{"Анна Смирнова", "владелец", "нет", "anna.s"},
+		{"Борис Крылов", "модератор", "да", "boris.k"},
+		{"guest::anon-9", "участник", "нет", "guest::anon-9"},
+		{"Вера Тимофеева", "участник", "да", "vera.t"},
+		{"guest::anon-1", "гость", "нет", "guest::anon-1"},
+		{"Ева Ссылкина", "гость-модератор", "нет", "eva.l"},
+		{"Зиновий", "9", "нет", "zed.u"},
+	}
+	for i, w := range wantRows {
+		line := lines[i+1]
+		for _, part := range []string{w.name, w.role, w.online, w.id} {
+			if !strings.Contains(line, part) {
+				t.Errorf("строка %d: не содержит %q\nстрока=%q\nвывод=\n%s", i+1, part, line, out)
+			}
+		}
+	}
+}
+
+// TestRoomsParticipantsHandlerRole5 — значение participantType=5 из
+// документации (спека §3): текст «по ссылке».
+func TestRoomsParticipantsHandlerRole5(t *testing.T) {
+	spy := &roomsSpyClient{participantsResult: []client.Participant{
+		{ActorType: "users", ActorId: "link.u", DisplayName: "Линк", ParticipantType: 5, SessionIds: nil},
+	}}
+	deps := newRoomsDeps(spy)
+
+	ee := roomsParticipantsHandler(context.Background(), deps, []string{"tok"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	if out := deps.Stdout.(*bytes.Buffer).String(); !strings.Contains(out, "по ссылке") {
+		t.Fatalf("stdout: должен содержать роль \"по ссылке\"; got %q", out)
+	}
+}
+
+// TestRoomsParticipantsHandlerJSON — --json: отсортированный массив
+// канонических Participant; sessionIds печатается как [], не null.
+func TestRoomsParticipantsHandlerJSON(t *testing.T) {
+	spy := &roomsSpyClient{participantsResult: []client.Participant{
+		{ActorType: "users", ActorId: "u-b", DisplayName: "Борис", ParticipantType: 2, SessionIds: []string{}},
+		{ActorType: "users", ActorId: "u-a", DisplayName: "Анна", ParticipantType: 1, SessionIds: []string{"s1"}},
+	}}
+	deps := newRoomsDeps(spy)
+
+	ee := roomsParticipantsHandler(context.Background(), deps, []string{"tok"}, true)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	raw := deps.Stdout.(*bytes.Buffer).String()
+	var got []client.Participant
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("stdout не валидный JSON: %v; raw=%s", err, raw)
+	}
+	// Сортировка применена и к --json: владелец (1) первым.
+	if len(got) != 2 || got[0].ActorId != "u-a" || got[0].ParticipantType != 1 {
+		t.Fatalf("JSON порядок: got %+v, want u-a (PT=1) первым", got)
+	}
+	// sessionIds офлайн-участника — [] (не null).
+	if !strings.Contains(raw, `"sessionIds": []`) {
+		t.Errorf("JSON: ожидается \"sessionIds\": [] (не null); raw=%s", raw)
+	}
+	if strings.Contains(raw, `"sessionIds": null`) {
+		t.Errorf("JSON: sessionIds не должен быть null; raw=%s", raw)
+	}
+}
+
+// TestRoomsParticipantsHandlerEmpty — пустой список → пустой stdout, exit 0
+// (поисковая семантика rooms list; одинаково для текста и --json).
+func TestRoomsParticipantsHandlerEmpty(t *testing.T) {
+	for _, jsonOut := range []bool{false, true} {
+		spy := &roomsSpyClient{participantsResult: []client.Participant{}}
+		deps := newRoomsDeps(spy)
+
+		ee := roomsParticipantsHandler(context.Background(), deps, []string{"tok"}, jsonOut)
+		if ee.Code != ExitOK {
+			t.Fatalf("jsonOut=%v: code: got %d, want %d", jsonOut, ee.Code, ExitOK)
+		}
+		if buf := deps.Stdout.(*bytes.Buffer); buf.Len() != 0 {
+			t.Fatalf("jsonOut=%v: stdout: got %q, want пусто", jsonOut, buf.String())
+		}
+	}
+}
+
+// TestRoomsParticipantsHandlerNameResolution — --name: 1 совпадение →
+// exit 0 и GetParticipants с резолвнутым token; >1 → exit 3 (кандидаты в
+// stderr, GetParticipants не звался); 0 → exit 2 (тоже без вызова).
+func TestRoomsParticipantsHandlerNameResolution(t *testing.T) {
+	cases := []struct {
+		name       string
+		findResult []client.Room
+		wantExit   int
+		wantToken  string // ожидаемый token GetParticipants ("" — вызова не было)
+		wantCalls  int
+	}{
+		{
+			name:       "--name 1 совпадение → 0",
+			findResult: []client.Room{{Type: 2, Token: "tok-1", DisplayName: "Команда"}},
+			wantExit:   ExitOK,
+			wantToken:  "tok-1",
+			wantCalls:  1,
+		},
+		{
+			name: "--name >1 совпадений → 3, GetParticipants не звался",
+			findResult: []client.Room{
+				{Type: 2, Token: "tokA", DisplayName: "Команда X"},
+				{Type: 2, Token: "tokB", DisplayName: "Команда Y"},
+			},
+			wantExit:  ExitAmbiguous,
+			wantCalls: 0,
+		},
+		{
+			name:       "--name 0 совпадений → 2, GetParticipants не звался",
+			findResult: []client.Room{},
+			wantExit:   ExitNotFound,
+			wantCalls:  0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := &roomsSpyClient{findResult: tc.findResult, participantsResult: participantsFixture()}
+			deps := newRoomsDeps(spy)
+
+			ee := roomsParticipantsHandler(context.Background(), deps, []string{"--name", "Команда"}, false)
+			if ee.Code != tc.wantExit {
+				t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, tc.wantExit, ee.Err)
+			}
+			if len(spy.participantsCalls) != tc.wantCalls {
+				t.Fatalf("GetParticipants вызовов: got %d, want %d", len(spy.participantsCalls), tc.wantCalls)
+			}
+			if tc.wantCalls == 1 && spy.participantsCalls[0].token != tc.wantToken {
+				t.Fatalf("GetParticipants token: got %q, want %q", spy.participantsCalls[0].token, tc.wantToken)
+			}
+		})
+	}
+	// При неоднозначности кандидаты печатаются в stderr (render.Candidates).
+	spy := &roomsSpyClient{findResult: []client.Room{
+		{Type: 2, Token: "tokA", DisplayName: "Команда X"},
+		{Type: 2, Token: "tokB", DisplayName: "Команда Y"},
+	}}
+	deps := newRoomsDeps(spy)
+	roomsParticipantsHandler(context.Background(), deps, []string{"--name", "Команда"}, false)
+	if stderr := deps.Stderr.(*bytes.Buffer).String(); !strings.Contains(stderr, "tokA") {
+		t.Errorf("stderr при exit 3: должен содержать кандидата tokA; got %q", stderr)
+	}
+}
+
+// TestRoomsParticipantsHandlerClientError — OCS 404 → exit 2; OCS 403 →
+// exit 1 с текстом сервера (спека §2, базовый контракт §7).
+func TestRoomsParticipantsHandlerClientError(t *testing.T) {
+	cases := []struct {
+		name     string
+		err      error
+		wantExit int
+		wantText string
+	}{
+		{"OCS 404 → 2", &client.OCSError{Code: http.StatusNotFound, Message: "room not found"}, ExitNotFound, "room not found"},
+		{"OCS 403 → 1 с текстом сервера", &client.OCSError{Code: http.StatusForbidden, Message: "нет доступа к комнате"}, ExitGeneric, "нет доступа к комнате"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := &roomsSpyClient{participantsErr: tc.err}
+			deps := newRoomsDeps(spy)
+
+			ee := roomsParticipantsHandler(context.Background(), deps, []string{"tok"}, false)
+			if ee.Code != tc.wantExit {
+				t.Fatalf("code: got %d, want %d", ee.Code, tc.wantExit)
+			}
+			if ee.Err == nil || !strings.Contains(ee.Err.Error(), tc.wantText) {
+				t.Fatalf("err: got %v, want содержит %q", ee.Err, tc.wantText)
+			}
+		})
+	}
+}
+
+// TestRoomsParticipantsHandlerUnknownFlag — неизвестный --flag → exit 1,
+// клиент не звался.
+func TestRoomsParticipantsHandlerUnknownFlag(t *testing.T) {
+	spy := &roomsSpyClient{participantsResult: participantsFixture()}
+	deps := newRoomsDeps(spy)
+
+	ee := roomsParticipantsHandler(context.Background(), deps, []string{"tok", "--no-such"}, false)
+	if ee.Code != ExitGeneric {
+		t.Fatalf("code: got %d, want %d", ee.Code, ExitGeneric)
+	}
+	if len(spy.participantsCalls) != 0 {
+		t.Fatalf("GetParticipants не должен вызываться; got %d calls", len(spy.participantsCalls))
+	}
+}
+
+// TestRoomsParticipantsHandlerConflict — positional + --name: приоритет у
+// positional, --name игнорируется с предупреждением в stderr (поведение
+// chat show через ResolveRoom), FindRooms не звался.
+func TestRoomsParticipantsHandlerConflict(t *testing.T) {
+	spy := &roomsSpyClient{participantsResult: participantsFixture()}
+	deps := newRoomsDeps(spy)
+
+	ee := roomsParticipantsHandler(context.Background(), deps, []string{"tok-pos", "--name", "Команда"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	if len(spy.participantsCalls) != 1 || spy.participantsCalls[0].token != "tok-pos" {
+		t.Fatalf("GetParticipants: got %+v, want 1 вызов с tok-pos (приоритет positional)", spy.participantsCalls)
+	}
+	if len(spy.findCalls) != 0 {
+		t.Fatalf("FindRooms не должен вызываться при positional; got %d calls", len(spy.findCalls))
+	}
+	if stderr := deps.Stderr.(*bytes.Buffer).String(); !strings.Contains(stderr, "приоритет у token") {
+		t.Errorf("stderr: должен содержать предупреждение о конфликте; got %q", stderr)
+	}
+}
+
+// TestRoomsParticipantsHandlerExtraPositionals — лишние позиционные (второй
+// и далее) игнорируются — единообразно с остальными командами.
+func TestRoomsParticipantsHandlerExtraPositionals(t *testing.T) {
+	spy := &roomsSpyClient{participantsResult: participantsFixture()}
+	deps := newRoomsDeps(spy)
+
+	ee := roomsParticipantsHandler(context.Background(), deps, []string{"tok-main", "extra", "more"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	if len(spy.participantsCalls) != 1 || spy.participantsCalls[0].token != "tok-main" {
+		t.Fatalf("GetParticipants: got %+v, want 1 вызов с tok-main", spy.participantsCalls)
+	}
+}
+
+// TestRoomsParticipantsHandlerEmptyInput — нет ни <room>, ни --name →
+// exit 1 «укажите token позиционно или --name» (ResolveRoom StatusEmptyInput),
+// без единого вызова клиента.
+func TestRoomsParticipantsHandlerEmptyInput(t *testing.T) {
+	spy := &roomsSpyClient{}
+	deps := newRoomsDeps(spy)
+
+	ee := roomsParticipantsHandler(context.Background(), deps, nil, false)
+	if ee.Code != ExitGeneric {
+		t.Fatalf("code: got %d, want %d", ee.Code, ExitGeneric)
+	}
+	if ee.Err == nil || !strings.Contains(ee.Err.Error(), "укажите token позиционно или --name") {
+		t.Fatalf("err: got %v, want «укажите token позиционно или --name»", ee.Err)
+	}
+	if len(spy.findCalls) != 0 || len(spy.participantsCalls) != 0 {
+		t.Fatalf("клиент не должен зваться: find=%d participants=%d", len(spy.findCalls), len(spy.participantsCalls))
 	}
 }
