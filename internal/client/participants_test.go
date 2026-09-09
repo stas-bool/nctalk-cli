@@ -93,7 +93,9 @@ func TestGetParticipants(t *testing.T) {
 }
 
 // TestGetParticipants_PathEscape — token с пробелом эскейпится в path-сегменте
-// (url.PathEscape): запрос уходит как /room/tok%20team/participants.
+// при сериализации URL в transport.DoOCS (клиент НЕ делает предварительный
+// url.PathEscape — тот дал бы двойной эскейп): запрос уходит как
+// /room/tok%20team/participants.
 func TestGetParticipants_PathEscape(t *testing.T) {
 	var gotEscaped string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
