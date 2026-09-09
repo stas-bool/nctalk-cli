@@ -40,6 +40,9 @@ func (m *mockTalkClient) EditMessage(_ context.Context, _ string, _ int, _ clien
 func (m *mockTalkClient) GetReactions(_ context.Context, _ string, _ int) (map[string][]client.ReactionActor, error) {
 	return nil, errMock
 }
+func (m *mockTalkClient) GetParticipants(_ context.Context, _ string) ([]client.Participant, error) {
+	return nil, errMock
+}
 func (m *mockTalkClient) SearchMessages(_ context.Context, _ string, _ client.SearchMessagesOpts) ([]client.MessageResult, error) {
 	return nil, errMock
 }
@@ -58,7 +61,7 @@ func newTestDeps() Deps {
 	}
 }
 
-// TestRunRoutesAllStubs — все 8 команд доходят до своих stub-handler'ов и
+// TestRunRoutesAllStubs — все 9 команд доходят до своих stub-handler'ов и
 // возвращают ExitGeneric (1). Проверяет базовую маршрутизацию по таблице routes
 // и special-case search.
 func TestRunRoutesAllStubs(t *testing.T) {
@@ -69,6 +72,7 @@ func TestRunRoutesAllStubs(t *testing.T) {
 		{"rooms list", []string{"rooms", "list"}},
 		{"rooms find", []string{"rooms", "find", "foo"}},
 		{"rooms search", []string{"rooms", "search", "foo"}},
+		{"rooms participants", []string{"rooms", "participants", "tok"}},
 		{"chat show", []string{"chat", "show", "tok"}},
 		{"chat send", []string{"chat", "send", "tok", "--text", "hi"}},
 		{"chat edit", []string{"chat", "edit", "tok", "1", "--text", "hi"}},
@@ -152,6 +156,7 @@ func TestRunRoutesToCorrectHandler(t *testing.T) {
 		{"rooms/list", []string{"rooms", "list"}, []string{}, ""},
 		{"rooms/find", []string{"rooms", "find", "foo"}, []string{"foo"}, ""},
 		{"rooms/search", []string{"rooms", "search", "bar"}, []string{"bar"}, ""},
+		{"rooms/participants", []string{"rooms", "participants", "TOK123"}, []string{"TOK123"}, ""},
 		{"chat/show", []string{"chat", "show", "TOK123"}, []string{"TOK123"}, ""},
 		{"chat/send", []string{"chat", "send", "TOK123", "--text", "hi"}, []string{"TOK123", "--text", "hi"}, ""},
 		{"chat/edit", []string{"chat", "edit", "TOK123", "42"}, []string{"TOK123", "42"}, ""},

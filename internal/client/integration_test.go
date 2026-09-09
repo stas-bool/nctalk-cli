@@ -183,9 +183,9 @@ func TestIntegration_SearchMessages(t *testing.T) {
 }
 
 // TestIntegration_GetReactions проверяет reactions-эндпоинт на реальном
-// сообщении (спека §6 `reactions get`, §12). Берём первое сообщение с Id > 0 из
-// GetChat — гарантированно существующее. Если у него нет реакций (пустая map),
-// содержимое не проверяем — это нормальный сценарий «реакций нет».
+// сообщении (спека §6 `reactions get`, §12). Берём первое comment-сообщение с
+// Id > 0 из GetChat. Если у него нет реакций (пустая map), содержимое не
+// проверяем — это нормальный сценарий «реакций нет».
 func TestIntegration_GetReactions(t *testing.T) {
 	c := integrationClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
@@ -205,17 +205,19 @@ func TestIntegration_GetReactions(t *testing.T) {
 		t.Fatalf("GetChat: %v", err)
 	}
 
-	// Ищем сообщение с Id > 0 — у системных сообщений Id может быть 0/маленьким,
-	// нам нужна валидная цель для GET /reaction/{token}/{messageId}.
+	// Ищем comment-сообщение с Id > 0. Только comment: сервер отвечает 404
+	// на GET /reaction/{token}/{messageId} для system-сообщений (найдено живым
+	// прогоном 2026-09-09: последнее сообщение комнаты оказалось system — тест
+	// падал, хотя фича цела).
 	var msgId int
 	for _, m := range msgs {
-		if m.Id > 0 {
+		if m.Id > 0 && m.MessageType == "comment" {
 			msgId = m.Id
 			break
 		}
 	}
 	if msgId == 0 {
-		t.Skip("в выбранной комнате нет сообщений с Id > 0 — пропуск GetReactions")
+		t.Skip("в выбранной комнате нет comment-сообщений с Id > 0 — пропуск GetReactions")
 	}
 	t.Logf("выбрано сообщение id=%d в token=%s", msgId, token)
 
@@ -240,6 +242,58 @@ func TestIntegration_GetReactions(t *testing.T) {
 		}
 	}
 	t.Logf("у сообщения %d реакций: %d типов", msgId, len(reactions))
+}
+
+// TestIntegration_GetParticipants проверяет participants-эндпоинт (спека-
+// дельта 2026-09-09 §3, §6). Read-only GET, мутационных флагов НЕ требует —
+// как TestIntegration_GetChat. Берёт token первой комнаты из ListRooms;
+// ожидания: >=1 участник (сам запрашивающий), у каждого непустые
+// actorId/actorType, хотя бы один participantType=1 (владелец — инвариант
+// комнаты). Логи — обезличенные первые строки для диагностики.
+func TestIntegration_GetParticipants(t *testing.T) {
+	c := integrationClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
+	defer cancel()
+
+	rooms, err := c.ListRooms(ctx, ListRoomsOpts{})
+	if err != nil {
+		t.Fatalf("ListRooms: %v", err)
+	}
+	if len(rooms) == 0 {
+		t.Skip("нет комнат — пропуск GetParticipants")
+	}
+	token := rooms[0].Token
+	t.Logf("выбрана комната token=%s", token)
+
+	ps, err := c.GetParticipants(ctx, token)
+	if err != nil {
+		t.Fatalf("GetParticipants(%s): %v", token, err)
+	}
+	if len(ps) < 1 {
+		t.Fatalf("GetParticipants: 0 участников — ожидается >=1 (сам запрашивающий)")
+	}
+	t.Logf("получено участников: %d", len(ps))
+
+	hasOwner := false
+	for i, p := range ps {
+		if p.ActorId == "" {
+			t.Errorf("participant[%d]: ActorId пуст", i)
+		}
+		if p.ActorType == "" {
+			t.Errorf("participant[%d]: ActorType пуст", i)
+		}
+		if p.ParticipantType == 1 {
+			hasOwner = true
+		}
+		// Первые строки — диагностика (обезличенно: без лишних деталей).
+		if i < 3 {
+			t.Logf("participant[%d]: actorType=%s actorId=%s displayName=%q participantType=%d online=%v",
+				i, p.ActorType, p.ActorId, p.DisplayName, p.ParticipantType, len(p.SessionIds) > 0)
+		}
+	}
+	if !hasOwner {
+		t.Errorf("ни одного участника с participantType=1 (владелец) — инвариант комнаты нарушен")
+	}
 }
 
 // TestIntegration_SendMessage — ЕДИНСТВЕННЫЙ мутационный сценарий (спека §12

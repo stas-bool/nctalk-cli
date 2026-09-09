@@ -13,7 +13,7 @@ import (
 	"github.com/stas-bool/nctalk-cli/internal/client"
 )
 
-// TalkClient — минимальный интерфейс, покрывающий 8 методов реального
+// TalkClient — минимальный интерфейс, покрывающий 9 методов реального
 // *client.TalkClient. Нужен для mockability: в production в Deps.Client
 // кладётся *client.TalkClient, в тестах — заглушка.
 type TalkClient interface {
@@ -24,6 +24,7 @@ type TalkClient interface {
 	SendMessage(ctx context.Context, token string, opts client.SendMessageOpts) (int, error)
 	EditMessage(ctx context.Context, token string, messageId int, opts client.EditMessageOpts) (int, error)
 	GetReactions(ctx context.Context, token string, messageId int) (map[string][]client.ReactionActor, error)
+	GetParticipants(ctx context.Context, token string) ([]client.Participant, error)
 	SearchMessages(ctx context.Context, term string, opts client.SearchMessagesOpts) ([]client.MessageResult, error)
 }
 
@@ -62,9 +63,10 @@ type handlerFn func(ctx context.Context, deps Deps, args []string, jsonOut bool)
 // подменять отдельные handler-ы на шпионов и проверять роутинг.
 var routes = map[string]map[string]handlerFn{
 	"rooms": {
-		"list":   roomsListHandler,
-		"find":   roomsFindHandler,
-		"search": roomsSearchHandler,
+		"list":         roomsListHandler,
+		"find":         roomsFindHandler,
+		"search":       roomsSearchHandler,
+		"participants": roomsParticipantsHandler,
 	},
 	"chat": {
 		"show": chatShowHandler,
@@ -118,7 +120,7 @@ func Run(args []string, deps Deps) int {
 
 	// rooms/chat/reactions — двухуровневый разбор: args[0]=resource, args[1]=verb.
 	if len(rest) == 0 {
-		fmt.Fprintf(deps.Stderr, "nctalk %s: ожидается verb (list/find/search/show/send/edit/get)\n", resource)
+		fmt.Fprintf(deps.Stderr, "nctalk %s: ожидается verb (list/find/search/participants/show/send/edit/get)\n", resource)
 		return ExitGeneric
 	}
 

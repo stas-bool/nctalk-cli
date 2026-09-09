@@ -34,7 +34,7 @@ type cmdSpec struct {
 	Examples    []string
 }
 
-// cmdSpecs — единый источник правды: 8 команд базового CLI.
+// cmdSpecs — единый источник правды: 9 команд базового CLI.
 // Порядок соответствует общему help (спека §3). Флаги — строго по handler-ам
 // (handlers_rooms.go, handlers_chat.go, handlers_reactions.go, handlers_search.go);
 // --name включён только в тех командах, где handler его парсит.
@@ -75,6 +75,18 @@ var cmdSpecs = []cmdSpec{
 		Flags:       nil, // без флагов; handler отвергает любое --* (limit фиксируется в 0)
 		Examples: []string{
 			"nctalk rooms search foo",
+		},
+	},
+	{
+		Path:        []string{"rooms", "participants"},
+		Short:       "участники комнаты",
+		UsageExtras: "<room>",
+		Flags: []flagSpec{
+			{Name: "--name", Value: "<имя>", Desc: "разрешить комнату по имени (вместо token)"},
+		},
+		Examples: []string{
+			"nctalk rooms participants abc123",
+			"nctalk rooms participants --name \"Команда\"",
 		},
 	},
 	{

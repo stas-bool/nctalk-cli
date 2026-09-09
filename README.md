@@ -24,7 +24,7 @@ nctalk rooms list
 <a name="nctalk-ru"></a>
 # nctalk (рус.)
 
-Тонкий CLI-клиент над **Nextcloud Talk** (приложение Spreed) поверх OCS-API. Только примитивы: список/поиск чатов, чтение, отправка и редактирование сообщений, реакции, поиск. Основной потребитель — агент (через skill-обёртку), вторичный — человек в терминале. Бизнес-логики не содержит.
+Тонкий CLI-клиент над **Nextcloud Talk** (приложение Spreed) поверх OCS-API. Только примитивы: список/поиск чатов, участники комнаты, чтение, отправка и редактирование сообщений, реакции, поиск. Основной потребитель — агент (через skill-обёртку), вторичный — человек в терминале. Бизнес-логики не содержит.
 
 Написан на Go 1.21 (только стандартная библиотека).
 
@@ -87,6 +87,16 @@ nctalk rooms search review --limit 5
 ```
 
 Через Unified Search (`talk-conversations`). Минимальная длина `term` — 1 символ.
+
+### `rooms participants <room>` — участники комнаты
+
+```sh
+nctalk rooms participants kytxaiyc             # <room> = token позиционно
+nctalk rooms participants --name "review team" # ...или по имени
+nctalk rooms participants kytxaiyc --json      # каноническая модель (actorId и др.)
+```
+
+Колонки: `ИМЯ` (у гостя без имени — `actorId`), `РОЛЬ` (владелец/модератор/участник/гость/по ссылке/гость-модератор), `ОНЛАЙН` (есть живая сессия), `ID` (`actorId` — для упоминаний и `--from`). Сортировка: роль → имя. `--json` — массив объектов `actorType, actorId, displayName, participantType, sessionIds, inCall, lastPing`. Пусто → exit `0`.
 
 ### `chat show <room>` — читать сообщения
 
