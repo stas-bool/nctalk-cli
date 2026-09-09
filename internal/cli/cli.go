@@ -63,9 +63,10 @@ type handlerFn func(ctx context.Context, deps Deps, args []string, jsonOut bool)
 // подменять отдельные handler-ы на шпионов и проверять роутинг.
 var routes = map[string]map[string]handlerFn{
 	"rooms": {
-		"list":   roomsListHandler,
-		"find":   roomsFindHandler,
-		"search": roomsSearchHandler,
+		"list":         roomsListHandler,
+		"find":         roomsFindHandler,
+		"search":       roomsSearchHandler,
+		"participants": roomsParticipantsHandler,
 	},
 	"chat": {
 		"show": chatShowHandler,
@@ -119,7 +120,7 @@ func Run(args []string, deps Deps) int {
 
 	// rooms/chat/reactions — двухуровневый разбор: args[0]=resource, args[1]=verb.
 	if len(rest) == 0 {
-		fmt.Fprintf(deps.Stderr, "nctalk %s: ожидается verb (list/find/search/show/send/edit/get)\n", resource)
+		fmt.Fprintf(deps.Stderr, "nctalk %s: ожидается verb (list/find/search/participants/show/send/edit/get)\n", resource)
 		return ExitGeneric
 	}
 
