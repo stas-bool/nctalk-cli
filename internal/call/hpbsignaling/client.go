@@ -2,7 +2,8 @@
 // Реализует agent.sigClient ЦЕЛИКОМ: PollLoop — WebSocket, LeaveCall —
 // делегирование OCS-клиенту call/signaling (Call API v4 работает при любом
 // signalingMode), JoinCall — ensureConnected (WS hello/room с бюджетом) +
-// делегирование OCS; Send добавит Task 5.
+// делегирование OCS; Send — WS-кадр message любого Type; readLoop держит
+// keepalive-ping (детекция half-open/NAT).
 //
 // Модель подключений (дельта §2/§3):
 //   - canonical flow: JoinRoom (cmd) → WS hello/room → JoinCall (OCS) →
@@ -61,8 +62,8 @@ const (
 	defaultConnectBudget = 15 * time.Second // ≈ NCTALK_ICE_TIMEOUT(30с)/2 (дельта §3)
 	defaultBackoffBase   = 1 * time.Second
 	defaultBackoffMax    = 30 * time.Second
-	defaultPingPeriod    = 30 * time.Second // сервер пингует ~54с; наш ping — NAT + half-open (Task 5)
-	writeTimeout         = 5 * time.Second  // на один исходящий кадр (Task 5)
+	defaultPingPeriod    = 30 * time.Second // сервер пингует ~54с; наш ping — NAT + half-open
+	writeTimeout         = 5 * time.Second  // на один исходящий кадр (Send)
 )
 
 // Config — параметры WS-сессии. Ticket/Userid — стартовые auth-params из
@@ -84,8 +85,10 @@ type Config struct {
 	Stderr        io.Writer      // диагностика (reconnect / settings-fallback); nil → io.Discard
 }
 
-// Client — HPB-signaling клиент. Потокобезопасен: Send/Ping сериализуются
-// мьютексом на conn; PollLoop — единственный владелец read-стороны.
+// Client — HPB-signaling клиент. Потокобезопасен: конкурентные Send
+// сериализуются write-мьютексом coder/websocket (один Writer в моменте —
+// контракт библиотеки), Ping безопасен конкурентно с Writer; указатель conn
+// всегда читается под c.mu; PollLoop — единственный владелец read-стороны.
 type Client struct {
 	cfg Config
 	ocs *signaling.Client // делегирование JoinCall/LeaveCall (Call API — OCS)
@@ -130,6 +133,24 @@ func (c *Client) JoinCall(ctx context.Context, token string, flags int) error {
 // LeaveCall — делегирование Call API (DELETE /api/v4/call/{token}).
 func (c *Client) LeaveCall(ctx context.Context, token string) error {
 	return c.ocs.LeaveCall(ctx, token)
+}
+
+// Send отправляет исходящее signaling-сообщение через WS-кадр message
+// (дельта §2.5). token ИГНОРИРУЕТСЯ: WS-сессия уже привязана к комнате
+// room-join'ом (сигнатура — контракт agent.sigClient). Type — ЛЮБОЙ:
+// offer/answer/candidate/unmute/будущие control-типы; меняется только
+// транспортировка (WS вместо form-encoded POST), НЕ состав сообщений.
+func (c *Client) Send(ctx context.Context, token string, msg signaling.Message) error {
+	_ = token
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn == nil {
+		return errors.New("hpbesignaling: нет активного WS-соединения (переподключение)")
+	}
+	wctx, cancel := context.WithTimeout(ctx, writeTimeout)
+	defer cancel()
+	return writeFrame(wctx, conn, newMessageFrame(msg))
 }
 
 // connectBudget — бюджет первичного подключения (0 → дефолт).
@@ -380,7 +401,36 @@ func waitReply(ctx context.Context, conn *websocket.Conn, st *roomState, want st
 }
 
 // readLoop — чтение до обрыва/ctx; каждый кадр через roomState → события в ch.
+// Держит keepalive-ping (дельта §3): pong читает ОСНОВНОЙ цикл ниже — контракт
+// coder/websocket («Ping must be called concurrently with Reader»).
 func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, st *roomState, ch chan<- signaling.Event) error {
+	// Keepalive: conn.Ping блокирует до pong — детекция half-open + NAT.
+	// Ошибка ping → Close разблокирует Reader в основном цикле.
+	pingStop := make(chan struct{})
+	pingDone := make(chan struct{})
+	go func() {
+		defer close(pingDone)
+		t := time.NewTicker(c.cfg.PingPeriod)
+		defer t.Stop()
+		for {
+			select {
+			case <-pingStop:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				pctx, pcancel := context.WithTimeout(ctx, c.cfg.PingPeriod)
+				if err := conn.Ping(pctx); err != nil {
+					hpbDebug("ping: %v — рвём соединение", err)
+					_ = conn.Close(websocket.StatusGoingAway, "ping timeout")
+					pcancel()
+					return
+				}
+				pcancel()
+			}
+		}
+	}()
+	defer func() { close(pingStop); <-pingDone }()
 	for {
 		f, err := readFrame(ctx, conn)
 		if err != nil {

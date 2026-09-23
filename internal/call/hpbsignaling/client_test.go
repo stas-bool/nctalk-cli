@@ -576,6 +576,161 @@ func TestJoinCall_HelloV2_WhenWelcomeFeature(t *testing.T) {
 // обязан оборвать зависший dial в бюджет, а не ждать OS-таймаута TCP
 // (ревью плана #5) — иначе EvError{exit 1} придёт после ICE-таймера (exit 0
 // «я один»).
+// ---- Task 5: Send (любой Type) + keepalive-ping ----
+
+// TestSend_WrapsAnyType — критично: unmute обязан проходить (whitelist ломает
+// звук на живом HPB — root cause spike-gate 2026-07-20; unit-мок бы не заметил).
+func TestSend_WrapsAnyType(t *testing.T) {
+	var got []clientFrame
+	var mu sync.Mutex
+	f := newFakeHPB(t, func(fc *fakeConn, n int) {
+		fc.sendWelcome(false) // Task 4: сессия открывается welcome-кадром (v1-путь)
+		fc.awaitHello()
+		fc.replyHello("own-hpb-sid")
+		fc.awaitRoom()
+		fc.replyRoomAck("tok-test")
+		for {
+			fr, err := fc.readFrame()
+			if err != nil {
+				return // соединение закрыто тестом
+			}
+			mu.Lock()
+			got = append(got, fr)
+			mu.Unlock()
+		}
+	})
+	o := newFakeOCS(t)
+	c := newTestClient(f, o, nil)
+
+	ch := make(chan signaling.Event, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- c.PollLoop(ctx, "tok-test", ch) }()
+
+	// Ждём установления (EvOwnSession) — Send до подключения обязан ошибаться.
+	if !waitForEvent(t, ch, signaling.EvOwnSession, 2*time.Second) {
+		t.Fatal("соединение не установилось")
+	}
+	payload, _ := json.Marshal(map[string]string{"name": "audio"})
+	if err := c.Send(ctx, "tok-test", signaling.Message{Type: "unmute", To: "peer-1", Payload: payload}); err != nil {
+		t.Fatalf("Send(unmute): %v", err)
+	}
+	if err := c.Send(ctx, "tok-test", signaling.Message{Type: "candidate", To: "peer-1",
+		Payload: json.RawMessage(`{"candidate":{"candidate":"cand-1","sdpMLineIndex":0,"sdpMid":"0"}}`)}); err != nil {
+		t.Fatalf("Send(candidate): %v", err)
+	}
+
+	// Даём мок-серверу время прочитать оба кадра (Read в горутине сессии).
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		n := len(got)
+		mu.Unlock()
+		if n >= 2 || !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) < 2 {
+		t.Fatalf("сервер получил %d кадров, want >= 2", len(got))
+	}
+	u := got[0].Message
+	if u == nil || u.Data.Type != "unmute" || u.Recipient.SessionId != "peer-1" ||
+		string(u.Data.Payload) != `{"name":"audio"}` {
+		t.Errorf("unmute-кадр = %+v", u)
+	}
+	cd := got[1].Message
+	if cd == nil || cd.Data.Type != "candidate" || cd.Recipient.Type != "session" {
+		t.Errorf("candidate-кадр = %+v", cd)
+	}
+}
+
+// waitForEvent ждёт событие заданного Kind (true) до таймаута (false).
+func waitForEvent(t *testing.T, ch <-chan signaling.Event, kind signaling.EventKind, d time.Duration) bool {
+	t.Helper()
+	timer := time.After(d)
+	for {
+		select {
+		case ev := <-ch:
+			if ev.Kind == kind {
+				return true
+			}
+		case <-timer:
+			return false
+		}
+	}
+}
+
+// TestSend_NoConnection_Error — Send между (пере)подключениями — явная ошибка.
+func TestSend_NoConnection_Error(t *testing.T) {
+	o := newFakeOCS(t)
+	base, _ := url.Parse(o.srv.URL)
+	c := New(Config{
+		Auth: transport.Auth{BaseURL: base, Login: "alice", Password: "pw"},
+		Doer: o.srv.Client(), Server: "ws://127.0.0.1:1",
+		Ticket: "t", Userid: "a", ConnectBudget: 50 * time.Millisecond,
+		BackoffBase: 10 * time.Millisecond, BackoffMax: 20 * time.Millisecond,
+		PingPeriod: time.Hour, Stderr: io.Discard,
+	})
+	if err := c.Send(context.Background(), "tok", signaling.Message{Type: "offer"}); err == nil {
+		t.Fatal("Send без соединения = nil, want ошибка")
+	}
+}
+
+// TestPing_KeepsConnectionAlive — ping не убивает живое соединение; события
+// приходят и спустя несколько ping-периодов (мок отвечает pong автоматически —
+// coder/websocket; сервер читает кадры, чтобы control-фреймы обрабатывались).
+func TestPing_KeepsConnectionAlive(t *testing.T) {
+	f := newFakeHPB(t, func(fc *fakeConn, n int) {
+		fc.sendWelcome(false) // Task 4: сессия открывается welcome-кадром (v1-путь)
+		fc.awaitHello()
+		fc.replyHello("own-hpb-sid")
+		fc.awaitRoom()
+		fc.replyRoomAck("tok-test")
+		// Фоновое чтение: coder/websocket обрабатывает control-фреймы (наши
+		// ping → auto-pong) только при активном Read — без него клиент
+		// справедливо разорвёт «молчащую» связь.
+		go func() {
+			for {
+				if _, err := fc.readFrame(); err != nil {
+					return
+				}
+			}
+		}()
+		time.Sleep(500 * time.Millisecond) // > 4 ping-тиков при PingPeriod=100ms
+		fc.sendJSON(`{"type":"event","event":{"target":"room","type":"join","join":[{"sessionid":"peer-1"}]}}`)
+		// Держим соединение ДО КОНЦА окна collectEvents (1.2с): выход сессии
+		// закрывает ws (defer в newFakeHPB) и дал бы переподключение, не
+		// связанное с ping — ложный connects=2 (адаптация к Task 4-моку).
+		time.Sleep(1 * time.Second)
+	})
+	o := newFakeOCS(t)
+	c := newTestClient(f, o, func(cfg *Config) { cfg.PingPeriod = 100 * time.Millisecond })
+
+	ch := make(chan signaling.Event, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- c.PollLoop(ctx, "tok-test", ch) }()
+
+	evs, _ := collectEvents(t, ch, 1200*time.Millisecond)
+	if f.connectCount() != 1 {
+		t.Fatalf("connects = %d, want 1 (ping не должен рвать живое соединение)", f.connectCount())
+	}
+	sawUsers := false
+	for _, ev := range evs {
+		if ev.Kind == signaling.EvUsersUpdated && len(ev.Users) == 1 {
+			sawUsers = true
+		}
+	}
+	if !sawUsers {
+		t.Fatal("событие после ping-периодов не доставлено — соединение умерло")
+	}
+}
+
 func TestPollLoop_HungServer_BudgetFiresEvError(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
