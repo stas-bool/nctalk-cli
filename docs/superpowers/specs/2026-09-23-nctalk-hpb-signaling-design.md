@@ -43,17 +43,38 @@ protocol.go) и клиент `spreed/src/services/signaling.js`. **Точные 
 2. **WebSocket.** Соединение к `settings.server` (`wss://...`). Первое сообщение —
    `hello` c `auth.type: ticket`; ответ `welcome` несёт собственный sessionId.
 3. **Room.** `room {roomid: <token>}` → подтверждение + `roomJoined` со списком
-   участников. SessionId из welcome ставится в peer-слой (аналог `SetSessionId`
-   OCS-пути).
+   участников. SessionId из welcome — ДРУГОЕ id-пространство, чем OCS-sessionId из
+   JoinRoom: в external-режиме именно он — OwnSessionId агента (self-фильтр
+   `u.SessionId == ownSid` в reconcile), OCS-sessionId из JoinRoom в фильтр НЕ
+   подмешивается (иначе фильтр никогда не совпадёт — агент наберёт самого себя).
+   Welcome-sessionId асинхронен (приходит внутри PollLoop) → доставить его до первого
+   EvUsersUpdated (Event/колбэк), а не статическим `agent.Config.OwnSessionId` из cmd.
+   Требование к адаптеру: все sessionId в `Event.From` и `Event.Users` — из одного
+   (HPB) пространства. Fallback `resolveOwnSessionId` по `UserId == login` спасёт,
+   только если HPB-аналог usersInRoom несёт userId — предмет спайка, не полагаться.
 4. **События сервера.** `event`-сообщения: `update` (participants/usersInRoom-аналог),
    `message` (recipient + data: те же offer/answer/candidate, что в OCS-протоколе),
    `leave`. Маппинг → существующие `signaling.Event` (см. §3).
-5. **Исходящие.** `message {recipient, data}` — обёртка над теми же
-   `signaling.Message` (offer/answer/candidate), которые сегодня шлёт `Send`.
+5. **Исходящие.** `message {recipient, data}` — обёртка над `signaling.Message` с ЛЮБЫМ
+   `Type` (НЕ whitelist): offer/answer/candidate, контрольный `unmute {name:"audio"}`
+   (agent шлёт его на каждый OnConnected в sendrecv — без него Spreed держит audio-sink
+   удалённого участника замьюченным, root cause spike-gate 2026-07-20) и будущие типы.
+   Меняется только транспортировка (WS `message` вместо form-encoded POST).
 6. **Keepalive.** `ping`/`pong` по таймеру (интервал из welcome/spike; ориентир ~30с).
 
-JoinCall/LeaveCall (`/api/v4/call/{token}`) — OCS, работают при любом signalingMode и
-остаются в `call/signaling` как есть.
+OCS-шаги вокруг WS (canonical flow external целиком: JoinRoom → ticket → WS hello/room →
+JoinCall → события/исходящие → LeaveCall):
+
+- **JoinRoom** (`POST /api/v4/room/{token}/participants/active`) — сохраняется:
+  participant-session нужен Call API (JoinCall) и серверному списку участников
+  (usersInRoom-аналог в `event update`). Его sessionId дальше НЕ используется (§2.3).
+- **weblogin** — пропускается: PHP-session нужен только OCS-pull `pullMessages`,
+  который в external не используется; ticket/JoinRoom/JoinCall идут с Basic-auth
+  (OCS-эндпоинты, в отличие от pull, Basic-auth принимают).
+- JoinCall/LeaveCall (`/api/v4/call/{token}`) — OCS, работают при любом signalingMode
+  и остаются в `call/signaling` как есть.
+
+Как и основной flow — ожидание, спайк уточнит.
 
 ## 3. Архитектура
 
@@ -62,22 +83,46 @@ JoinCall/LeaveCall (`/api/v4/call/{token}`) — OCS, работают при л�
 `cmd/nctalk-call` / `cmd/nctalk-talk` после signaling-settings:
 
 - `signalingMode == "internal"` (или поле отсутствует) → текущий `signaling.New(...)`
-  (OCS-polling). Поведение байт-в-байт как сегодня.
+  (OCS-polling); сам polling-путь не меняется.
 - `signalingMode == "external"` → новый `hpbesignaling`-клиент (§ ниже).
 - Ошибка запроса settings → обычная ошибка звонка (exit-контракт базовой спеки §10).
+  Осознанное изменение сегодняшнего best-effort (сейчас оба cmd лишь логируют ошибку
+  и продолжают без STUN/TURN): без settings транспорт не выбрать, а молчаливый
+  fallback на internal воспроизводил бы исходный баг на HPB-серверах (§1). Практический
+  риск мал — settings ходит на тот же сервер, что и JoinRoom/JoinCall следом.
+
+### Расширение `call/capability`
+
+Сегодня capability из signaling-settings декодирует только stunservers/turnservers;
+`signalingMode` и `server` (WS-URL из §2.2) отбрасываются. Capability расширяется:
+декодировать оба поля и возвращать наружу вместе с ICE-серверами — тем же единственным
+HTTP-запросом на старт (второго запроса settings не появляется; форма — новый метод или
+расширение возвращаемой структуры, за планом). Имена полей подтверждены фикстурой
+`testdata/signaling/capability.json`.
 
 ### Новый пакет `internal/call/hpbsignaling`
 
-Одна ответственность: WebSocket-транспорт signaling для HPB. Реализует интерфейс
-`agent.sigClient` (`PollLoop(ctx, token, ch chan<- signaling.Event)` + `Send(ctx, token,
-signaling.Message)`) — тот же контракт, что у polling-клиента (compile-time проверка
-аналогично `agent.go:108`). Внутри:
+Одна ответственность: WebSocket-транспорт signaling для HPB. Интерфейс `agent.sigClient`
+— ЧЕТЫРЕ метода: `JoinCall`/`LeaveCall` (Call API) + `PollLoop`/`Send` (транспорт).
+hpbesignaling реализует все четыре: PollLoop/Send — WebSocket, JoinCall/LeaveCall —
+делегирование OCS (вложенный клиент `call/signaling` либо собственные
+`transport.DoOCS`-вызовы `/api/v4/call/{token}`); compile-time проверка аналогично
+`agent.go:108`. Для TUI поле `interactive.Config.Signaling` (сегодня конкретный тип
+`*signaling.Client`, `interactive.go:27`) становится интерфейсом `agent.sigClient` —
+правка и в `cmd/nctalk-talk`. Внутри:
 
 - `TicketFetcher` (doer): OCS-запрос билета (переиспользует transport.DoOCS-конверт);
 - WS-сессия: соединение, hello/room/message/ping, read-loop → `signaling.Event`,
   write-маппинг `signaling.Message` → `message`;
-- Переподключение: backoff 1с→30с (как polling §7 «Polling retry/backoff»), новый ticket
-  на каждое переподключение.
+- Первичное подключение (ticket → WS → hello → room) — ОГРАНИЧЕННЫЙ бюджет: ретраи с
+  backoff 1с→30с, но суммарный дедлайн заведомо меньше ICE-таймаута (ориентир —
+  половина `NCTALK_ICE_TIMEOUT`; точное значение за планом). Исчерпание → фатал:
+  `Event{Kind: EvError, Err: exit.Exit(1, …)}` в канал ДО срабатывания ICE-таймера —
+  agent выходит по EvError существующим путём; иначе молчаливый ретрай даст exit 0
+  «я один в звонке» — тот симптом, от которого дельта лечит (§1).
+- Переподключение ПОСЛЕ установленного звонка: бесконечный backoff 1с→30с, как polling
+  §7 «Polling retry/backoff» (там ретраи принципиально не исчерпываются), новый ticket
+  на каждое переподключение; peers стоят, звонок жив.
 
 `signaling.Event`/`signaling.Message` — общие типы обоих транспортов (живут в
 `call/signaling`, HPB их только потребляет/производит; при расхождении форматов HPB —
@@ -85,11 +130,16 @@ signaling.Message)`) — тот же контракт, что у polling-кли�
 
 ### Зависимость WebSocket
 
-Stdlib WebSocket не содержит. Одна новая зависимость в go.mod (модуль звонков уже зависит
-от pion): `github.com/coder/websocket` (CGO-free, активно поддерживается; альтернатива
-gorilla/websocket — в обслуживательском режиме). Финальный выбор — за планом реализации;
-критерии: чистый Go, CGO_ENABLED=0, MIT/Apache. Готовый высокоуровневый HPB-Go-клиент
-не найден (проверено при дизайне; если план найдёт — пересмотреть с ревью).
+Stdlib WebSocket не содержит. Отдельного go-модуля звонков нет — в репо один `go.mod`
+(базовая спека §3), уже зависящий от pion; новая зависимость добавится в него.
+Кандидат `github.com/coder/websocket` (CGO-free, активно поддерживается, лицензия ISC);
+альтернатива gorilla/websocket тоже активно поддерживается (ранее считалась
+«обслужательским режимом» — оценка устарела; лицензия BSD-2-Clause). Финальный выбор —
+за планом реализации; критерии: чистый Go, CGO_ENABLED=0, пермиссивная OSI-лицензия
+(MIT/Apache/BSD/ISC). Импорт — только из `internal/call/hpbsignaling`: вне границы
+удаления зависимость не появляется (`rm -rf internal/call … && go mod tidy` уберёт её,
+как pion). Готовый высокоуровневый HPB-Go-клиент не найден (проверено при дизайне;
+если план найдёт — пересмотреть с ревью).
 
 ### Граница изоляции
 
@@ -102,14 +152,16 @@ WebRTC-стека не зависят. Граница удаления звон�
 - Креды — только в `Authorization` на OCS-запросе ticket. Ticket — в WS-фрейме hello,
   никогда в URL и логах. Все ошибки через `transport.SanitizeErr`.
 - WS-обрыв: переподключение с backoff; диагностика в stderr «signaling: reconnect».
-- HPB недоступен (TLS/conn refused) после исчерпания ретраев → exit 1 с диагностикой
-  (сеть), не «я один в звонке» (важное отличие от сегодняшнего молчаливого симптома).
+- HPB недоступен (TLS/conn refused): при первичном подключении — исчерпание бюджета
+  подключения (§3) → exit 1 с диагностикой (сеть), не «я один в звонке» (важное отличие
+  от сегодняшнего молчаливого симптома); в середине звонка — бесконечный backoff.
 - `NCTALK_DEBUG=1` — протокольный дамп WS-сообщений (в stderr, без ticket/кредов).
 
 ## 5. Тестирование
 
 1. **Юнит** (без сети): мок WS-сервер (httptest + upgrade) — сценарии hello/room/message/
-   ping, маппинг событий, переподключение, EOF/ошибки фреймов.
+   ping, маппинг событий, переподключение, исчерпание бюджета первичного подключения
+   (EvError → exit 1), EOF/ошибки фреймов.
 2. **Спайк на живом HPB** (первый шаг реализации, до основной логики): ticket → hello →
    room по комнате TEST; зафиксировать фактические поля. Gate: welcome+roomJoined получены.
 3. **Integration** (build-tag `integration`, env как у звонков + `NCTALK_INTEGRATION_HPB=1`):
@@ -127,4 +179,5 @@ WebRTC-стека не зависят. Граница удаления звон�
   hpbesignaling адаптером.
 - STUN/TURN уже получаем из signaling-settings — при external режиме тот же источник
   (проверено на боевом: списки приходят), отдельной работы нет.
-- Возрастание зависимостей: +1 чистая Go-библиотека в звонковый модуль.
+- Возрастание зависимостей: +1 чистая Go-библиотека в единственный go.mod (импорт —
+  только из `internal/call/hpbsignaling`, граница удаления §3).
