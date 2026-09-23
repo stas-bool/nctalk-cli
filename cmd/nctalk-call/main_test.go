@@ -133,6 +133,34 @@ func TestRun_AmbiguousRoom(t *testing.T) {
 	}
 }
 
+// TestRun_SettingsError_Exit1 — ошибка signaling-settings теперь ФАТАЛЬНА
+// (дельта §3: без settings не выбрать транспорт; прежний best-effort
+// воспроизводил «слепой» звонок на HPB). Позиционный token разрешается БЕЗ
+// сети (room.ResolveRoom) — моку достаточно settings-ветки (ревью плана #10:
+// rooms-ветка была мёртвой, реальный эндпоинт к тому же /api/v4/room).
+func TestRun_SettingsError_Exit1(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "signaling/settings"):
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"ocs":{"meta":{"status":"failure","statuscode":500,"message":"boom"}}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	setEnv(t, srv.URL)
+
+	var out, errBuf bytes.Buffer
+	code := run([]string{"tok-team-a"}, &out, &errBuf, strings.NewReader(""))
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 (ошибка settings фатальна)", code)
+	}
+	if !strings.Contains(errBuf.String(), "signaling-settings") {
+		t.Errorf("stderr = %q, want диагностика signaling-settings", errBuf.String())
+	}
+}
+
 // TestRun_NotFound — httptest отдаёт пустой список → FindRooms возвращает []
 // → StatusNotFound → exit 2.
 func TestRun_NotFound(t *testing.T) {
