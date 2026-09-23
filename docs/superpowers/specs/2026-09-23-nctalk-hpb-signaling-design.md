@@ -36,18 +36,26 @@ protocol.go) и клиент `spreed/src/services/signaling.js`. **Точные 
 
 Канонический flow (ожидание, спайк уточнит):
 
-1. **Ticket.** Backend-ticket через OCS с Basic-auth (weblogin НЕ нужен):
-   запрос к signaling-backend-эндпоинту Spreed (см. спайк; кандидат —
-   `/ocs/v2.php/apps/spreed/api/v1/signaling/backend`) → `data.ticket`. Ticket
-   короткоживущий, выдаётся на звонок, в URL/логи не попадает.
-2. **WebSocket.** Соединение к `settings.server` (`wss://...`). Первое сообщение —
-   `hello` c `auth.type: ticket`; ответ `welcome` несёт собственный sessionId.
+1. **Ticket.** Из signaling-settings через OCS с Basic-auth (weblogin НЕ нужен):
+   `GET /ocs/v2.php/apps/spreed/api/v3/signaling/settings` в external-режиме
+   дополнительно к stunservers/turnservers возвращает `signalingMode:"external"`,
+   `server`, `ticket` и `helloAuthParams` (`"1.0": {userid, ticket}`) — источник
+   подтверждён по SignalingController.php (`getSettings`); спайк дополнительно
+   фиксирует фактические поля. Отдельного
+   клиентского ticket-эндпоинта НЕТ: `/ocs/.../api/v1/signaling/backend` —
+   внутренний HPB→NC-эндпоинт с HMAC-секретом, клиентом не вызывается. Ticket
+   короткоживущий, выдаётся на звонок, в URL/логи не попадает (только в WS-кадре
+   hello).
+2. **WebSocket.** Соединение к `settings.server` (`wss://...`). Отдельный кадр
+   `welcome` (server-info/features, БЕЗ sessionId) приходит сразу после коннекта
+   и поглощается. Первое сообщение клиента — `hello` c `auth.type: ticket`;
+   ответ `hello` несёт собственный sessionId (`hello.sessionid`).
 3. **Room.** `room {roomid: <token>}` → подтверждение + `roomJoined` со списком
-   участников. SessionId из welcome — ДРУГОЕ id-пространство, чем OCS-sessionId из
+   участников. SessionId из hello-response — ДРУГОЕ id-пространство, чем OCS-sessionId из
    JoinRoom: в external-режиме именно он — OwnSessionId агента (self-фильтр
    `u.SessionId == ownSid` в reconcile), OCS-sessionId из JoinRoom в фильтр НЕ
    подмешивается (иначе фильтр никогда не совпадёт — агент наберёт самого себя).
-   Welcome-sessionId асинхронен (приходит внутри PollLoop) → доставить его до первого
+   SessionId из hello-response асинхронен (приходит внутри PollLoop) → доставить его до первого
    EvUsersUpdated (Event/колбэк), а не статическим `agent.Config.OwnSessionId` из cmd.
    Требование к адаптеру: все sessionId в `Event.From` и `Event.Users` — из одного
    (HPB) пространства. Fallback `resolveOwnSessionId` по `UserId == login` спасёт,
@@ -62,8 +70,8 @@ protocol.go) и клиент `spreed/src/services/signaling.js`. **Точные 
    Меняется только транспортировка (WS `message` вместо form-encoded POST).
 6. **Keepalive.** `ping`/`pong` по таймеру (интервал из welcome/spike; ориентир ~30с).
 
-OCS-шаги вокруг WS (canonical flow external целиком: JoinRoom → ticket → WS hello/room →
-JoinCall → события/исходящие → LeaveCall):
+OCS-шаги вокруг WS (canonical flow external целиком: settings(+ticket) → JoinRoom →
+WS hello/room → JoinCall → события/исходящие → LeaveCall):
 
 - **JoinRoom** (`POST /api/v4/room/{token}/participants/active`) — сохраняется:
   participant-session нужен Call API (JoinCall) и серверному списку участников
@@ -104,11 +112,15 @@ HTTP-запросом на старт (второго запроса settings н
 
 Одна ответственность: WebSocket-транспорт signaling для HPB. Интерфейс `agent.sigClient`
 — ЧЕТЫРЕ метода: `JoinCall`/`LeaveCall` (Call API) + `PollLoop`/`Send` (транспорт).
-hpbesignaling реализует все четыре: PollLoop/Send — WebSocket, JoinCall/LeaveCall —
+hpbesignaling реализует все четыре: PollLoop/Send — WebSocket, LeaveCall —
 делегирование OCS (вложенный клиент `call/signaling` либо собственные
-`transport.DoOCS`-вызовы `/api/v4/call/{token}`); compile-time проверка аналогично
-`agent.go:108`. Для TUI поле `interactive.Config.Signaling` (сегодня конкретный тип
-`*signaling.Client`, `interactive.go:27`) становится интерфейсом `agent.sigClient` —
+`transport.DoOCS`-вызовы `/api/v4/call/{token}`), JoinCall — установление WS-комнаты
+(hello/room с бюджетом) ДО делегирования OCS (canonical flow §2). Compile-time
+проверка аналогично `agent.go:108`. Для TUI поле `interactive.Config.Signaling`
+(сегодня конкретный тип `*signaling.Client`, `interactive.go:27`) становится
+интерфейсом с теми же ЧЕТЫРЬМЯ методами (unexported `agent.sigClient` из другого
+пакета типом поля именовать нельзя — «cannot refer to unexported name»; в interactive
+объявляется локальный интерфейс, обе реализации удовлетворяют его структурно) —
 правка и в `cmd/nctalk-talk`. Внутри:
 
 - `TicketFetcher` (doer): OCS-запрос билета (переиспользует transport.DoOCS-конверт);
@@ -162,8 +174,9 @@ WebRTC-стека не зависят. Граница удаления звон�
 1. **Юнит** (без сети): мок WS-сервер (httptest + upgrade) — сценарии hello/room/message/
    ping, маппинг событий, переподключение, исчерпание бюджета первичного подключения
    (EvError → exit 1), EOF/ошибки фреймов.
-2. **Спайк на живом HPB** (первый шаг реализации, до основной логики): ticket → hello →
-   room по комнате TEST; зафиксировать фактические поля. Gate: welcome+roomJoined получены.
+2. **Спайк на живом HPB** (первый шаг реализации, до основной логики): settings →
+   ticket → hello → room по комнате TEST; зафиксировать фактические поля. Gate:
+   hello-response (sessionid) + room-ack и свой entry в join-списке получены.
 3. **Integration** (build-tag `integration`, env как у звонков + `NCTALK_INTEGRATION_HPB=1`):
    полный агент-звонок на боевом, двустороннее аудио.
 4. **Финальный gate**: живой звонок с человеком в TEST (критерий — собеседник слышит
