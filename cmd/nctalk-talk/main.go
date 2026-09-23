@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/stas-bool/nctalk-cli/internal/call/capability"
+	"github.com/stas-bool/nctalk-cli/internal/call/hpbsignaling"
 	"github.com/stas-bool/nctalk-cli/internal/call/interactive"
 	"github.com/stas-bool/nctalk-cli/internal/call/signaling"
 	"github.com/stas-bool/nctalk-cli/internal/call/weblogin"
@@ -117,20 +118,59 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 	case room.StatusResolved:
 	}
 
-	if err := weblogin.Login(ctx, loginClient, auth); err != nil {
+	// 4a. NCTALK_ICE_TIMEOUT парсим ДО ветвления транспорта: бюджет подключения
+	//     hpbesignaling = iceTimeout/2 (дельта §3). 0/пусто → default 30s
+	//     подставит agent. Невалидное → exit 1 (как NEXTCLOUD_TIMEOUT).
+	//     Сообщение содержит только имя env (§5/§9 redact).
+	iceTimeout, err := parseDurationEnv("NCTALK_ICE_TIMEOUT")
+	if err != nil {
 		fmt.Fprintln(stderr, "nctalk-talk: "+err.Error())
 		return 1
 	}
 
+	// 5. Capability: signaling-settings — режим транспорта + STUN/TURN.
+	//    ОДИН запрос на старт; ошибка ФАТАЛЬНА (дельта §3): без settings
+	//    транспорт не выбрать, а молчаливый fallback на internal воспроизводил
+	//    бы исходный баг «слепого» звонка на HPB (§1). Практический риск мал —
+	//    settings ходит на тот же сервер, что JoinRoom/JoinCall следом.
 	capClient := capability.New(auth, httpClient)
 	st, err := capClient.Settings(ctx)
 	if err != nil {
-		fmt.Fprintf(stderr, "nctalk-talk: capability: %v (продолжаем без STUN/TURN)\n", err)
-		st.ICEServers = nil // временно до Task 7/8: best-effort сохранён
+		fmt.Fprintln(stderr, "nctalk-talk: signaling-settings: "+err.Error())
+		mapped := exit.FromClientErr(err)
+		var cee exit.ExitError
+		if errors.As(mapped, &cee) {
+			return cee.Code
+		}
+		return 1
 	}
 
-	sigClient := signaling.New(auth, httpClient)
-	sessionId, err := sigClient.JoinRoom(ctx, result.Token)
+	// 5a. internal: web-login → PHP-session в shared jar (баг #5 базовой спеки:
+	//     без session signaling pull → 404). Идёт ДО JoinRoom — порядок
+	//     внутреннего пути сохранён «байт-в-байт» (weblogin → JoinRoom →
+	//     SetSessionId → OwnSessionId), как обещает Global Constraints (ревью
+	//     плана #6). external НЕ зовёт weblogin: PHP-session нужна только
+	//     OCS-pull, который там не используется (дельта §2). Запускается ПОСЛЕ
+	//     ResolveRoom (незачем логиниться, если room не задан/не найден/
+	//     ambiguous); loginClient — no-redirect (чтобы прочитать 303 Location,
+	//     см. weblogin.doc.go); session-cookie попадает в jar, его подхватывает
+	//     signaling через httpClient.
+	if st.SignalingMode != "external" {
+		if err := weblogin.Login(ctx, loginClient, auth); err != nil {
+			fmt.Fprintln(stderr, "nctalk-talk: "+err.Error())
+			return 1
+		}
+	}
+
+	// 6. Signaling-клиент (OCS) + JoinRoom (canonical flow, дельта §2):
+	//     participant-session нужна Call API (JoinCall) и серверному списку
+	//     участников — ОБЕИМ режимам; разница — в использовании sessionId
+	//     (ветка выбора транспорта ниже, перед interactive.Run).
+	//     OwnUserId передаём в interactive/agent для извлечения ownSessionId из
+	//     usersInRoom — актуально для internal; у external own придёт
+	//     EvOwnSession из hello-response (другое id-пространство).
+	ocsSig := signaling.New(auth, httpClient)
+	sessionId, err := ocsSig.JoinRoom(ctx, result.Token)
 	if err != nil {
 		fmt.Fprintln(stderr, "nctalk-talk: "+err.Error())
 		mapped := exit.FromClientErr(err)
@@ -138,13 +178,6 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 		if errors.As(mapped, &jee) {
 			return jee.Code
 		}
-		return 1
-	}
-	sigClient.SetSessionId(sessionId)
-
-	iceTimeout, err := parseDurationEnv("NCTALK_ICE_TIMEOUT")
-	if err != nil {
-		fmt.Fprintln(stderr, "nctalk-talk: "+err.Error())
 		return 1
 	}
 
@@ -166,18 +199,41 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 	deviceIn := os.Getenv("NCTALK_AUDIO_DEVICE_IN")  // default ":0" — внутри NewMicSource
 	deviceOut := os.Getenv("NCTALK_AUDIO_DEVICE_OUT") // default "-1" — внутри NewSpeakerWriter
 
-	err = interactive.Run(sigCtx, interactive.Config{
-		Cfg:          cfg,
-		Token:        result.Token,
-		Signaling:    sigClient,
-		ICEServers:   st.ICEServers,
-		OwnUserId:    cfg.Login,
-		OwnSessionId: sessionId,
-		ICETimeout:   iceTimeout,
-		DeviceIn:     deviceIn,
-		DeviceOut:    deviceOut,
-		LogFile:      logFile,
-	})
+	iCfg := interactive.Config{
+		Cfg:        cfg,
+		Token:      result.Token,
+		ICEServers: st.ICEServers,
+		OwnUserId:  cfg.Login,
+		ICETimeout: iceTimeout,
+		DeviceIn:   deviceIn,
+		DeviceOut:  deviceOut,
+		LogFile:    logFile,
+	}
+
+	if st.SignalingMode == "external" {
+		// external (HPB): weblogin пропущен выше, own — из EvOwnSession.
+		// OCS-sessionId идёт ТОЛЬКО в room-join WS (проверка прав в NC), в
+		// own-фильтр НЕ подмешивается (другое id-пространство). WS-комнату
+		// клиент установит сам в JoinCall (canonical flow, ревью #4).
+		iCfg.Signaling = hpbesignaling.New(hpbesignaling.Config{
+			Auth:          auth,
+			Doer:          httpClient,
+			Server:        st.Server,
+			Ticket:        st.Ticket,
+			Userid:        st.Userid,
+			RoomSessionId: sessionId,
+			ConnectBudget: connectBudget(iceTimeout),
+			Stderr:        logFile, // диагностика reconnect — в call.log (TUI-терминал занят отрисовкой)
+		})
+	} else {
+		// internal: own статически из JoinRoom (порядок пути:
+		// weblogin → JoinRoom → SetSessionId → OwnSessionId — ревью плана #6).
+		ocsSig.SetSessionId(sessionId) // исходящий POST signaling требует own sessionId
+		iCfg.Signaling = ocsSig
+		iCfg.OwnSessionId = sessionId // own-фильтр (приоритетный источник)
+	}
+
+	err = interactive.Run(sigCtx, iCfg)
 	if err == nil {
 		fmt.Fprintln(stderr, "nctalk-talk: подробности в "+logPath)
 		return 0
@@ -204,4 +260,12 @@ func parseDurationEnv(name string) (time.Duration, error) {
 		return 0, fmt.Errorf("%s: невалидная длительность (ожидалось напр. «30s», «1m30s»)", name)
 	}
 	return d, nil
+}
+
+// connectBudget — бюджет первичного подключения hpbesignaling: половина
+// ICE-таймаута (дельта §3: заведомо меньше, чтобы EvError успел ДО
+// ICE-таймера). iceTimeout==0 → 0 → hpbesignaling подставит дефолт 15с.
+// Копия хелпера из cmd/nctalk-call (cmd-пакеты не экспортируют друг другу).
+func connectBudget(iceTimeout time.Duration) time.Duration {
+	return iceTimeout / 2
 }
