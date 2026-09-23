@@ -117,10 +117,11 @@ func TestSettings_FullResponse_Fixture(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL, "secret")
-	servers, err := c.Settings(context.Background())
+	st, err := c.Settings(context.Background())
 	if err != nil {
 		t.Fatalf("Settings: got err=%v, want nil", err)
 	}
+	servers := st.ICEServers
 
 	// Путь — v3 signaling-settings БЕЗ token (Spreed route Signaling#getSettings
 	// без {token}; curl с token → 404, без token → 200 — баг #2). Token в path
@@ -182,6 +183,38 @@ func TestSettings_FullResponse_Fixture(t *testing.T) {
 	}
 }
 
+// TestSettings_ExternalMode_DecodesTransportFields — external-фикстура: settings
+// отдаёт не только ICE, но и поля выбора транспорта (дельта §3: один запрос).
+// Хелперы — ФАКТИЧЕСКИЕ из capability_test.go (внешний тестовый пакет
+// capability_test: loadFixture/newClient — ревью плана #3; голый New(...) тут
+// не компилируется).
+func TestSettings_ExternalMode_DecodesTransportFields(t *testing.T) {
+	body := loadFixture(t, "capability_external.json")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	c := newClient(srv.URL, "secret")
+	st, err := c.Settings(context.Background())
+	if err != nil {
+		t.Fatalf("Settings: %v", err)
+	}
+	if st.SignalingMode != "external" {
+		t.Errorf("SignalingMode = %q, want external", st.SignalingMode)
+	}
+	if st.Server == "" || !strings.HasPrefix(st.Server, "https://") {
+		t.Errorf("Server = %q, want signaling-сервер URL", st.Server)
+	}
+	if st.Ticket == "" || st.Userid == "" {
+		t.Errorf("Ticket/Userid пустые: %q/%q — external обязан выдать ticket", st.Ticket, st.Userid)
+	}
+	if len(st.ICEServers) != 1 {
+		t.Errorf("ICEServers = %d, want 1 (stun)", len(st.ICEServers))
+	}
+}
+
 // TestSettings_OnlySTUN_EmptyTurn — turnservers=[] (явный пустой массив).
 // Спека: клиент работает с одним STUN, если TURN не сконфигурирован.
 func TestSettings_OnlySTUN_EmptyTurn(t *testing.T) {
@@ -199,18 +232,18 @@ func TestSettings_OnlySTUN_EmptyTurn(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL, "secret")
-	servers, err := c.Settings(context.Background())
+	st, err := c.Settings(context.Background())
 	if err != nil {
 		t.Fatalf("Settings: %v", err)
 	}
-	if got, want := len(servers), 1; got != want {
-		t.Fatalf("len(servers) = %d, want %d", got, want)
+	if got, want := len(st.ICEServers), 1; got != want {
+		t.Fatalf("len(st.ICEServers) = %d, want %d", got, want)
 	}
-	if got, want := servers[0].URLs[0], "stun:stun.example.org:3478"; got != want {
-		t.Errorf("servers[0].URLs[0]: got %q, want %q", got, want)
+	if got, want := st.ICEServers[0].URLs[0], "stun:stun.example.org:3478"; got != want {
+		t.Errorf("st.ICEServers[0].URLs[0]: got %q, want %q", got, want)
 	}
-	if servers[0].Username != "" {
-		t.Errorf("servers[0].Username: got %q, want empty", servers[0].Username)
+	if st.ICEServers[0].Username != "" {
+		t.Errorf("st.ICEServers[0].Username: got %q, want empty", st.ICEServers[0].Username)
 	}
 }
 
@@ -230,12 +263,12 @@ func TestSettings_OnlySTUN_FieldMissing(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL, "secret")
-	servers, err := c.Settings(context.Background())
+	st, err := c.Settings(context.Background())
 	if err != nil {
 		t.Fatalf("Settings: %v", err)
 	}
-	if got, want := len(servers), 1; got != want {
-		t.Fatalf("len(servers) = %d, want %d", got, want)
+	if got, want := len(st.ICEServers), 1; got != want {
+		t.Fatalf("len(st.ICEServers) = %d, want %d", got, want)
 	}
 }
 
@@ -257,12 +290,12 @@ func TestSettings_Empty_BothEmpty(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL, "secret")
-	servers, err := c.Settings(context.Background())
+	st, err := c.Settings(context.Background())
 	if err != nil {
 		t.Fatalf("Settings: got err=%v, want nil (пустой STUN/TURN — НЕ ошибка)", err)
 	}
-	if servers != nil {
-		t.Errorf("servers: got %v, want nil (пустой список → nil для удобства потребителя)", servers)
+	if st.ICEServers != nil {
+		t.Errorf("st.ICEServers: got %v, want nil (пустой список → nil для удобства потребителя)", st.ICEServers)
 	}
 }
 
@@ -281,12 +314,12 @@ func TestSettings_Empty_FieldsMissing(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL, "secret")
-	servers, err := c.Settings(context.Background())
+	st, err := c.Settings(context.Background())
 	if err != nil {
 		t.Fatalf("Settings: %v", err)
 	}
-	if servers != nil {
-		t.Errorf("servers: got %v, want nil при отсутствии STUN/TURN-полей", servers)
+	if st.ICEServers != nil {
+		t.Errorf("st.ICEServers: got %v, want nil при отсутствии STUN/TURN-полей", st.ICEServers)
 	}
 }
 

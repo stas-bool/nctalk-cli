@@ -176,10 +176,10 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 	//    логируем и продолжаем с пустым списком — pion примет пустой []ICEServer
 	//    (host candidates хватит для same-network spike).
 	capClient := capability.New(auth, httpClient)
-	iceServers, err := capClient.Settings(ctx)
+	st, err := capClient.Settings(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "nctalk-call: capability: %v (продолжаем без STUN/TURN)\n", err)
-		iceServers = nil
+		st.ICEServers = nil // временно до Task 7/8: best-effort сохранён
 	}
 
 	// 6. InFlags и --in источник.
@@ -276,7 +276,7 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 		Signaling:    sigClient,
 		Token:        result.Token,
 		InFlags:      inFlags,
-		ICEServers:   iceServers,
+		ICEServers:   st.ICEServers,
 		Stdin:        pcmIn,
 		Stdout:       pcmOut,
 		Stderr:       stderr,

@@ -123,10 +123,10 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 	}
 
 	capClient := capability.New(auth, httpClient)
-	iceServers, err := capClient.Settings(ctx)
+	st, err := capClient.Settings(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "nctalk-talk: capability: %v (продолжаем без STUN/TURN)\n", err)
-		iceServers = nil
+		st.ICEServers = nil // временно до Task 7/8: best-effort сохранён
 	}
 
 	sigClient := signaling.New(auth, httpClient)
@@ -170,7 +170,7 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 		Cfg:          cfg,
 		Token:        result.Token,
 		Signaling:    sigClient,
-		ICEServers:   iceServers,
+		ICEServers:   st.ICEServers,
 		OwnUserId:    cfg.Login,
 		OwnSessionId: sessionId,
 		ICETimeout:   iceTimeout,
