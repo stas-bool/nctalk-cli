@@ -424,8 +424,13 @@ func applyMessage(m *serverMessage) []signaling.Event {
 		}
 		return []signaling.Event{{Kind: kind, From: from, SDP: p.SDP}}
 	case "candidate":
+		// Пустой candidate (end-of-candidates marker Spreed) ДОСТАВЛЯЕТСЯ —
+		// паритет с OCS-путём (decodeCandidateEvent): EvCandidate с пустым
+		// Candidate.Candidate = конец trickle-последовательности. Скипаем
+		// только payload, не разобравшийся unmarshal'ом; sdpMLineIndex/sdpMid
+		// могут отсутствовать — доставляем как задекодировалось.
 		var p icePayload
-		if err := json.Unmarshal(m.Data.Payload, &p); err != nil || p.Candidate.Candidate == "" {
+		if err := json.Unmarshal(m.Data.Payload, &p); err != nil {
 			return nil
 		}
 		return []signaling.Event{{Kind: signaling.EvCandidate, From: from, Candidate: signaling.ICECandidate{

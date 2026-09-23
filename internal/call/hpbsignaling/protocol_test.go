@@ -84,6 +84,48 @@ func TestApplyFrame_Messages(t *testing.T) {
 	}
 }
 
+// TestApplyFrame_CandidateEndOfCandidates — пустой candidate (end-of-candidates
+// marker, форма как у OCS: payload.candidate.candidate === "") ДОЛЖЕН
+// доставляться как EvCandidate — паритет с OCS-путём (decodeCandidateEvent,
+// TestParse_Candidate [2]): peer-слой трактует пустой Candidate.Candidate как
+// конец trickle-последовательности. Скип остаётся только для payload, не
+// разобравшегося unmarshal'ом.
+func TestApplyFrame_CandidateEndOfCandidates(t *testing.T) {
+	st := newRoomState()
+	raw := `{"type":"message","message":{"sender":{"type":"session","sessionid":"peer-sid"},"data":{"type":"candidate","roomType":"video","payload":{"candidate":{"candidate":""}}}}}`
+	var f serverFrame
+	if err := json.Unmarshal([]byte(raw), &f); err != nil {
+		t.Fatalf("декод: %v", err)
+	}
+	evs := st.applyFrame(&f)
+	if len(evs) != 1 {
+		t.Fatalf("len(evs) = %d, want 1 (end-of-candidates — событие)", len(evs))
+	}
+	if evs[0].Kind != signaling.EvCandidate {
+		t.Fatalf("Kind = %v, want EvCandidate", evs[0].Kind)
+	}
+	if evs[0].From != "peer-sid" {
+		t.Fatalf("From = %q, want peer-sid (sender.sessionid)", evs[0].From)
+	}
+	if evs[0].Candidate.Candidate != "" {
+		t.Fatalf("Candidate.Candidate = %q, want пусто (end-of-candidates)", evs[0].Candidate.Candidate)
+	}
+	// sdpMLineIndex/sdpMid в маркере отсутствуют — доставлены как nil.
+	if evs[0].Candidate.SDPMLineIndex != nil || evs[0].Candidate.SDPMid != nil {
+		t.Fatalf("SDPMLineIndex/SDPMid = %v/%v, want nil/nil (отсутствуют — как задекодировалось)",
+			evs[0].Candidate.SDPMLineIndex, evs[0].Candidate.SDPMid)
+	}
+
+	// Битый payload (unmarshal-ошибка) — по-прежнему 0 событий (без шума).
+	var bad serverFrame
+	if err := json.Unmarshal([]byte(`{"type":"message","message":{"sender":{"sessionid":"p"},"data":{"type":"candidate","payload":"not-an-object"}}}`), &bad); err != nil {
+		t.Fatalf("декод: %v", err)
+	}
+	if evs := st.applyFrame(&bad); len(evs) != 0 {
+		t.Fatalf("битый candidate-payload → %+v, want 0 событий", evs)
+	}
+}
+
 // TestApplyFrame_Welcome_DecodeAndNoise — welcome-кадр по ЖИВОЙ фикстуре
 // Task 1: без id-поля, version — ВЕРСИЯ СЕРВЕРА (не протокола), features —
 // реальный список (hello-v2 есть). Событий не несёт, но декодируется в
