@@ -62,40 +62,39 @@ func New(auth Auth, doer transport.Doer) *Client {
 // apiVersion = v3 (как и pull-signaling в signaling/types.go).
 const pathSignalingSettings = "/ocs/v2.php/apps/spreed/api/v3/signaling/settings"
 
-// Settings запрашивает signaling-settings для комнаты и извлекает STUN/TURN.
+// Settings запрашивает signaling-settings и возвращает ICE-конфигурацию +
+// поля выбора транспорта (дельта 2026-09-23 §3). ОДИН HTTP-запрос на старт —
+// второй запрос settings не появляется; ticket из этого же ответа уходит в
+// hpbesignaling (первичное подключение), переподключения пере-запрашивают
+// settings сами (свежий ticket).
 //
 // Контракт:
-//   - GET /ocs/v2.php/apps/spreed/api/v3/signaling/settings (БЕЗ token, баг #2);
-//   - из ocs.data читаются поля stunservers и turnservers (прочие поля —
-//     signalingMode / userId / server / federation / hideWarning / sipDialinInfo —
-//     игнорируются; они нужны signaling-клиенту, не capability);
-//   - маппятся в []webrtc.ICEServer: STUN — только URLs, без кредов;
-//     TURN — URLs + Username + Credential + CredentialType=ICECredentialTypePassword
-//     (Spreed getTurnSettings возвращает password-style credential, не OAuth);
-//   - порядок: STUN сначала, TURN потом — канонический WebRTC-порядок (pion
-//     принимает в любом, но сохраняем для предсказуемости трассировки);
-//   - при пустых/отсутствующих stunservers+turnservers возвращает (nil, nil) —
-//     это НЕ ошибка (signalingMode != internal, либо STUN не нужен для хоста
-//     в той же сети); pion принимает пустой список ICEServers;
-//   - сетевые/HTTP-ошибки возвращаются через *transport.OCSError (DoOCS уже
-//     типизирует и санитизирует их — capability НЕ дублирует sanitize).
-//
-// TURN-credentials НЕ логируются (спека §5): в коде нет log.Printf / fmt.Fprintln
-// для ICEServer.
-func (c *Client) Settings(ctx context.Context) ([]webrtc.ICEServer, error) {
+//   - GET /ocs/v2.php/apps/spreed/api/v3/signaling/settings (БЕЗ token);
+//   - stunservers/turnservers → []webrtc.ICEServer (как раньше, без изменений
+//     маппинга; пустые → nil, это НЕ ошибка);
+//   - SignalingMode: "" и "internal" → internal (polling-путь cmd); "external" →
+//     HPB. Прочие значения не ожидаются — трактуются как internal;
+//   - Server/Ticket/Userid заполняются только в external (в internal пустые);
+//     TURN-credentials и ticket НЕ логируются (спека §5, дельта §4).
+func (c *Client) Settings(ctx context.Context) (Settings, error) {
 	var data settingsData
 	if _, err := transport.DoOCS(ctx, c.doer, c.auth, http.MethodGet, pathSignalingSettings, nil, nil, false, &data); err != nil {
-		return nil, err
+		return Settings{}, err
 	}
 
-	// Ёмкость режем по сумме длин, чтобы избежать реаллоков при append'е
-	// TURN'ов после STUN'ов.
+	out := Settings{SignalingMode: data.SignalingMode, Server: data.Server}
+	if out.SignalingMode != "external" {
+		out.SignalingMode = "internal" // "" и неизвестные → internal (консервативно)
+	}
+	out.Userid = data.UserId
+	if v := data.HelloAuthParams.V1; v.Ticket != "" {
+		out.Ticket, out.Userid = v.Ticket, v.Userid // приоритет helloAuthParams["1.0"]
+	} else {
+		out.Ticket = data.Ticket
+	}
+
 	servers := make([]webrtc.ICEServer, 0, len(data.Stunservers)+len(data.Turnservers))
 	for _, s := range data.Stunservers {
-		// STUN: только URLs. Username/Credential остаются zero-value (""/nil);
-		// CredentialType формально равен ICECredentialTypePassword (это zero-value
-		// константы iota), но pion для STUN-серверов его не валидирует —
-		// валидируется только при TURN-URL, где Credential==nil дал бы ошибку.
 		servers = append(servers, webrtc.ICEServer{URLs: s.URLs})
 	}
 	for _, s := range data.Turnservers {
@@ -106,19 +105,36 @@ func (c *Client) Settings(ctx context.Context) ([]webrtc.ICEServer, error) {
 			CredentialType: webrtc.ICECredentialTypePassword,
 		})
 	}
-	if len(servers) == 0 {
-		return nil, nil
+	if len(servers) > 0 {
+		out.ICEServers = servers
 	}
-	return servers, nil
+	return out, nil
 }
 
-// settingsData — фрагмент ocs.data ответа signaling-settings, нужный capability.
-// Полный ответ (фикстура testdata/signaling/capability.json) содержит ещё
-// signalingMode/userId/server/federation/hideWarning/sipDialinInfo — их не
-// декодируем, чтобы не плодить неиспользуемые поля (и дать signaling-клиенту
-// возможность читать тот же ответ независимо в будущем). Json-теги совпадают с
-// ключами фикстуры (snake_case, как в PHP-бэкенде Spreed).
+// Settings — результат единственного стартового запроса signaling-settings.
+// Потребители: cmd/nctalk-call, cmd/nctalk-talk (выбор транспорта + ICE).
+type Settings struct {
+	ICEServers    []webrtc.ICEServer // STUN+TURN (любой режим)
+	SignalingMode string             // "internal" (default) | "external"
+	Server        string             // URL signaling-сервера (только external)
+	Ticket        string             // ticket первого подключения (только external)
+	Userid        string             // userid для hello-params (обычно == NEXTCLOUD_LOGIN)
+}
+
+// settingsData — фрагмент ocs.data ответа signaling-settings. Расширен полями
+// выбора транспорта (дельта 2026-09-23): signalingMode/server/ticket/
+// helloAuthParams. Federation/sipDialinInfo по-прежнему не декодируются.
 type settingsData struct {
+	SignalingMode   string `json:"signalingMode"`
+	Server          string `json:"server"`
+	Ticket          string `json:"ticket"`
+	UserId          string `json:"userId"`
+	HelloAuthParams struct {
+		V1 struct {
+			Userid string `json:"userid"`
+			Ticket string `json:"ticket"`
+		} `json:"1.0"`
+	} `json:"helloAuthParams"`
 	Stunservers []struct {
 		URLs []string `json:"urls"`
 	} `json:"stunservers"`
