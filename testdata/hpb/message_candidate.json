@@ -1,0 +1,20 @@
+{
+  "_comment": "candidate — НЕ снят со спайка Task 1; канон исходников + JS-клиента (данные идут opaque, парсит payload потребитель). payload.candidate — ВЛОЖЕННЫЙ ОБЪЕКТ (инвариант бага #6 базовой спеки; в OCS-polling то же); признак конца trickle — payload.candidate == \"\". IP в примере — RFC 5737 TEST-NET.",
+  "type": "message",
+  "message": {
+    "sender": { "type": "session", "sessionid": "REDACTED-hpb-sessionid-peer-64chars", "userid": "bob" },
+    "recipient": { "type": "session", "sessionid": "REDACTED-hpb-sessionid-own-64chars" },
+    "data": {
+      "type": "candidate",
+      "to": "REDACTED-hpb-sessionid-own-64chars",
+      "roomType": "video",
+      "payload": {
+        "candidate": {
+          "candidate": "candidate:1 1 UDP 2130706431 192.0.2.20 54321 typ host",
+          "sdpMLineIndex": 0,
+          "sdpMid": "0"
+        }
+      }
+    }
+  }
+}
