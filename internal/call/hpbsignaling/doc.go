@@ -5,8 +5,10 @@
 // участников и сообщения — клиент «слеп» в звонке; этот пакет — замена
 // транспорта, peer/media-слои не меняются.
 //
-// Реализует все 4 метода agent.sigClient: PollLoop/Send — WebSocket (hello c
-// ticket → room → события/исходящие), LeaveCall — делегирование OCS-клиенту
+// Реализует все 4 метода agent.sigClient: PollLoop/Send — WebSocket (hello
+// с auth {url, params}: версия «1.0»/{userid, ticket} или «2.0»/{token} —
+// по welcome-feature hello-v2; WS-путь /spreed → room → события/исходящие),
+// LeaveCall — делегирование OCS-клиенту
 // call/signaling (Call API v4 работает при любом signalingMode), JoinCall —
 // подключение WS-комнаты с бюджетом + делегирование OCS (canonical flow).
 //
