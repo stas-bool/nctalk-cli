@@ -1,0 +1,27 @@
+{
+  "_comment": "Живой кадр HPB (спайк Task 1, 2026-09-23), обезличен. Приходит сразу после WS-connect (диал wss://<server>/spreed), ДО hello-response. Дрифт против исходного шаблона: поля id нет; welcome.version — ВЕРСИЯ СЕРВЕРА (не протокола); в реальном features-списке нет server-in-room (есть hello-v2 и др.).",
+  "type": "welcome",
+  "welcome": {
+    "version": "2.1.1",
+    "features": [
+      "audio-video-permissions",
+      "chat-relay",
+      "dialout",
+      "federation",
+      "hello-v2",
+      "incall-all",
+      "join-features",
+      "mcu",
+      "offer-codecs",
+      "recipient-call",
+      "serverinfo",
+      "simulcast",
+      "switchto",
+      "transient-data",
+      "transient-sessiondata",
+      "update-sdp",
+      "virtual-sessions",
+      "welcome"
+    ]
+  }
+}

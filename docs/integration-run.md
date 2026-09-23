@@ -141,6 +141,7 @@ offer/answer/candidate). Цель — подтвердить:
 | `NEXTCLOUD_PASS`          | App-password (НЕ основной пароль).                               |
 | `NCTALK_INTEGRATION_ROOM` | Token комнаты, в которой пойдёт звонок. Должна существовать и быть доступной пользователю. |
 | `NCTALK_INTEGRATION_CALL` | `1` — явный opt-in для мутационного signaling-теста.             |
+| `NCTALK_INTEGRATION_HPB` | `1` — явный opt-in HPB-спайка/звонка против сервера с внешним signaling (мутация: JoinRoom/WS). |
 
 При отсутствии любого из них тест **скипается** через `t.Skip` (не падает).
 
@@ -162,6 +163,24 @@ CGO_ENABLED=0 go test -tags=integration ./internal/call/signaling/... \
 
 Команда завершится за ~5 секунд (столько живёт poll-контекст в тесте)
 плюс сетевые задержки на `JoinCall`/`LeaveCall` (по ~30с потолок).
+
+### HPB-спайк — внешний signaling-сервер (`hpbesignaling`, план HPB Task 1)
+
+`internal/call/hpbsignaling/integration_test.go` (build-tag `integration`):
+гейт-тест протокола nextcloud-spreed-signaling для серверов с
+`signalingMode=="external"` (OCS-polling там не раздаёт участников — дельта-спека
+2026-09-23 §2). Мутационный (JoinRoom + WS-подключение) — двухслойная защита:
+`NCTALK_INTEGRATION_HPB=1` + `NCTALK_INTEGRATION_ROOM`. Docker internal-сервер
+тест пропустит сам (`signalingMode != external`).
+
+```sh
+NCTALK_INTEGRATION_HPB=1 NCTALK_INTEGRATION_ROOM=<token> \
+CGO_ENABLED=0 go test -tags integration ./internal/call/hpbsignaling/ -run TestHPBSpike -v
+```
+
+Гейт: welcome + hello-response (sessionid) + room-ack + event join со своей
+сессией («ГЕЙТ ПРОЙДЕН»). С `NCTALK_DEBUG=1` логируется каждый WS-кадр
+(ticket маскируется) — источник фикстур `testdata/hpb/*.json`.
 
 ### Что смотреть в выводе
 
@@ -291,6 +310,7 @@ exit-контракт (0/1/2/3) интеграционно на реальном
 | `NCTALK_INTEGRATION_CALL` | `1` — явный opt-in (звонки = мутация: JoinCall/LeaveCall меняют состояние комнаты). |
 | `NCTALK_INTEGRATION_ROOM` | token целевой комнаты (для `JoinLeave_Alone`; `UnknownToken` использует захардкоженный несуществующий). |
 | `NCTALK_ICE_TIMEOUT` (опц.) | Короткий (напр. `3s`) для `JoinLeave_Alone` — иначе 30с default (Task 3.2). |
+| `NCTALK_INTEGRATION_HPB` | `1` — явный opt-in HPB-спайка/звонка против сервера с внешним signaling (мутация: JoinRoom/WS). |
 
 ### Запуск
 
