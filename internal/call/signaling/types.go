@@ -33,6 +33,13 @@ const (
 	// Err несёт *exit.ExitError{Code, Err}. Получив EvError, потребитель должен
 	// завершиться с указанным кодом (после штатного leave).
 	EvError
+	// EvOwnSession — собственный sessionId доставлен транспортом асинхронно
+	// (external/HPB-режим: id приходит в WS hello-response ВНУТРИ PollLoop,
+	// до первого EvUsersUpdated; отдельное id-пространство от OCS-sessionId
+	// из JoinRoom — дельта 2026-09-23 §2.3). From несёт sessionId; consumer
+	// устанавливает его как own ДО фильтрации EvUsersUpdated. Internal-транспорт
+	// (OCS-polling) это событие НЕ эмитит — там own известен статически.
+	EvOwnSession
 )
 
 // Event — сигнал из signaling-loop. Только одно из полей (Users/SDP/Candidate/Err)
