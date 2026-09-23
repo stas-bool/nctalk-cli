@@ -657,6 +657,40 @@ func TestRun_PeerLeft_Reconcile(t *testing.T) {
 	}
 }
 
+// TestRun_OwnSessionFromEvent_SelfFiltered — external-режим: OwnSessionId НЕ
+// задан статически (OCS-sessionId — другое id-пространство, дельта §2.3),
+// own приходит EvOwnSession (WS hello-response) ВНУТРИ PollLoop. Self-фильтр
+// reconcile обязан сработать по нему: пир создаётся только на «чужого».
+func TestRun_OwnSessionFromEvent_SelfFiltered(t *testing.T) {
+	fs := &fakeSignaling{
+		pollLoop: pollSendThenBlock([]signaling.Event{
+			{Kind: signaling.EvOwnSession, From: "hpb-own"},
+			{Kind: signaling.EvUsersUpdated, Users: []signaling.User{
+				{SessionId: "hpb-own", InCall: 3},  // сам себе — фильтруется
+				{SessionId: "hpb-peer", InCall: 3}, // собеседник — пир
+			}},
+		}),
+	}
+	counters := newTestCounters()
+	cfg := counters.buildConfig(fs, 1, io.Discard)
+	cfg.OwnSessionId = "" // external: статического own НЕТ
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- Run(ctx, cfg) }()
+
+	waitRecvTimeout(t, counters.peerCh, 500*time.Millisecond) // ровно один пир
+
+	// Без self-фильтра (баг) было бы ДВА пира: hpb-own + hpb-peer.
+	if n := atomic.LoadInt32(&counters.peerCreated); n != 1 {
+		t.Fatalf("создано пиров %d, want 1 — EvOwnSession не установлен/не отфильтрован", n)
+	}
+	cancel()
+	if err := <-runDone; err != nil {
+		t.Fatalf("Run err = %v, want nil", err)
+	}
+}
+
 // ---- Test 7: OutgoingRouting — peer.Outgoing → signaling.Send ----
 
 func TestRun_OutgoingRouting(t *testing.T) {

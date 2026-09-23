@@ -398,6 +398,11 @@ mainLoop:
 				break mainLoop
 			}
 			switch ev.Kind {
+			case signaling.EvOwnSession:
+				// external/HPB: own-sessionId из WS hello-response — приходит
+				// асинхронно (внутри PollLoop), ДО первого EvUsersUpdated, и
+				// МЕНЯЕТСЯ при каждом переподключении (дельта §2.3).
+				a.setOwnSessionId(ev.From)
 			case signaling.EvUsersUpdated:
 				a.reconcile(ev.Users)
 			case signaling.EvOffer, signaling.EvAnswer, signaling.EvCandidate:
@@ -1017,6 +1022,26 @@ func (a *agentState) resolveOwnSessionId(users []signaling.User) {
 				"если reproducible.\n", a.cfg.OwnUserId)
 	} else {
 		fmt.Fprintf(a.cfg.Stderr, "nctalk: ownSessionId извлечён из usersInRoom (%s)\n", a.cfg.OwnUserId)
+	}
+}
+
+// setOwnSessionId — own-sessionId, доставленный транспортом асинхронно
+// (external/HPB: EvOwnSession из hello-response; эмитится при каждом
+// (пере)подключении — sessionId между WS-сессиями меняется). Перетирает
+// текущее значение и отключает userId-fallback: транспорт уже идентифицировал
+// нас точно. В internal-режиме событие не приходит — статический
+// cfg.OwnSessionId (OCS из JoinRoom) не затрагивается.
+func (a *agentState) setOwnSessionId(sid string) {
+	if sid == "" {
+		return
+	}
+	a.ownSessionIdMu.Lock()
+	prev := a.ownSessionId
+	a.ownSessionId = sid
+	a.ownUserIdChecked = true
+	a.ownSessionIdMu.Unlock()
+	if prev != sid {
+		fmt.Fprintf(a.cfg.Stderr, "nctalk: ownSessionId получен из signaling (hello-response)\n")
 	}
 }
 
