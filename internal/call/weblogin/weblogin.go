@@ -12,6 +12,16 @@ import (
 	"github.com/stas-bool/nctalk-cli/internal/transport"
 )
 
+// originOf возвращает браузерный вид базового URL — scheme://host (без пути и
+// trailing slash), как заголовок Origin у браузера. Fallback на TrimRight — для
+// экзотического BaseURL с путём.
+func originOf(base *url.URL) string {
+	if base.Host == "" {
+		return strings.TrimRight(base.String(), "/")
+	}
+	return base.Scheme + "://" + base.Host
+}
+
 // requestTokenRe извлекает requesttoken из HTML логин-формы Nextcloud. Формат —
 // HTML-атрибут requesttoken="..." (на <body>/<input>/meta), НЕ name="requesttoken" value=.
 // Подтверждено curl-спайком на Talk 20.1.11 (89-символьный base64-подобный токен).
@@ -59,6 +69,10 @@ func Login(ctx context.Context, doer transport.Doer, auth transport.Auth) error 
 		return transport.SanitizeErr(err)
 	}
 	postReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	// Origin обязателен (как у браузера): боевые Nextcloud за WAF молча отвергают
+	// POST /login без Origin — direct=1 при верных кредах. Подтверждено A/B-спайком
+	// на живом сервере 2026-09-23 (с Origin вход проходит, без — нет; UA неважен).
+	postReq.Header.Set("Origin", originOf(auth.BaseURL))
 	postResp, err := doer.Do(postReq)
 	if err != nil {
 		return transport.SanitizeErr(err)

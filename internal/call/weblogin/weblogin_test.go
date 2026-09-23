@@ -121,6 +121,43 @@ func TestLogin_FailedRedirect(t *testing.T) {
 	}
 }
 
+// TestLogin_PostHasOriginHeader — POST /login обязан нести Origin: scheme://host
+// (как браузер): боевой Nextcloud за WAF молча отвергает логин без Origin
+// (303 /login?direct=1 при верных кредах; найдено 2026-09-23 на живом сервере).
+func TestLogin_PostHasOriginHeader(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/login" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method == http.MethodGet {
+			http.SetCookie(w, &http.Cookie{Name: "oc_sessionPassphrase", Value: "pre", Path: "/"})
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<html><body data-requesttoken="RT_ORIGIN"></body></html>`))
+			return
+		}
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		if r.Header.Get("Origin") != scheme+"://"+r.Host {
+			w.Header().Set("Location", "/login?direct=1&user=admin")
+			w.WriteHeader(http.StatusSeeOther)
+			return
+		}
+		w.Header().Set("Location", "/apps/dashboard/")
+		w.WriteHeader(http.StatusSeeOther)
+	}))
+	defer ts.Close()
+
+	client := noRedirectClient(t)
+	auth := authFrom(t, ts.URL, "admin", "adminpass")
+
+	if err := weblogin.Login(context.Background(), client, auth); err != nil {
+		t.Fatalf("Login: got %v, want nil (POST без Origin отвергнут сервером)", err)
+	}
+}
+
 // TestLogin_NoRequestToken — GET /login без requesttoken в HTML → Login возвращает
 // ошибку (парсинг не удался), НЕ отправляя POST с пустым токеном.
 func TestLogin_NoRequestToken(t *testing.T) {
