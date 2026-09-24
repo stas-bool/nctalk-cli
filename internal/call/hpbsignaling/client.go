@@ -51,12 +51,11 @@ import (
 )
 
 const (
-	// pathCallFmt дублирует signaling.pathCallFmt (там unexported): JoinCall/
-	// LeaveCall делегируются вложенному signaling.Client, а этот путь нужен
-	// только его док-контексту — оставлен для симметрии/будущих правок.
-	pathCallFmt = "/ocs/v2.php/apps/spreed/api/v4/call/%s"
 	// pathSignalingSettings — источник auth-params при каждом (пере)подключении
 	// (дельта §2: отдельного ticket-эндпоинта нет, ticket живёт в settings-ответе).
+	// Пути Call API не дублируются: JoinCall/LeaveCall делегируются вложенному
+	// signaling.Client (pathCallFmt там unexported и используется только им —
+	// мёртвая копия удалена, ревью HPB #9).
 	pathSignalingSettings = "/ocs/v2.php/apps/spreed/api/v3/signaling/settings"
 
 	defaultConnectBudget = 15 * time.Second // ≈ NCTALK_ICE_TIMEOUT(30с)/2 (дельта §3)
@@ -89,6 +88,11 @@ type Config struct {
 // сериализуются write-мьютексом coder/websocket (один Writer в моменте —
 // контракт библиотеки), Ping безопасен конкурентно с Writer; указатель conn
 // всегда читается под c.mu; PollLoop — единственный владелец read-стороны.
+// Конкурентные (пере)подключения (ensureConnected ↔ PollLoop) сериализуются
+// guard'ом connecting/connectDone (ревью HPB #2): владелец диалит сам, прочие
+// ждут его результата — иначе второй setConn перезаписывал бы первый (утечка
+// WS + ghost-сессия на сервере), а pending с EvOwnSession мёртвой сессии
+// доехал бы до агента.
 type Client struct {
 	cfg Config
 	ocs *signaling.Client // делегирование JoinCall/LeaveCall (Call API — OCS)
@@ -97,6 +101,12 @@ type Client struct {
 	conn    *websocket.Conn   // nil между (пере)подключениями
 	state   *roomState        // снапшот текущей WS-сессии (nil между подключениями)
 	pending []signaling.Event // события connect-фазы при JoinCall-подключении (раздаёт PollLoop)
+
+	// guard TOCTOU (ревью HPB #2): всё под c.mu. connectErr — результат попытки
+	// владельца для ждущих (awaitDial); connectDone закрывается endDial'ом.
+	connecting  bool
+	connectDone chan struct{}
+	connectErr  error
 }
 
 // New — конструктор. doer используется и для OCS-делегирования, и для
@@ -162,28 +172,33 @@ func (c *Client) connectBudget() time.Duration {
 }
 
 // ensureConnected — первичное подключение с бюджетом (идемпотентно: при живом
-// соединении no-op). События connect-фазы буферизуются в pending: у JoinCall
+// соединении no-op; при подключении в полёте — ждём результата владельца,
+// guard ревью HPB #2). События connect-фазы буферизуются в pending: у JoinCall
 // нет канала событий, их раздаст PollLoop. Per-attempt deadline — зависший
 // dial/молчащий welcome не переживают бюджет (ревью плана #5).
 func (c *Client) ensureConnected(ctx context.Context, token string) error {
-	c.mu.Lock()
-	connected := c.conn != nil
-	c.mu.Unlock()
-	if connected {
+	conn, st, other, owner := c.beginDial()
+	if conn != nil {
 		return nil
 	}
 	budget := c.connectBudget()
 	actx, cancel := context.WithDeadline(ctx, time.Now().Add(budget))
 	defer cancel()
-	conn, st, pending, err := c.connect(actx, token)
-	if err != nil {
-		return fmt.Errorf("hpbesignaling: подключение к signaling-серверу не удалось за %s (бюджет первичного подключения): %w", budget, err)
+	if !owner {
+		// подключение уже идёт (PollLoop/другой JoinCall) — переиспользуем его
+		// результат, свой dial не поднимаем (guard TOCTOU, ревью HPB #2)
+		if _, _, err := c.awaitDial(actx, other); err != nil {
+			return connectBudgetErr(budget, err)
+		}
+		return nil
 	}
-	c.mu.Lock()
-	c.state = st
-	c.pending = append(c.pending, pending...)
-	c.mu.Unlock()
-	c.setConn(conn)
+	var pending []signaling.Event
+	var err error
+	conn, st, pending, err = c.connect(actx, token)
+	c.endDial(conn, st, pending, err)
+	if err != nil {
+		return connectBudgetErr(budget, err)
+	}
 	return nil
 }
 
@@ -193,6 +208,8 @@ func (c *Client) ensureConnected(ctx context.Context, token string) error {
 // установил соединение (canonical flow) — переиспользует его и раздаёт
 // буферизованные события connect-фазы (включая EvOwnSession). Если PollLoop
 // запущен без JoinCall — сам подключается с бюджетом (тесты/защита).
+// Подключение, уже идущее параллельно (JoinCall в полёте), НЕ дублируем своим
+// dial'ом — ждём попытку владельца (guard TOCTOU, ревью HPB #2).
 func (c *Client) PollLoop(ctx context.Context, token string, ch chan<- signaling.Event) error {
 	budget := c.connectBudget()
 	deadline := time.Now().Add(budget)
@@ -203,10 +220,13 @@ func (c *Client) PollLoop(ctx context.Context, token string, ch chan<- signaling
 		if err := ctx.Err(); err != nil {
 			return nil // штатный выход (вызывающий отменит ctx; LeaveCall — отдельно)
 		}
-		c.mu.Lock()
-		conn, st := c.conn, c.state
-		c.mu.Unlock()
-		if conn == nil {
+
+		conn, st, other, owner := c.beginDial()
+		var dialErr error
+		switch {
+		case conn != nil:
+			// соединение установлено JoinCall: буфер connect-фазы раздаём ниже.
+		case owner:
 			// per-attempt deadline — ТОЛЬКО пока соединение не установлено
 			// (reconnect-попытки после обрыва живут без дедлайна бюджета):
 			// зависший dial/молчащий welcome/hello обрываются в бюджет (ревью
@@ -218,49 +238,50 @@ func (c *Client) PollLoop(ctx context.Context, token string, ch chan<- signaling
 				callCtx, cancel = context.WithDeadline(ctx, deadline)
 			}
 			var pending []signaling.Event
-			var cerr error
-			conn, st, pending, cerr = c.connect(callCtx, token)
+			conn, st, pending, dialErr = c.connect(callCtx, token)
 			if cancel != nil {
 				cancel()
 			}
-			if cerr != nil {
-				var fe *errFrameError
-				switch {
-				case errors.As(cerr, &fe) && frameErrAction(fe.Code) == frameErrFatal2:
-					return c.fatal(ch, ctx, exit.ExitNotFound, cerr)
-				case !established && !time.Now().Before(deadline):
-					return c.fatal(ch, ctx, exit.ExitGeneric,
-						fmt.Errorf("подключение к signaling-серверу не удалось за %s (бюджет первичного подключения): %w", budget, cerr))
-				}
-				backoff = nextBackoff(backoff, c.cfg.BackoffBase, c.cfg.BackoffMax)
-				select {
-				case <-ctx.Done():
-					return nil
-				case <-time.After(backoff):
-					continue
-				}
+			// публикация результата под c.mu — ждущие (JoinCall/другой PollLoop)
+			// видят conn/state/pending атомарно.
+			c.endDial(conn, st, pending, dialErr)
+		default:
+			// подключение уже идёт (JoinCall) — ждём его результата и
+			// переиспользуем (guard TOCTOU, ревью HPB #2).
+			conn, st, dialErr = c.awaitDial(ctx, other)
+		}
+		if dialErr != nil {
+			if ctx.Err() != nil {
+				return nil
 			}
-			c.mu.Lock()
-			c.state = st
-			c.mu.Unlock()
-			c.setConn(conn)
-			for _, ev := range pending {
-				if !sendEvent(ctx, ch, ev) {
-					return nil
-				}
+			var fe *errFrameError
+			switch {
+			case errors.As(dialErr, &fe) && frameErrAction(fe.Code) == frameErrFatal2:
+				return c.fatal(ch, ctx, exit.ExitNotFound, dialErr)
+			case !established && !time.Now().Before(deadline):
+				return c.fatal(ch, ctx, exit.ExitGeneric, connectBudgetErr(budget, dialErr))
 			}
-		} else {
-			// Соединение установлено JoinCall: забираем буфер connect-фазы.
-			c.mu.Lock()
-			pending := c.pending
-			c.pending = nil
-			c.mu.Unlock()
-			for _, ev := range pending {
-				if !sendEvent(ctx, ch, ev) {
-					return nil
-				}
+			backoff = nextBackoff(backoff, c.cfg.BackoffBase, c.cfg.BackoffMax)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(backoff):
+				continue
 			}
 		}
+
+		// Буфер connect-фазы (свой dial сложил его в endDial, чужой — владелец):
+		// единая точка раздачи — JoinCall-путь и собственный dial.
+		c.mu.Lock()
+		pending := c.pending
+		c.pending = nil
+		c.mu.Unlock()
+		for _, ev := range pending {
+			if !sendEvent(ctx, ch, ev) {
+				return nil
+			}
+		}
+
 		established = true
 		backoff = 0
 
@@ -272,6 +293,67 @@ func (c *Client) PollLoop(ctx context.Context, token string, ch chan<- signaling
 		}
 		fmt.Fprintln(c.cfg.Stderr, "signaling: reconnect") // диагностика обрыва (дельта §4)
 	}
+}
+
+// beginDial — атомарный захват права на (пере)подключение под c.mu (guard
+// TOCTOU, ревью HPB #2). Возврат:
+//   - conn != nil — соединение уже установлено, подключаться не нужно (st —
+//     его снапшот);
+//   - owner=true — вызывающий подключается САМ и обязан завершить попытку
+//     endDial (любым исходом, включая ошибку);
+//   - done != nil, owner=false — подключается другой: ждать done и
+//     переиспользовать его результат (awaitDial).
+func (c *Client) beginDial() (conn *websocket.Conn, st *roomState, done <-chan struct{}, owner bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn != nil {
+		return c.conn, c.state, nil, false
+	}
+	if c.connecting {
+		return nil, nil, c.connectDone, false
+	}
+	c.connecting = true
+	c.connectDone = make(chan struct{})
+	return nil, nil, nil, true
+}
+
+// endDial — завершение попытки владельца beginDial: публикует результат
+// (успех — conn/state/pending одним куском; ошибка — connectErr для ждущих) и
+// закрывает connectDone. Всё под одним c.mu — ждущие видят финальное
+// состояние атомарно, без окна «done закрыт, conn ещё не выставлен».
+func (c *Client) endDial(conn *websocket.Conn, st *roomState, pending []signaling.Event, err error) {
+	c.mu.Lock()
+	c.connecting = false
+	c.connectErr = err
+	if err == nil {
+		c.conn = conn
+		c.state = st
+		c.pending = append(c.pending, pending...)
+	}
+	close(c.connectDone)
+	c.mu.Unlock()
+}
+
+// awaitDial — ожидание чужой попытки: (conn != nil, nil) — переиспользуем
+// результат владельца; (nil, err) — попытка владельца не удалась (ошибка
+// классифицируется вызывающим как своя); ctx-отмена — (nil, ctx.Err()).
+func (c *Client) awaitDial(ctx context.Context, done <-chan struct{}) (*websocket.Conn, *roomState, error) {
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn != nil {
+		return c.conn, c.state, nil
+	}
+	return nil, nil, c.connectErr
+}
+
+// connectBudgetErr — единая формулировка ошибки бюджета первичного подключения.
+func connectBudgetErr(budget time.Duration, err error) error {
+	return fmt.Errorf("hpbesignaling: подключение к signaling-серверу не удалось за %s (бюджет первичного подключения): %w", budget, err)
 }
 
 // fatal — EvError в канал (уважая ctx) + возврат ошибки.
@@ -316,7 +398,13 @@ func (c *Client) connect(ctx context.Context, token string) (*websocket.Conn, *r
 	}
 
 	conn, _, err := websocket.Dial(ctx, normalizeWSURL(c.cfg.Server), &websocket.DialOptions{
-		HTTPClient: &http.Client{Transport: http.DefaultTransport}, // без Timeout — длительное WS
+		// без Timeout — длительное WS; redirect-политика — инвариант остального
+		// транспорта: cross-host и https→http даунгрейд handshake-редиректов
+		// блокируются (ревью HPB #5)
+		HTTPClient: &http.Client{
+			Transport:     http.DefaultTransport,
+			CheckRedirect: transport.SameHostRedirectPolicy,
+		},
 	})
 	if err != nil {
 		return nil, nil, nil, transport.SanitizeErr(fmt.Errorf("hpbesignaling: ws dial: %w", err))
@@ -436,7 +524,14 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, st *roomSta
 		if err != nil {
 			return err // обрыв → PollLoop переподключится
 		}
-		if f.Type == "error" && f.Error != nil && f.ID == "" {
+		if f.Type == "error" && f.Error != nil {
+			if f.ID != "" {
+				// reply-форма (id непуст): в steady-state клиент запросов с id не
+				// шлёт (hello/room закрыты waitReply connect-фазы) — раньше такие
+				// кадры терялись молча; диагностируем, звонок не роняем (ревью HPB #6).
+				fmt.Fprintf(c.cfg.Stderr, "signaling: error %s: %s (id=%s)\n", f.Error.Code, f.Error.Message, f.ID)
+				continue
+			}
 			// асинхронная ошибка: token_expired/invalid_ticket чинятся reconnect'ом
 			// (свежие settings в connect), прочие — лог и продолжаем (не роняем звонок).
 			fmt.Fprintf(c.cfg.Stderr, "signaling: error %s: %s\n", f.Error.Code, f.Error.Message)
@@ -455,7 +550,8 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, st *roomSta
 
 // authBundle — параметры hello-аутентификации из signaling-settings: v1
 // {userid, ticket} (приоритет helloAuthParams["1.0"] над корневыми полями —
-// спайк Task 1) и v2 token (helloAuthParams["2.0"]).
+// спайк Task 1; ПУСТОЙ userid блока корневой userId не затирает — ревью
+// HPB #4) и v2 token (helloAuthParams["2.0"]).
 type authBundle struct {
 	userid  string
 	ticket  string
@@ -466,8 +562,8 @@ type authBundle struct {
 // weblogin не нужен — дельта §2). Ticket не логируется.
 func (c *Client) fetchAuthParams(ctx context.Context) (authBundle, error) {
 	var data struct {
-		Ticket string `json:"ticket"`
-		UserId string `json:"userId"`
+		Ticket          string `json:"ticket"`
+		UserId          string `json:"userId"`
 		HelloAuthParams struct {
 			V1 struct {
 				Userid string `json:"userid"`
@@ -484,7 +580,11 @@ func (c *Client) fetchAuthParams(ctx context.Context) (authBundle, error) {
 	}
 	b := authBundle{userid: data.UserId, ticket: data.Ticket, v2Token: data.HelloAuthParams.V2.Token}
 	if v := data.HelloAuthParams.V1; v.Ticket != "" {
-		b.userid, b.ticket = v.Userid, v.Ticket // приоритет helloAuthParams["1.0"]
+		// приоритет helloAuthParams["1.0"] (спайк Task 1), но ПУСТОЙ userid
+		// блока корневой userId НЕ затирает (ревью HPB #4): hello с userid=""
+		// уходит в invalid_ticket → вечный reconnect-цикл без фатала —
+		// берём первый непустой.
+		b.userid, b.ticket = firstNonEmpty(v.Userid, data.UserId), v.Ticket
 	}
 	return b, nil
 }
@@ -501,12 +601,15 @@ func (c *Client) backendURL() string {
 }
 
 // setConn — потокобезопасная замена активного соединения (Send/ping видят
-// его). nil заодно обнуляет state — снапшот живёт ровно одну WS-сессию.
+// его). nil заодно обнуляет state и pending — оба живут ровно одну WS-сессию:
+// буфер connect-фазы не должен переживать обрыв и въехать в события следующей
+// сессии (ревью HPB #8).
 func (c *Client) setConn(conn *websocket.Conn) {
 	c.mu.Lock()
 	c.conn = conn
 	if conn == nil {
 		c.state = nil
+		c.pending = nil
 	}
 	c.mu.Unlock()
 }

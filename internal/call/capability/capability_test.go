@@ -323,6 +323,38 @@ func TestSettings_Empty_FieldsMissing(t *testing.T) {
 	}
 }
 
+// TestSettings_V1BlockEmptyUserid_KeepsRootUserId — приоритет
+// helloAuthParams["1.0"] не безусловен (ревью HPB #4): сервер с непустым
+// v1-ticket, но ПУСТЫМ v1-userid при заполненном корневом userId не должен
+// затирать userid пустотой — иначе hello уходит с userid="" → invalid_ticket →
+// вечный reconnect-цикл без фатала (звонок висит молча).
+func TestSettings_V1BlockEmptyUserid_KeepsRootUserId(t *testing.T) {
+	body := ocsOK(`{
+		"signalingMode": "external",
+		"server": "https://hpb.example.org/",
+		"userId": "alice",
+		"ticket": "ticket-root",
+		"helloAuthParams": {"1.0": {"userid": "", "ticket": "ticket-v1"}}
+	}`)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	c := newClient(srv.URL, "secret")
+	st, err := c.Settings(context.Background())
+	if err != nil {
+		t.Fatalf("Settings: %v", err)
+	}
+	if st.Userid != "alice" {
+		t.Errorf("Userid = %q, want alice (пустой v1-userid НЕ затирает корневой userId)", st.Userid)
+	}
+	if st.Ticket != "ticket-v1" {
+		t.Errorf("Ticket = %q, want ticket-v1 (v1-блок остаётся приоритетным для ticket)", st.Ticket)
+	}
+}
+
 // TestSettings_OCSError401 — HTTP 200, но OCS meta.statusCode=401 (так Nextcloud
 // сигнализирует об ошибке auth). DoOCS разворачивает конверт и возвращает
 // *transport.OCSError{Code:401}.
