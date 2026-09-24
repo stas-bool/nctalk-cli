@@ -75,15 +75,20 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 		recvOnly = fs.Bool("recvonly", false, "только приём чужого аудио (своего не отправлять); InFlags=1 (спека §6)")
 		debug    = fs.Bool("debug", false, "подробные логи signaling (ставит NCTALK_DEBUG=1)")
 	)
-	if err := fs.Parse(args); err != nil {
+	// Парсинг через parseArgs: flag.Parse останавливается на первом не-flag
+	// аргументе, а канонический синтаксис спеки §6 ставит флаги ПОСЛЕ <room>
+	// («nctalk-call <room> --in rec.pcm --out play.pcm») — без перестановки
+	// хвостовые флаги молча игнорировались (recvonly не применялся → sendrecv).
+	posArgs, err := parseArgs(fs, args)
+	if err != nil {
 		return 1
 	}
 	if *debug {
 		os.Setenv("NCTALK_DEBUG", "1")
 	}
 	positional := ""
-	if fs.NArg() > 0 {
-		positional = fs.Arg(0)
+	if len(posArgs) > 0 {
+		positional = posArgs[0]
 	}
 
 	// 2. Конфигурация из env. Сообщения об ошибках — только имена env-переменных.
@@ -336,6 +341,30 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 	}
 	fmt.Fprintln(stderr, "nctalk-call: "+agentErr.Error())
 	return 1
+}
+
+// parseArgs парсит флаги в ЛЮБОМ порядке относительно позиционных аргументов.
+// flag.Parse останавливается на первом не-flag аргументе; канонический синтаксис
+// спеки §6 — «nctalk-call <room> --in rec.pcm --out play.pcm» (флаги после
+// позиционного). Алгоритм: парсим, пока флаги разбираются; первый не-flag
+// аргумент из хвоста забираем в позиционные и парсим остаток дальше (в цикле —
+// позиционных может быть несколько: «a b --flag» и «--flag a --flag2 b»).
+// Терминатор «--» flag-пакет съедает сам; всё после него — позиционные.
+// Возвращает позиционные аргументы в порядке встречи (run использует первый).
+func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	for len(args) > 0 {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		rest := fs.Args()
+		if len(rest) == 0 {
+			return positional, nil
+		}
+		positional = append(positional, rest[0])
+		args = rest[1:]
+	}
+	return positional, nil
 }
 
 // parseDurationEnv читает env-переменную как time.Duration. Пусто → 0 (вызывающий

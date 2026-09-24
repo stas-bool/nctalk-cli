@@ -15,6 +15,7 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -158,6 +159,102 @@ func TestRun_SettingsError_Exit1(t *testing.T) {
 	}
 	if !strings.Contains(errBuf.String(), "signaling-settings") {
 		t.Errorf("stderr = %q, want диагностика signaling-settings", errBuf.String())
+	}
+}
+
+// settingsExternalJSON — signaling-settings внешнего сервера (external/HPB):
+// минимальный набор полей выбора транспорта (capability.Settings): mode +
+// server + ticket + userid. ICE-серверы не нужны — до peer-слоя дело не доходит.
+const settingsExternalJSON = `{
+  "ocs": {
+    "meta": {"status": "ok", "statuscode": 200, "message": "OK"},
+    "data": {
+      "signalingMode": "external",
+      "server": "wss://signal.example.org/spreed",
+      "ticket": "ticket-1",
+      "userId": "user"
+    }
+  }
+}`
+
+// TestRun_FlagsAfterPositional_Honored — канонический синтаксис спеки §6
+// ставит флаги ПОСЛЕ <room>: «nctalk-call <room> --in rec.pcm --out play.pcm».
+// flag.Parse останавливается на первом не-flag аргументе — без перестановки
+// хвостовые флаги МОЛЧА игнорируются (живой прогон Task 10 HPB: `--recvonly
+// --out` после token не применялись → sendrecv вместо listening-only, слепой
+// exit 0 по EOF stdin за 3с вместо ICE-таймаута). Проверяем, что флаги из
+// хвоста работают: --in с несуществующим путём обязан дать exit 1 «--in:»
+// ДО JoinRoom; при игнорированных флагах run ушёл бы в JoinRoom (404 мока →
+// exit 2 — другой код и другая диагностика).
+func TestRun_FlagsAfterPositional_Honored(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "signaling/settings"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, settingsExternalJSON)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	setEnv(t, srv.URL)
+
+	var out, errBuf bytes.Buffer
+	code := run([]string{"tok-team-a", "--in", "/nonexistent/nctalk-e2e.pcm"},
+		&out, &errBuf, strings.NewReader(""))
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 (--in после позиционного применён: os.Open → exit 1)", code)
+	}
+	if !strings.Contains(errBuf.String(), "--in:") {
+		t.Errorf("stderr = %q, want диагностику «--in:» (флаги хвоста обязаны парситься)", errBuf.String())
+	}
+}
+
+// TestParseArgs_FlagOrderVariants — parseArgs обязан принимать флаги до, после
+// и между позиционными аргументами (спека §6: «nctalk-call <room> --out
+// rec.pcm»; регресс живого прогона Task 10 HPB — флаги после <room> молча
+// игнорировались flag.Parse). Позиционные собираются в порядке встречи.
+func TestParseArgs_FlagOrderVariants(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"flags-first", []string{"--recvonly", "--out", "rec.pcm", "tok"}},
+		{"flags-last (спека §6)", []string{"tok", "--recvonly", "--out", "rec.pcm"}},
+		{"flags-between", []string{"--recvonly", "tok", "--out", "rec.pcm"}},
+		{"positional-only", []string{"tok"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := flag.NewFlagSet("nctalk-call", flag.ContinueOnError)
+			fs.SetOutput(io.Discard)
+			recvonly := fs.Bool("recvonly", false, "")
+			out := fs.String("out", "-", "")
+			pos, err := parseArgs(fs, tc.args)
+			if err != nil {
+				t.Fatalf("parseArgs: %v", err)
+			}
+			if !*recvonly && tc.name != "positional-only" {
+				t.Errorf("--recvonly не применён (спека §6: listening-only)")
+			}
+			if *out != "rec.pcm" && tc.name != "positional-only" {
+				t.Errorf("--out = %q, want rec.pcm", *out)
+			}
+			if len(pos) != 1 || pos[0] != "tok" {
+				t.Errorf("positional = %v, want [tok]", pos)
+			}
+		})
+	}
+}
+
+// TestParseArgs_InvalidFlag_AfterPositional — невалидный флаг в хвосте обязан
+// давать ошибку парсинга (а не молча игнорироваться как «позиционный»).
+func TestParseArgs_InvalidFlag_AfterPositional(t *testing.T) {
+	fs := flag.NewFlagSet("nctalk-call", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	_ = fs.Bool("recvonly", false, "")
+	if _, err := parseArgs(fs, []string{"tok", "--bogus"}); err == nil {
+		t.Fatal("--bogus после позиционного проигнорирован — want ошибка парсинга")
 	}
 }
 
