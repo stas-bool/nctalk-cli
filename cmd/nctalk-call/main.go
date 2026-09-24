@@ -246,17 +246,12 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 		inFlags = inFlagSendRecv
 	}
 
-	// 7. --out: путь файла или `-` (default) для stdout.
-	var pcmOut io.Writer = stdout
-	if *outPath != "" && *outPath != "-" {
-		f, err := os.Create(*outPath)
-		if err != nil {
-			fmt.Fprintf(stderr, "nctalk-call: --out: %v\n", err)
-			return 1
-		}
-		defer f.Close()
-		pcmOut = f
-	}
+	// 7. --out: путь файла или `-` (default) для stdout. Само ОТКРЫТИЕ — ниже,
+	//     после JoinRoom (шаг 8a): os.Create трункирует файл, а JoinRoom —
+	//     сетевой шаг, могущий упасть; прежний порядок стирал существующую
+	//     запись ещё до входа в звонок (ревью HPB #3). --in (os.Open, без
+	//     truncate) остаётся до JoinRoom — fail-fast без побочных эффектов
+	//     (контракт e2e-теста TestRun_FlagsAfterPositional_Honored).
 
 	// 8. Signaling-клиент (OCS) + JoinRoom (canonical flow, дельта §2):
 	//     participant-session нужна Call API (JoinCall) и серверному списку
@@ -280,6 +275,20 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 			return jee.Code
 		}
 		return 1
+	}
+
+	// 8b. Открытие --out — ПОСЛЕ успешного JoinRoom (ревью HPB #3): os.Create
+	//     трункирует файл; делая это до сетевого шага JoinRoom, мы стирали
+	//     прежнюю запись даже когда звонок не состоялся.
+	var pcmOut io.Writer = stdout
+	if *outPath != "" && *outPath != "-" {
+		f, err := os.Create(*outPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "nctalk-call: --out: %v\n", err)
+			return 1
+		}
+		defer f.Close()
+		pcmOut = f
 	}
 
 	agentCfg := agent.Config{

@@ -46,15 +46,20 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 	fs.SetOutput(stderr)
 	name := fs.String("name", "", "искать комнату по имени (case-insensitive подстрока DisplayName)")
 	debug := fs.Bool("debug", false, "подробные логи signaling (ставит NCTALK_DEBUG=1)")
-	if err := fs.Parse(args); err != nil {
+	// Парсинг через parseArgs (паритет с nctalk-call, фикс ef7b748 — ревью HPB
+	// #1): flag.Parse останавливается на первом не-flag аргументе, а флаги
+	// после <room> («nctalk-talk myroom --debug») обязаны работать — без
+	// перестановки хвостовые флаги молча игнорировались.
+	posArgs, err := parseArgs(fs, args)
+	if err != nil {
 		return 1
 	}
 	if *debug {
 		os.Setenv("NCTALK_DEBUG", "1")
 	}
 	positional := ""
-	if fs.NArg() > 0 {
-		positional = fs.Arg(0)
+	if len(posArgs) > 0 {
+		positional = posArgs[0]
 	}
 
 	cfg, err := config.Load()
@@ -196,7 +201,7 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	deviceIn := os.Getenv("NCTALK_AUDIO_DEVICE_IN")  // default ":0" — внутри NewMicSource
+	deviceIn := os.Getenv("NCTALK_AUDIO_DEVICE_IN")   // default ":0" — внутри NewMicSource
 	deviceOut := os.Getenv("NCTALK_AUDIO_DEVICE_OUT") // default "-1" — внутри NewSpeakerWriter
 
 	iCfg := interactive.Config{
@@ -245,6 +250,29 @@ func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 	}
 	fmt.Fprintln(stderr, "nctalk-talk: "+err.Error()+" (подробнее в "+logPath+")")
 	return 1
+}
+
+// parseArgs парсит флаги в ЛЮБОМ порядке относительно позиционных аргументов
+// (копия хелпера из cmd/nctalk-call — cmd-пакеты не импортируют друг другу;
+// фикс ef7b748, ревью HPB #1). flag.Parse останавливается на первом не-flag
+// аргументе; алгоритм: парсим, пока флаги разбираются; первый не-flag аргумент
+// из хвоста забираем в позиционные и парсим остаток дальше (в цикле —
+// позиционных может быть несколько). Терминатор «--» flag-пакет съедает сам.
+// Возвращает позиционные аргументы в порядке встречи (run использует первый).
+func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	for len(args) > 0 {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		rest := fs.Args()
+		if len(rest) == 0 {
+			return positional, nil
+		}
+		positional = append(positional, rest[0])
+		args = rest[1:]
+	}
+	return positional, nil
 }
 
 // parseDurationEnv читает env-переменную как time.Duration. Пусто → 0 (вызывающий

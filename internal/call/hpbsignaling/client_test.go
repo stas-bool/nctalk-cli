@@ -204,6 +204,10 @@ type fakeOCS struct {
 	i       int
 	// v2token — значение helloAuthParams["2.0"].token ("" — ключ есть, токена нет).
 	v2token string
+	// v1UseridEmpty — settings шлют helloAuthParams["1.0"].userid="" при
+	// заполненном корневом userId (ревью #4: пустой v1-userid не должен
+	// затирать корневой).
+	v1UseridEmpty bool
 	// joinCallPaths фиксирует пути POST /call/{token}.
 	joinCallPaths []string
 	// onCall — опциональный колбэк в момент POST /call/{token} (тест порядка
@@ -226,6 +230,10 @@ func newFakeOCS(t *testing.T, tickets ...string) *fakeOCS {
 				}
 			}
 			v2 := o.v2token
+			v1u := "alice"
+			if o.v1UseridEmpty {
+				v1u = ""
+			}
 			o.i++
 			o.mu.Unlock()
 			// Реальный формат settings (фикстура capability_external.json):
@@ -233,8 +241,8 @@ func newFakeOCS(t *testing.T, tickets ...string) *fakeOCS {
 			fmt.Fprintf(w, `{"ocs":{"meta":{"status":"ok","statuscode":200},"data":{`+
 				`"signalingMode":"external","server":"https://signaling.example.org/standalone-signaling/",`+
 				`"userId":"alice","ticket":%q,`+
-				`"helloAuthParams":{"1.0":{"userid":"alice","ticket":%q},"2.0":{"token":%q}},`+
-				`"stunservers":[],"turnservers":[]}}}`, tk, tk, v2)
+				`"helloAuthParams":{"1.0":{"userid":%q,"ticket":%q},"2.0":{"token":%q}},`+
+				`"stunservers":[],"turnservers":[]}}}`, tk, v1u, tk, v2)
 		case strings.Contains(r.URL.Path, "/call/"):
 			o.mu.Lock()
 			o.joinCallPaths = append(o.joinCallPaths, r.URL.Path)
@@ -264,6 +272,13 @@ func (o *fakeOCS) setV2Token(tok string) {
 func (o *fakeOCS) setOnCall(fn func()) {
 	o.mu.Lock()
 	o.onCall = fn
+	o.mu.Unlock()
+}
+
+// setV1UseridEmpty — потокобезопасно: settings шлют helloAuthParams["1.0"].userid="".
+func (o *fakeOCS) setV1UseridEmpty() {
+	o.mu.Lock()
+	o.v1UseridEmpty = true
 	o.mu.Unlock()
 }
 
@@ -749,12 +764,12 @@ func TestPollLoop_HungServer_BudgetFiresEvError(t *testing.T) {
 	o := newFakeOCS(t)
 	base, _ := url.Parse(o.srv.URL)
 	c := New(Config{
-		Auth:          transport.Auth{BaseURL: base, Login: "a", Password: "p"},
-		Doer:          o.srv.Client(),
-		Server:        "ws://" + ln.Addr().String(),
-		Ticket:        "t", Userid: "a",
+		Auth:   transport.Auth{BaseURL: base, Login: "a", Password: "p"},
+		Doer:   o.srv.Client(),
+		Server: "ws://" + ln.Addr().String(),
+		Ticket: "t", Userid: "a",
 		ConnectBudget: 200 * time.Millisecond, BackoffBase: 20 * time.Millisecond, BackoffMax: 50 * time.Millisecond,
-		PingPeriod:    time.Hour, Stderr: io.Discard,
+		PingPeriod: time.Hour, Stderr: io.Discard,
 	})
 
 	ch := make(chan signaling.Event, 4)
@@ -773,4 +788,187 @@ func TestPollLoop_HungServer_BudgetFiresEvError(t *testing.T) {
 	if err := <-done; err == nil {
 		t.Fatal("PollLoop вернул nil — должен вернуть ошибку подключения")
 	}
+}
+
+// ---- ревью HPB 2026-09-24: guard конкурентных подключений, v1-userid,
+// redirect-политика WS-dial, диагностика reply-error ----
+
+// TestJoinCall_Concurrent_SingleDial — guard TOCTOU (ревью #2): конкурентные
+// JoinCall не должны поднимать параллельные WS-подключения — второй setConn
+// перезаписывал бы первый (утечка коннекта + ghost-сессия на сервере), а
+// pending с EvOwnSession мёртвой сессии доехал бы до агента. Владелец диалит,
+// прочие ждут его результата. Welcome задержан, чтобы все горутины застали
+// «подключение в полёте» (без guard каждая диалила бы сама).
+func TestJoinCall_Concurrent_SingleDial(t *testing.T) {
+	f := newFakeHPB(t, func(fc *fakeConn, n int) {
+		time.Sleep(400 * time.Millisecond) // держим connect-фазу открытой: welcome задержан
+		fc.sendWelcome(false)
+		fc.awaitHello()
+		fc.replyHello("own-hpb-sid")
+		fc.awaitRoom()
+		fc.replyRoomAck("tok-test")
+		time.Sleep(time.Second)
+	})
+	o := newFakeOCS(t)
+	c := newTestClient(f, o, nil)
+
+	const workers = 3
+	var wg sync.WaitGroup
+	errs := make([]error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = c.JoinCall(context.Background(), "tok-test", 3)
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("JoinCall[%d]: %v", i, err)
+		}
+	}
+	if n := f.connectCount(); n != 1 {
+		t.Fatalf("connects = %d, want 1 (guard: конкурентные подключения сериализуются, ревью #2)", n)
+	}
+}
+
+// TestPollLoop_WaitsInflightJoinCallDial — вторая сторона guard (ревью #2):
+// PollLoop, стартовавший ПОКА JoinCall ещё диалит, переиспользует его
+// подключение, а не поднимает своё: connects==1, EvOwnSession доставлен ровно
+// один раз.
+func TestPollLoop_WaitsInflightJoinCallDial(t *testing.T) {
+	f := newFakeHPB(t, func(fc *fakeConn, n int) {
+		time.Sleep(400 * time.Millisecond) // connect-фаза JoinCall открыта
+		fc.sendWelcome(false)
+		fc.awaitHello()
+		fc.replyHello("own-hpb-sid")
+		fc.awaitRoom()
+		fc.replyRoomAck("tok-test")
+		time.Sleep(3 * time.Second) // переживает окно теста — без лишнего reconnect
+	})
+	o := newFakeOCS(t)
+	c := newTestClient(f, o, nil)
+
+	jc := make(chan error, 1)
+	go func() { jc <- c.JoinCall(context.Background(), "tok-test", 3) }()
+	time.Sleep(100 * time.Millisecond) // PollLoop стартует при «диале в полёте»
+
+	ch := make(chan signaling.Event, 16)
+	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { done <- c.PollLoop(ctx, "tok-test", ch) }()
+
+	if err := <-jc; err != nil {
+		t.Fatalf("JoinCall: %v", err)
+	}
+	evs, _ := collectEvents(t, ch, 1500*time.Millisecond)
+	cancel()
+	<-done
+
+	if n := f.connectCount(); n != 1 {
+		t.Fatalf("connects = %d, want 1 (PollLoop обязан ждать in-flight диал JoinCall, ревью #2)", n)
+	}
+	own := 0
+	for _, ev := range evs {
+		if ev.Kind == signaling.EvOwnSession {
+			own++
+		}
+	}
+	if own != 1 {
+		t.Fatalf("EvOwnSession доставлен %d раз, want 1 (по одному на WS-сессию)", own)
+	}
+}
+
+// TestConnect_V1BlockEmptyUserid_FallsBackToRoot — зеркало capability-фикса
+// (ревью #4): settings с непустым v1-ticket, но ПУСТЫМ v1-userid при корневом
+// userId → hello v1 обязан нести корневой userid (иначе invalid_ticket-цикл).
+func TestConnect_V1BlockEmptyUserid_FallsBackToRoot(t *testing.T) {
+	f := newFakeHPB(t, func(fc *fakeConn, n int) {
+		fc.sendWelcome(false)
+		fc.awaitHello()
+		fc.replyHello("own-hpb-sid")
+		fc.awaitRoom()
+		fc.replyRoomAck("tok-test")
+		time.Sleep(time.Second)
+	})
+	o := newFakeOCS(t, "ticket-v1")
+	o.setV1UseridEmpty()
+	c := newTestClient(f, o, nil)
+
+	if err := c.JoinCall(context.Background(), "tok-test", 3); err != nil {
+		t.Fatalf("JoinCall: %v", err)
+	}
+	if got := f.lastAuth().Userid; got != "alice" {
+		t.Fatalf("hello userid = %q, want alice — пустой v1-userid НЕ затирает корневой userId (ревью #4)", got)
+	}
+}
+
+// TestConnect_CrossHostRedirect_Blocked — инвариант транспорта
+// (transport.SameHostRedirectPolicy: cross-host и https→http блокируются)
+// распространён на WS-dial (ревью #5): handshake-редирект на чужой хост
+// обязан блокироваться, а не молча следовать.
+func TestConnect_CrossHostRedirect_Blocked(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound) // до upgrade здесь дойти не должно
+	}))
+	defer target.Close()
+	src := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/spreed", http.StatusFound) // чужой хост (другой порт)
+	}))
+	defer src.Close()
+
+	o := newFakeOCS(t)
+	base, _ := url.Parse(o.srv.URL)
+	c := New(Config{
+		Auth:   transport.Auth{BaseURL: base, Login: "a", Password: "p"},
+		Doer:   o.srv.Client(),
+		Server: src.URL,
+		Ticket: "t", Userid: "a",
+		ConnectBudget: time.Second, BackoffBase: 10 * time.Millisecond, BackoffMax: 20 * time.Millisecond,
+		PingPeriod: time.Hour, Stderr: io.Discard,
+	})
+	err := c.JoinCall(context.Background(), "tok", 3)
+	if err == nil {
+		t.Fatal("JoinCall = nil, want ошибка (cross-host redirect обязан блокироваться)")
+	}
+	if !strings.Contains(err.Error(), "cross-host redirect blocked") {
+		t.Fatalf("ошибка = %v, want «cross-host redirect blocked» (redirect-политика WS-dial, ревью #5)", err)
+	}
+}
+
+// TestReadLoop_ErrorFrameWithID_Logged — error-кадр с непустым id (reply-форма)
+// в steady-state раньше терялся молча (applyFrame → default → nil); теперь —
+// диагностика в Stderr (ревью #6). Звонок НЕ роняется: события после кадра
+// продолжают доставляться.
+func TestReadLoop_ErrorFrameWithID_Logged(t *testing.T) {
+	f := newFakeHPB(t, func(fc *fakeConn, n int) {
+		fc.sendWelcome(false)
+		fc.awaitHello()
+		fc.replyHello("own-hpb-sid")
+		fc.awaitRoom()
+		fc.replyRoomAck("tok-test")
+		fc.sendJSON(`{"id":"x1","type":"error","error":{"code":"unexpected_reply","message":"boz"}}`)
+		fc.sendJSON(`{"type":"event","event":{"target":"room","type":"join","join":[{"sessionid":"peer-1"}]}}`)
+		time.Sleep(2 * time.Second)
+	})
+	o := newFakeOCS(t)
+	var buf syncBuffer
+	c := newTestClient(f, o, func(cfg *Config) { cfg.Stderr = &buf })
+
+	ch := make(chan signaling.Event, 16)
+	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { done <- c.PollLoop(ctx, "tok-test", ch) }()
+
+	if !waitForEvent(t, ch, signaling.EvUsersUpdated, 2*time.Second) {
+		t.Fatal("событие после error-кадра не доставлено — звонок упал на reply-error")
+	}
+	if !strings.Contains(buf.String(), "unexpected_reply") {
+		t.Errorf("reply-error потерян молча: stderr = %q, want код unexpected_reply (ревью #6)", buf.String())
+	}
+	cancel()
+	<-done
 }

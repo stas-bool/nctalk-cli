@@ -19,6 +19,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -255,6 +257,48 @@ func TestParseArgs_InvalidFlag_AfterPositional(t *testing.T) {
 	_ = fs.Bool("recvonly", false, "")
 	if _, err := parseArgs(fs, []string{"tok", "--bogus"}); err == nil {
 		t.Fatal("--bogus после позиционного проигнорирован — want ошибка парсинга")
+	}
+}
+
+// TestRun_OutFileSurvivesJoinRoomFailure — os.Create (--out) трункирует файл,
+// а JoinRoom — сетевой шаг, который может упасть: прежний порядок (открытие
+// --out ДО JoinRoom) стирал существующую запись ещё до входа в звонок (ревью
+// HPB #3). Открытие --out перенесено после JoinRoom — при его ошибке файл
+// обязан остаться нетронутым.
+func TestRun_OutFileSurvivesJoinRoomFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "signaling/settings"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, settingsExternalJSON)
+		case strings.Contains(r.URL.Path, "/participants/active"):
+			// JoinRoom падает: HTTP 200 + OCS meta 500 → ExitGeneric(1).
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"ocs":{"meta":{"status":"failure","statuscode":500,"message":"boom"}}}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	setEnv(t, srv.URL)
+
+	outPath := filepath.Join(t.TempDir(), "rec.pcm")
+	const keep = "PREVIOUS-RECORDING"
+	if err := os.WriteFile(outPath, []byte(keep), 0o644); err != nil {
+		t.Fatalf("подготовка --out-файла: %v", err)
+	}
+
+	var out, errBuf bytes.Buffer
+	code := run([]string{"tok-x", "--out", outPath}, &out, &errBuf, strings.NewReader(""))
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 (JoinRoom OCS 500; stderr=%q)", code, errBuf.String())
+	}
+	b, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("чтение --out-файла: %v", err)
+	}
+	if string(b) != keep {
+		t.Fatalf("--out-файл затёрт до входа в звонок: %q, want %q (ревью #3: открытие ПОСЛЕ JoinRoom)", b, keep)
 	}
 }
 

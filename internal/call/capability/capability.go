@@ -88,7 +88,13 @@ func (c *Client) Settings(ctx context.Context) (Settings, error) {
 	}
 	out.Userid = data.UserId
 	if v := data.HelloAuthParams.V1; v.Ticket != "" {
-		out.Ticket, out.Userid = v.Ticket, v.Userid // приоритет helloAuthParams["1.0"]
+		out.Ticket = v.Ticket // приоритет helloAuthParams["1.0"] (спайк Task 1)
+		if v.Userid != "" {
+			out.Userid = v.Userid
+		}
+		// ПУСТОЙ userid v1-блока корневой userId НЕ затирает (ревью HPB #4):
+		// hello с userid="" уходит в invalid_ticket → вечный reconnect-цикл
+		// без фатала (звонок висит молча).
 	} else {
 		out.Ticket = data.Ticket
 	}
