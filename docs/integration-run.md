@@ -182,6 +182,19 @@ CGO_ENABLED=0 go test -tags integration ./internal/call/hpbsignaling/ -run TestH
 сессией («ГЕЙТ ПРОЙДЕН»). С `NCTALK_DEBUG=1` логируется каждый WS-кадр
 (ticket маскируется) — источник фикстур `testdata/hpb/*.json`.
 
+Финальная проверка на боевом (план HPB Task 10): повторить гейт `TestHPBSpike`
+на финальном коде (ожидание — «ГЕЙТ ПРОЙДЕН») и полный агент-звонок recvonly
+без человека. Критерии: `joined` → reconcile участников по EvUsersUpdated →
+при втором участнике PCM пишется; одиночный звонок — чистый `exit=0` после
+ICE-таймаута («я один»); недоступный HPB — `exit=1` с диагностикой бюджета
+подключения (НЕ «я один»):
+
+```sh
+CGO_ENABLED=0 go build -o nctalk-call ./cmd/nctalk-call
+NEXTCLOUD_URL=<боевой> NEXTCLOUD_LOGIN=<login> NEXTCLOUD_PASS=<app-password> \
+NCTALK_ICE_TIMEOUT=45s ./nctalk-call <TEST-token> --recvonly --out /tmp/hpb-rec.pcm ; echo "exit=$?"
+```
+
 ### Что смотреть в выводе
 
 Тест логирует каждый наблюдённый `Event`:
