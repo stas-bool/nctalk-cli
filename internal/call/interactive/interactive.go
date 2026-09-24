@@ -20,11 +20,29 @@ import (
 // agentRunner — внутренняя точка инъекции для тестов (production = agent.Run).
 type agentRunner = func(ctx context.Context, cfg agent.Config) error
 
+// SignalingClient — транспорт signaling для interactive: ЛОКАЛЬНАЯ копия
+// контракта agent.sigClient (4 метода). Копия обязательна: agent.sigClient
+// unexported, а тип поля в ДРУГОМ пакете именовать селектором нельзя
+// («cannot refer to unexported name agent.sigClient» — ревью плана #1).
+// Идентичный метод-сет делает значение SignalingClient присваиваемым полю
+// agent.Config.Signaling (interface-to-interface, структурно); обе реализации
+// (*signaling.Client, *hpbesignaling.Client) удовлетворяют автоматически
+// (guard второй — agent/hpb_compat_test.go, Task 5).
+type SignalingClient interface {
+	JoinCall(ctx context.Context, token string, flags int) error
+	LeaveCall(ctx context.Context, token string) error
+	PollLoop(ctx context.Context, token string, ch chan<- signaling.Event) error
+	Send(ctx context.Context, token string, msg signaling.Message) error
+}
+
 // Config для interactive.Run. Большинство полей пробрасывается в agent.Config.
 type Config struct {
-	Cfg          config.Config
-	Token        string
-	Signaling    *signaling.Client
+	Cfg   config.Config
+	Token string
+	// Signaling — транспорт signaling: internal (*signaling.Client) ИЛИ
+	// external (*hpbesignaling.Client) — выбирает cmd/nctalk-talk по
+	// signalingMode (дельта §3).
+	Signaling    SignalingClient
 	ICEServers   []webrtc.ICEServer
 	OwnUserId    string
 	OwnSessionId string
@@ -37,6 +55,10 @@ type Config struct {
 	// internal: для тестов. nil → agent.Run.
 	runner agentRunner
 }
+
+// Compile-time: *signaling.Client удовлетворяет локальному контракту
+// (рассинхрон сигнатур роняет сборку interactive ещё до wiring'а в cmd).
+var _ SignalingClient = (*signaling.Client)(nil)
 
 // Run связывает primitives и запускает agent.Run (sendrecv всегда).
 // Поток (спека §4.6):

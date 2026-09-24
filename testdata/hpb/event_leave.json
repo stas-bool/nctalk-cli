@@ -1,0 +1,11 @@
+{
+  "_comment": "event leave — НЕ снят со спайка Task 1 (в комнате была одна сессия); канон исходников nextcloud-spreed-signaling (Leave []PublicSessionId) + JS-клиента spreed (плоский массив строк sessionid, НЕ объекты).",
+  "type": "event",
+  "event": {
+    "target": "room",
+    "type": "leave",
+    "leave": [
+      "REDACTED-hpb-sessionid-peer-64chars"
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "_comment": "P2P-сообщение offer — НЕ снято со спайка Task 1 (нужен второй участник); канон исходников (MessageServerMessage) + JS-клиента spreed: data — ОБЪЕКТ (в OCS-polling — JSON-СТРОКА!); from клиенту НЕ приходит — JS подставляет from = message.sender.sessionid. Отправка — {id, type:\"message\", message:{recipient:{sessionid}, data:{type,to,roomType,payload}}}.",
+  "type": "message",
+  "message": {
+    "sender": { "type": "session", "sessionid": "REDACTED-hpb-sessionid-peer-64chars", "userid": "bob" },
+    "recipient": { "type": "session", "sessionid": "REDACTED-hpb-sessionid-own-64chars" },
+    "data": {
+      "type": "offer",
+      "to": "REDACTED-hpb-sessionid-own-64chars",
+      "roomType": "video",
+      "payload": { "type": "offer", "sdp": "v=0\r\n..." }
+    }
+  }
+}

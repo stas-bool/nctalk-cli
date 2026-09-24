@@ -3,6 +3,7 @@ module github.com/stas-bool/nctalk-cli
 go 1.21
 
 require (
+	github.com/coder/websocket v1.8.13
 	github.com/pion/webrtc/v4 v4.0.16
 	golang.org/x/term v0.29.0
 )

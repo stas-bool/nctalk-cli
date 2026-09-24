@@ -202,6 +202,8 @@ func kindName(k EventKind) string {
 		return "EvCandidate"
 	case EvError:
 		return "EvError"
+	case EvOwnSession:
+		return "EvOwnSession"
 	default:
 		return "EvUnknown"
 	}

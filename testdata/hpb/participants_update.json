@@ -1,0 +1,16 @@
+{
+  "_comment": "participants update — usersInRoom-аналог с inCall-флагами; НЕ снят со спайка Task 1 (требует реального входа в звонок), канон исходников (RoomEventServerMessage.Users []StringMap — ключи приходят от NC-бэкенда как есть) + JS-клиента (читает update.all / update.incall / update.users). Полный снапшот: ключ sessionId — camelCase (fallback sessionid); inCall — int-битмаска (1=IN_CALL, 2=WITH_AUDIO).",
+  "type": "event",
+  "event": {
+    "target": "participants",
+    "type": "update",
+    "update": {
+      "roomid": "tok-test",
+      "users": [
+        { "sessionId": "REDACTED-hpb-sessionid-own-64chars", "userId": "alice", "actorId": "alice", "actorType": "users", "inCall": 3 },
+        { "sessionId": "REDACTED-hpb-sessionid-peer-64chars", "userId": "bob", "actorId": "bob", "actorType": "users", "inCall": 3 }
+      ],
+      "all": true
+    }
+  }
+}

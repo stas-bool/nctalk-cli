@@ -58,12 +58,12 @@ func TestIntegration_Settings_Docker(t *testing.T) {
 
 	// capability через follow-client с тем же jar (session).
 	c := capability.New(auth, &http.Client{Jar: jar})
-	servers, err := c.Settings(context.Background())
+	st, err := c.Settings(context.Background())
 	if err != nil {
 		t.Fatalf("Settings: %v (баг #2: path без token должен дать 200, не ошибку)", err)
 	}
-	if len(servers) == 0 {
+	if len(st.ICEServers) == 0 {
 		t.Error("Settings вернул 0 ICE servers — ожидается хотя бы STUN (stun.nextcloud.com)")
 	}
-	t.Logf("ICE servers: %d", len(servers))
+	t.Logf("ICE servers: %d", len(st.ICEServers))
 }
