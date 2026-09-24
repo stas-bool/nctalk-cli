@@ -7,9 +7,11 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -116,5 +118,60 @@ func TestRun_NotFound(t *testing.T) {
 	code := run([]string{"--name", "missing"}, &out, &errOut, nil)
 	if code != 2 {
 		t.Fatalf("exit: got %d, want 2 (not found; stderr=%q)", code, errOut.String())
+	}
+}
+
+// TestRun_FlagsAfterPositional_Honored — паритет с nctalk-call (фикс ef7b748,
+// ревью HPB #1): флаги после позиционного <room> («nctalk-talk myroom --debug»)
+// обязаны парситься, а не молча игнорироваться flag.Parse. Наблюдаемое без
+// сети: --debug ставит NCTALK_DEBUG=1 ДО сетевых шагов; дальше run падает на
+// signaling-settings (закрытый URL) — код выхода непринципиален, важен env.
+func TestRun_FlagsAfterPositional_Honored(t *testing.T) {
+	setEnv(t, "http://localhost:1")
+	t.Setenv("NCTALK_DEBUG", "")
+
+	var out, errOut bytes.Buffer
+	code := run([]string{"tok-team-a", "--debug"}, &out, &errOut, nil)
+	if code == 0 {
+		t.Fatal("code = 0, want ≠ 0 (settings недоступны)")
+	}
+	if got := os.Getenv("NCTALK_DEBUG"); got != "1" {
+		t.Fatalf("NCTALK_DEBUG = %q, want \"1\" (--debug после позиционного применён, ревью #1)", got)
+	}
+}
+
+// TestParseArgs_FlagOrderVariants — зеркало cmd/nctalk-call: parseArgs обязан
+// принимать флаги до, после и между позиционными аргументами; позиционные
+// собираются в порядке встречи.
+func TestParseArgs_FlagOrderVariants(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"flags-first", []string{"--debug", "tok"}},
+		{"flags-last", []string{"tok", "--debug"}},
+		{"flags-between", []string{"--debug", "tok", "--name", "zzz"}},
+		{"positional-only", []string{"tok"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := flag.NewFlagSet("nctalk-talk", flag.ContinueOnError)
+			fs.SetOutput(io.Discard)
+			debug := fs.Bool("debug", false, "")
+			name := fs.String("name", "", "")
+			pos, err := parseArgs(fs, tc.args)
+			if err != nil {
+				t.Fatalf("parseArgs: %v", err)
+			}
+			if wantDebug := tc.name != "positional-only"; *debug != wantDebug {
+				t.Errorf("--debug = %v, want %v (флаги в любом месте обязаны парситься)", *debug, wantDebug)
+			}
+			if tc.name == "flags-between" && *name != "zzz" {
+				t.Errorf("--name = %q, want zzz", *name)
+			}
+			if len(pos) != 1 || pos[0] != "tok" {
+				t.Errorf("positional = %v, want [tok]", pos)
+			}
+		})
 	}
 }

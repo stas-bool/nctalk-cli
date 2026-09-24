@@ -1,0 +1,21 @@
+{
+  "_comment": "SYNTHETIC from live capture — собран из дампа спайка Task 1 (2026-09-23, живой HPB), обезличен: server → signaling.example.org, ticket → REDACTED-TICKET, userId → alice. Реальный формат GET /api/v3/signaling/settings в external-режиме: ticket + helloAuthParams выдаются ТОЛЬКО при signalingMode != internal (SignalingController::getSettings). helloAuthParams несёт ОБА ключа (подтверждено живым сервером, nextcloud-spreed-signaling v2.1.1): '1.0' {userid, ticket} и '2.0' {token} — клиент декодирует только '1.0', '2.0' присутствует-но-игнорируется (фикстура обязана отражать реальный формат эндпоинта).",
+  "ocs": {
+    "meta": {"status": "ok", "statuscode": 200, "message": "OK"},
+    "data": {
+      "signalingMode": "external",
+      "userId": "alice",
+      "hideWarning": false,
+      "server": "https://signaling.example.org/standalone-signaling/",
+      "federation": null,
+      "ticket": "REDACTED-TICKET",
+      "helloAuthParams": {
+        "1.0": {"userid": "alice", "ticket": "REDACTED-TICKET"},
+        "2.0": {"token": "REDACTED-TOKEN"}
+      },
+      "stunservers": [{"urls": ["stun:stun.example.org:3478"]}],
+      "turnservers": [],
+      "sipDialinInfo": ""
+    }
+  }
+}
