@@ -5,7 +5,8 @@
 (так задумано — их запускает человек на боевом сервере с реальными кредами).
 
 Все сценарии читающие и безопасные, кроме мутационных `TestIntegration_SendMessage`
-(отправка) и `TestIntegration_EditMessage` (правка) — они меняют состояние чата
+(отправка), `TestIntegration_EditMessage` (правка) и `TestIntegration_Threads`
+(создание треда и ответа) — они меняют состояние чата
 и защищены отдельным флагом.
 
 ## Обязательные окружение
@@ -24,8 +25,8 @@
 | Переменная             | По умолчанию | Назначение                                                      |
 | ---------------------- | ------------ | -------------------------------------------------------------- |
 | `NEXTCLOUD_TIMEOUT`    | `30s`        | HTTP-таймаут клиента (Go duration: `45s`, `1m`, `90s`, и т.д.). |
-| `NCTALK_INTEGRATION_SEND`  | (ноль)   | `1` — включить мутационные `TestIntegration_SendMessage`/`TestIntegration_EditMessage`. |
-| `NCTALK_INTEGRATION_ROOM`  | (пусто)  | Token тестовой комнаты для мутационных `SendMessage`/`EditMessage`. |
+| `NCTALK_INTEGRATION_SEND`  | (ноль)   | `1` — включить мутационные `TestIntegration_SendMessage`/`TestIntegration_EditMessage`/`TestIntegration_Threads`. |
+| `NCTALK_INTEGRATION_ROOM`  | (пусто)  | Token тестовой комнаты для мутационных `SendMessage`/`EditMessage`/`Threads`. |
 
 > Креды **никогда** не попадают в вывод/ошибки/логи тестов — санитайз на
 > стороне `internal/client` (спека §5, §9). Не подсуньте их в `git`-конфиг
@@ -63,7 +64,7 @@ CGO_ENABLED=0 go test -tags=integration ./internal/client/... -v -run TestIntegr
 NCTALK_INTEGRATION_SEND=1 \
 NCTALK_INTEGRATION_ROOM='<token-тестовой-комнаты>' \
 CGO_ENABLED=0 go test -tags=integration ./internal/client/... -v \
-  -run 'TestIntegration_(SendMessage|EditMessage)'
+  -run 'TestIntegration_(SendMessage|EditMessage|Threads)'
 ```
 
 Без `NCTALK_INTEGRATION_SEND=1` или без `NCTALK_INTEGRATION_ROOM` тесты
@@ -83,7 +84,7 @@ CGO_ENABLED=0 go test ./...   # без -tags=integration
 - **Читающие** (`ListRooms`, `SearchRooms`, `GetChat`, `SearchMessages`,
   `GetReactions`, `GetParticipants`) — GET-запросы, состояние сервера не меняют.
   Безопасны для прогона на production-аккаунте.
-- **Мутация** (`SendMessage`/`EditMessage`) — POST/PUT в чат; выполняются только
+- **Мутация** (`SendMessage`/`EditMessage`/`Threads`) — POST/PUT в чат; выполняются только
   в токен, заданный в `NCTALK_INTEGRATION_ROOM`, и только при
   `NCTALK_INTEGRATION_SEND=1`. Удалять тестовые сообщения нужно вручную — тесты
   этого не делают (спека §12 „мутация, не проверено“).
@@ -100,3 +101,4 @@ CGO_ENABLED=0 go test ./...   # без -tags=integration
 | `TestIntegration_GetParticipants` | `/ocs/v2.php/apps/spreed/api/v4/room/{token}/participants` | `>= 1` участник; непустые `actorId`/`actorType`; есть `participantType=1` (владелец). |
 | `TestIntegration_SendMessage` | POST `/chat/{token}`                          | Возвращает `id > 0`. Мутация — под флагом.                            |
 | `TestIntegration_EditMessage` | PUT `/chat/{token}/{messageId}`             | `parent.id == id`; `GetChat` видит новый текст. Мутация — под флагом. |
+| `TestIntegration_Threads` | `POST /chat/{token}` + `threads/recent` + `GET /chat?threadId` | Создание треда (`threadTitle`) → ответ (`threadId`) → `ListThreads`: `numReplies >= 1`, title совпадает → `GetChat(threadId)`: корень и ответ в выдаче → общая история: `threadReplies >= 1` у корня, `threadId` корня у ответа. Мутация — под флагом. |

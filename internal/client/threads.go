@@ -32,8 +32,7 @@ type ThreadAttendee struct {
 
 // ThreadInfo — элемент выдачи threads/recent; first/last nullable (корень
 // истёк/удалён). first/last — сообщения chat-API: у них messageParameters —
-// ОБЪЕКТ (инвариант CLAUDE.md; формат массива бывает только в /v4/room
-// lastMessage — тип MsgParams принимает оба).
+// объект при непустых параметрах, пустые — [] (тип MsgParams принимает оба).
 type ThreadInfo struct {
 	Thread   Thread         `json:"thread"`
 	Attendee ThreadAttendee `json:"attendee"`
