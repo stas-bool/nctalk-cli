@@ -1,8 +1,9 @@
 package cli
 
 // handlers_chat.go — реализации команд `chat show` (Task 4.3), `chat send`
-// (Task 4.4, пока stub) и `chat edit` (дизайн 2026-09-08). Сигнатуры
-// handler-функций фиксированы схемой роутинга cli.go (handlerFn).
+// (Task 4.4, пока stub), `chat threads` (спека-дельта 2026-09-29) и
+// `chat edit` (дизайн 2026-09-08). Сигнатуры handler-функций фиксированы
+// схемой роутинга cli.go (handlerFn).
 //
 // Разбор флагов — ручной (scan args), без flag-пакета (спека §3). Глобальный
 // --json уже вынесен в jsonOut слоем Run (cli.go extractJSON).
@@ -50,6 +51,8 @@ func chatShowHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 		fromFlag     string
 		sinceFlag    string
 		systemFlag   bool
+		threadRaw    string
+		threadSet    bool
 	)
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -88,6 +91,16 @@ func chatShowHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 			i++
 		case strings.HasPrefix(a, "--since="):
 			sinceFlag = strings.TrimPrefix(a, "--since=")
+		case a == "--thread":
+			if i+1 >= len(args) {
+				return ExitError{Code: ExitGeneric, Err: errors.New("chat show: --thread требует значение (id треда)")}
+			}
+			threadRaw = args[i+1]
+			threadSet = true
+			i++
+		case strings.HasPrefix(a, "--thread="):
+			threadRaw = strings.TrimPrefix(a, "--thread=")
+			threadSet = true
 		case a == "--system":
 			systemFlag = true
 		case strings.HasPrefix(a, "--"):
@@ -109,6 +122,21 @@ func chatShowHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 			return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat show: --last ожидает целое число, получено %q", lastRaw)}
 		}
 		last = n
+	}
+
+	// 2.5. Парсинг --thread (спека-дельта 2026-09-29 §2.2): положительное
+	// целое = id корневого сообщения; нецелое/0/отрицательное при явном
+	// флаге → exit 1 ДО сети.
+	var threadId int
+	if threadSet {
+		n, err := strconv.Atoi(threadRaw)
+		if err != nil {
+			return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat show: --thread ожидает целое число, получено %q", threadRaw)}
+		}
+		if n <= 0 {
+			return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat show: --thread ожидает положительное число, получено %d", n)}
+		}
+		threadId = n
 	}
 
 	// 3. Парсинг --since. Относительные форматы (Ns/Nm/Nh/Nd) разбираем с опорой
@@ -157,6 +185,7 @@ func chatShowHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 	opts := client.GetChatOpts{
 		Limit:        limit,
 		StopBeforeTs: sinceTs,
+		ThreadId:     threadId,
 	}
 	msgs, err := deps.Client.GetChat(ctx, token, opts)
 	if err != nil {
@@ -221,7 +250,7 @@ func chatShowHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 			return ExitError{Code: ExitGeneric, Err: err}
 		}
 	} else {
-		if err := render.MessagesTable(deps.Stdout, filtered); err != nil {
+		if err := render.MessagesTable(deps.Stdout, filtered, threadId == 0); err != nil {
 			return ExitError{Code: ExitGeneric, Err: err}
 		}
 	}
@@ -304,13 +333,17 @@ func chatSendHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 	// 1. Разбор флагов: ручной scan (без flag-пакета, спека §3). Поддерживаем
 	// обе формы — `--flag value` и `--flag=value` — единообразно с chatShow.
 	var (
-		positionals  []string
-		nameFlag     string
-		fileFlag     string
-		replyToRaw   string
-		replyToSet   bool
-		silentFlag   bool
-		referenceId  string
+		positionals     []string
+		nameFlag        string
+		fileFlag        string
+		replyToRaw      string
+		replyToSet      bool
+		silentFlag      bool
+		referenceId     string
+		threadRaw       string
+		threadSet       bool
+		threadTitle     string
+		threadTitleSet  bool
 	)
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -341,6 +374,26 @@ func chatSendHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 		case strings.HasPrefix(a, "--reply-to="):
 			replyToRaw = strings.TrimPrefix(a, "--reply-to=")
 			replyToSet = true
+		case a == "--thread-title":
+			if i+1 >= len(args) {
+				return ExitError{Code: ExitGeneric, Err: errors.New("chat send: --thread-title требует значение (тема)")}
+			}
+			threadTitle = args[i+1]
+			threadTitleSet = true
+			i++
+		case strings.HasPrefix(a, "--thread-title="):
+			threadTitle = strings.TrimPrefix(a, "--thread-title=")
+			threadTitleSet = true
+		case a == "--thread":
+			if i+1 >= len(args) {
+				return ExitError{Code: ExitGeneric, Err: errors.New("chat send: --thread требует значение (id треда)")}
+			}
+			threadRaw = args[i+1]
+			threadSet = true
+			i++
+		case strings.HasPrefix(a, "--thread="):
+			threadRaw = strings.TrimPrefix(a, "--thread=")
+			threadSet = true
 		case a == "--silent":
 			silentFlag = true
 		case a == "--reference-id":
@@ -375,6 +428,44 @@ func chatSendHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 		replyTo = n
 	}
 
+	// 2.5. Парсинг --thread: положительное целое, иначе exit 1 ДО сети.
+	var threadId int
+	if threadSet {
+		n, err := strconv.Atoi(threadRaw)
+		if err != nil {
+			return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat send: --thread ожидает целое число, получено %q", threadRaw)}
+		}
+		if n <= 0 {
+			return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat send: --thread ожидает положительное число, получено %d", n)}
+		}
+		threadId = n
+	}
+
+	// 2.6. Guard'ы тредов ДО сети (спека-дельта §2.3): сервер молча
+	// игнорирует лишние параметры — нельзя допустить молчаливой подмены
+	// действия. Взаимоисключаемость --reply-to / --thread / --thread-title:
+	// любые два одновременно → exit 1 (сообщение перечисляет конфликт).
+	// Пустой --thread-title → exit 1 (сервер безымянные треды не создаёт,
+	// пустое значение он игнорирует).
+	var threadFlags []string
+	if replyToSet {
+		threadFlags = append(threadFlags, "--reply-to")
+	}
+	if threadSet {
+		threadFlags = append(threadFlags, "--thread")
+	}
+	if threadTitleSet {
+		threadFlags = append(threadFlags, "--thread-title")
+	}
+	if len(threadFlags) > 1 {
+		return ExitError{Code: ExitGeneric, Err: fmt.Errorf(
+			"chat send: %s взаимоисключаемы — укажите ровно один",
+			strings.Join(threadFlags, " + "))}
+	}
+	if threadTitleSet && threadTitle == "" {
+		return ExitError{Code: ExitGeneric, Err: errors.New("chat send: --thread-title не может быть пустым (сервер безымянные треды не создаёт)")}
+	}
+
 	// 3. Чтение тела ДО ResolveRoom: пустое тело отсекается без единого
 	// сетевого вызова (ни FindRooms, ни SendMessage) — это явно требует спека
 	// и DoD Task 4.4. Общий блок с chat edit — readMessageBody.
@@ -405,6 +496,8 @@ func chatSendHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 		ReplyTo:     replyTo,
 		Silent:      silentFlag,
 		ReferenceId: referenceId,
+		ThreadId:    threadId,
+		ThreadTitle: threadTitle,
 	})
 	if err != nil {
 		// OCS-error/сеть — текст уже sanitized в client-слое (спека §5, §9).
@@ -538,6 +631,131 @@ func chatEditHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 		}
 	} else {
 		if err := render.NewMessageID(deps.Stdout, id); err != nil {
+			return ExitError{Code: ExitGeneric, Err: err}
+		}
+	}
+	return ExitError{Code: ExitOK}
+}
+
+// chatThreadsHandler — реализация `chat threads <room> [--last N]` (спека-
+// дельта 2026-09-29 §2.1, §5): список недавних тредов комнаты.
+//
+// Порядок шагов:
+//  1. ручной scan флагов (--name, --last, обе формы; неизвестный --* → exit 1);
+//  2. первый позиционный = room, лишние игнорируются — единообразно с chat show;
+//  3. --last: нецелое → exit 1; N<=0 → не задан → дефолт 20; N>50 → клэмп 50
+//     (серверный потолок int<1,50>; дефолт сервера 50 — наш ниже для
+//     читаемого вывода, симметрия с chat show --last 20);
+//  4. ResolveRoom — коды 1/2/3 сохраняются (positional приоритетен, при
+//     конфликте предупреждение в stderr);
+//  5. ListThreads(token, limit) — клэмп уже применён, клиент не валидирует;
+//  6. в текстовом режиме подстановка плейсхолдеров {actor}/{file}/{mention-*}
+//     в First/Last ДО рендера (render.SubstituteParams — тот же конвейер,
+//     что у chat show шаг 10; JSON — оригинал, канонический ответ);
+//  7. вывод render.ThreadsTable / render.ThreadsJSON по jsonOut; пустой
+//     список → пустой stdout в тексте (поисковая семантика rooms list) и []
+//     в JSON.
+func chatThreadsHandler(ctx context.Context, deps Deps, args []string, jsonOut bool) ExitError {
+	// 1-2. Разбор флагов и позиционных: ручной scan (без flag-пакета, спека §3).
+	var (
+		positionals  []string
+		nameFlag     string
+		lastRaw      string
+		lastExplicit bool
+	)
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--name":
+			if i+1 >= len(args) {
+				return ExitError{Code: ExitGeneric, Err: errors.New("chat threads: --name требует значение")}
+			}
+			nameFlag = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--name="):
+			nameFlag = strings.TrimPrefix(a, "--name=")
+		case a == "--last":
+			if i+1 >= len(args) {
+				return ExitError{Code: ExitGeneric, Err: errors.New("chat threads: --last требует значение (целое)")}
+			}
+			lastRaw = args[i+1]
+			lastExplicit = true
+			i++
+		case strings.HasPrefix(a, "--last="):
+			lastRaw = strings.TrimPrefix(a, "--last=")
+			lastExplicit = true
+		case strings.HasPrefix(a, "--"):
+			return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat threads: неизвестный флаг %q", a)}
+		default:
+			// Первый позиционный — room (token, primary); лишние игнорируются.
+			positionals = append(positionals, a)
+		}
+	}
+
+	// 3. --last → limit.
+	limit := 20
+	if lastExplicit {
+		n, err := strconv.Atoi(lastRaw)
+		if err != nil {
+			return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat threads: --last ожидает целое число, получено %q", lastRaw)}
+		}
+		if n > 0 {
+			limit = n
+			if limit > 50 {
+				limit = 50
+			}
+		}
+	}
+
+	// 4. Разрешение <room>. ResolveRoom сам печатает кандидатов при
+	// неоднозначности и возвращает ExitAmbiguous/ExitNotFound как ExitError.
+	var positional string
+	if len(positionals) > 0 {
+		positional = positionals[0]
+	}
+	token, err := ResolveRoom(ctx, deps.Client, positional, nameFlag, deps.Stderr)
+	if err != nil {
+		var ee ExitError
+		if errors.As(err, &ee) {
+			return ee
+		}
+		return ExitError{Code: ExitGeneric, Err: err}
+	}
+
+	// 5. Список тредов (клиент по контракту возвращает non-nil слайс для
+	// «пусто»; guard — страховка детерминированного --json).
+	ts, err := deps.Client.ListThreads(ctx, token, limit)
+	if err != nil {
+		// OCS 404 (комната не найдена) → exit 2; прочие (401/403/5xx/сеть) → 1.
+		return exitFromClientErr(err)
+	}
+	if ts == nil {
+		ts = []client.ThreadInfo{}
+	}
+
+	// 6. Подстановка плейсхолдеров в текстовом режиме: фолбэк-название
+	// (first.message) и превью (last.message) рендерятся готовым текстом.
+	if !jsonOut {
+		for i := range ts {
+			if ts[i].First != nil {
+				ts[i].First.Message = render.SubstituteParams(ts[i].First.Message, ts[i].First.MessageParameters)
+			}
+			if ts[i].Last != nil {
+				ts[i].Last.Message = render.SubstituteParams(ts[i].Last.Message, ts[i].Last.MessageParameters)
+			}
+		}
+	}
+
+	// 7. Вывод. Пустой список: текст → пустой stdout, exit 0; JSON → [].
+	if jsonOut {
+		if err := render.ThreadsJSON(deps.Stdout, ts); err != nil {
+			return ExitError{Code: ExitGeneric, Err: err}
+		}
+	} else {
+		if len(ts) == 0 {
+			return ExitError{Code: ExitOK}
+		}
+		if err := render.ThreadsTable(deps.Stdout, ts); err != nil {
 			return ExitError{Code: ExitGeneric, Err: err}
 		}
 	}

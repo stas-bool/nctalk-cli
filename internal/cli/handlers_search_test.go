@@ -50,6 +50,9 @@ func (m *searchSpyClient) GetReactions(_ context.Context, _ string, _ int) (map[
 func (m *searchSpyClient) GetParticipants(_ context.Context, _ string) ([]client.Participant, error) {
 	return nil, errMock
 }
+func (m *searchSpyClient) ListThreads(_ context.Context, _ string, _ int) ([]client.ThreadInfo, error) {
+	return nil, errMock
+}
 func (m *searchSpyClient) SearchMessages(_ context.Context, term string, opts client.SearchMessagesOpts) ([]client.MessageResult, error) {
 	m.gotTerm = term
 	m.gotOpts = opts

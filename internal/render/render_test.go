@@ -98,7 +98,7 @@ func TestMessagesTable(t *testing.T) {
 		},
 	}
 	var buf bytes.Buffer
-	if err := MessagesTable(&buf, msgs); err != nil {
+	if err := MessagesTable(&buf, msgs, false); err != nil {
 		t.Fatalf("MessagesTable: %v", err)
 	}
 	out := buf.String()
@@ -112,7 +112,7 @@ func TestMessagesTableNoReactions(t *testing.T) {
 		{Id: 1, ActorDisplayName: "Bob", Message: "hi", Timestamp: 1700000000},
 	}
 	var buf bytes.Buffer
-	if err := MessagesTable(&buf, msgs); err != nil {
+	if err := MessagesTable(&buf, msgs, false); err != nil {
 		t.Fatalf("MessagesTable: %v", err)
 	}
 	if strings.Contains(buf.String(), "×") {

@@ -79,6 +79,9 @@ func (m *roomsSpyClient) GetParticipants(_ context.Context, token string) ([]cli
 	m.participantsCalls = append(m.participantsCalls, participantsCall{token: token})
 	return m.participantsResult, m.participantsErr
 }
+func (m *roomsSpyClient) ListThreads(_ context.Context, _ string, _ int) ([]client.ThreadInfo, error) {
+	return nil, errMock
+}
 
 // Неиспользуемые в rooms-тестах методы — возвращают errMock (маркер).
 func (m *roomsSpyClient) GetChat(_ context.Context, _ string, _ client.GetChatOpts) ([]client.Message, error) {

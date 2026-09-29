@@ -13,7 +13,7 @@ import (
 	"github.com/stas-bool/nctalk-cli/internal/client"
 )
 
-// TalkClient — минимальный интерфейс, покрывающий 9 методов реального
+// TalkClient — минимальный интерфейс, покрывающий 10 методов реального
 // *client.TalkClient. Нужен для mockability: в production в Deps.Client
 // кладётся *client.TalkClient, в тестах — заглушка.
 type TalkClient interface {
@@ -25,6 +25,7 @@ type TalkClient interface {
 	EditMessage(ctx context.Context, token string, messageId int, opts client.EditMessageOpts) (int, error)
 	GetReactions(ctx context.Context, token string, messageId int) (map[string][]client.ReactionActor, error)
 	GetParticipants(ctx context.Context, token string) ([]client.Participant, error)
+	ListThreads(ctx context.Context, token string, limit int) ([]client.ThreadInfo, error)
 	SearchMessages(ctx context.Context, term string, opts client.SearchMessagesOpts) ([]client.MessageResult, error)
 }
 

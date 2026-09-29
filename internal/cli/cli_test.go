@@ -43,6 +43,9 @@ func (m *mockTalkClient) GetReactions(_ context.Context, _ string, _ int) (map[s
 func (m *mockTalkClient) GetParticipants(_ context.Context, _ string) ([]client.Participant, error) {
 	return nil, errMock
 }
+func (m *mockTalkClient) ListThreads(_ context.Context, _ string, _ int) ([]client.ThreadInfo, error) {
+	return nil, errMock
+}
 func (m *mockTalkClient) SearchMessages(_ context.Context, _ string, _ client.SearchMessagesOpts) ([]client.MessageResult, error) {
 	return nil, errMock
 }
