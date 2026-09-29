@@ -1,0 +1,144 @@
+{
+  "ocs": {
+    "meta": {
+      "status": "ok",
+      "statuscode": 200,
+      "message": "OK"
+    },
+    "data": [
+      {
+        "id": 1300,
+        "token": "tok-team",
+        "actorType": "users",
+        "actorId": "boris.k",
+        "actorDisplayName": "Борис Крылов",
+        "timestamp": 1790686245,
+        "message": "nctalk threads fixture — ответ",
+        "messageParameters": [],
+        "systemMessage": "",
+        "messageType": "comment",
+        "isReplyable": true,
+        "referenceId": "",
+        "reactions": {},
+        "expirationTimestamp": 0,
+        "markdown": true,
+        "threadId": 1234,
+        "isThread": true,
+        "threadTitle": "Фикстурный тред",
+        "threadReplies": 1,
+        "metaData": {
+          "threadId": 1234
+        },
+        "parent": {
+          "id": 1234,
+          "token": "tok-team",
+          "actorType": "users",
+          "actorId": "anna.s",
+          "actorDisplayName": "Анна Смирнова",
+          "timestamp": 1790686244,
+          "message": "nctalk threads fixture — корень",
+          "messageParameters": [],
+          "systemMessage": "",
+          "messageType": "comment",
+          "isReplyable": true,
+          "referenceId": "",
+          "reactions": {},
+          "expirationTimestamp": 0,
+          "markdown": true,
+          "threadId": 1234,
+          "isThread": true,
+          "threadTitle": "Фикстурный тред",
+          "threadReplies": 1,
+          "metaData": {
+            "threadId": 1234,
+            "threadTitle": "Фикстурный тред"
+          }
+        }
+      },
+      {
+        "id": 1250,
+        "token": "tok-team",
+        "actorType": "users",
+        "actorId": "anna.s",
+        "actorDisplayName": "Анна Смирнова",
+        "timestamp": 1790686244,
+        "message": "You created thread {title}",
+        "messageParameters": {
+          "actor": {
+            "type": "user",
+            "id": "anna.s",
+            "name": "Анна Смирнова",
+            "mention-id": "anna.s"
+          },
+          "title": {
+            "type": "highlight",
+            "id": "thread/1234",
+            "name": "Фикстурный тред"
+          }
+        },
+        "systemMessage": "thread_created",
+        "messageType": "system",
+        "isReplyable": false,
+        "referenceId": "",
+        "reactions": {},
+        "expirationTimestamp": 0,
+        "markdown": false,
+        "threadId": 1234,
+        "isThread": true,
+        "threadTitle": "Фикстурный тред",
+        "threadReplies": 1,
+        "silent": true,
+        "parent": {
+          "id": 1234,
+          "token": "tok-team",
+          "actorType": "users",
+          "actorId": "anna.s",
+          "actorDisplayName": "Анна Смирнова",
+          "timestamp": 1790686244,
+          "message": "nctalk threads fixture — корень",
+          "messageParameters": [],
+          "systemMessage": "",
+          "messageType": "comment",
+          "isReplyable": true,
+          "referenceId": "",
+          "reactions": {},
+          "expirationTimestamp": 0,
+          "markdown": true,
+          "threadId": 1234,
+          "isThread": true,
+          "threadTitle": "Фикстурный тред",
+          "threadReplies": 1,
+          "metaData": {
+            "threadId": 1234,
+            "threadTitle": "Фикстурный тред"
+          }
+        }
+      },
+      {
+        "id": 1234,
+        "token": "tok-team",
+        "actorType": "users",
+        "actorId": "anna.s",
+        "actorDisplayName": "Анна Смирнова",
+        "timestamp": 1790686244,
+        "message": "nctalk threads fixture — корень",
+        "messageParameters": [],
+        "systemMessage": "",
+        "messageType": "comment",
+        "isReplyable": true,
+        "referenceId": "",
+        "reactions": {},
+        "expirationTimestamp": 0,
+        "markdown": true,
+        "threadId": 1234,
+        "isThread": true,
+        "threadTitle": "Фикстурный тред",
+        "threadReplies": 1,
+        "metaData": {
+          "threadId": 1234,
+          "threadTitle": "Фикстурный тред"
+        }
+      }
+    ]
+  }
+}

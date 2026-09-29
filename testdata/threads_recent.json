@@ -1,0 +1,73 @@
+{
+  "ocs": {
+    "meta": {
+      "status": "ok",
+      "statuscode": 200,
+      "message": "OK"
+    },
+    "data": [
+      {
+        "thread": {
+          "id": 1234,
+          "roomToken": "tok-team",
+          "lastMessageId": 1300,
+          "numReplies": 1,
+          "lastActivity": 1790686245,
+          "title": "Фикстурный тред"
+        },
+        "attendee": {
+          "notificationLevel": 0
+        },
+        "first": {
+          "id": 1234,
+          "token": "tok-team",
+          "actorType": "users",
+          "actorId": "anna.s",
+          "actorDisplayName": "Анна Смирнова",
+          "timestamp": 1790686244,
+          "message": "nctalk threads fixture — корень",
+          "messageParameters": [],
+          "systemMessage": "",
+          "messageType": "comment",
+          "isReplyable": true,
+          "referenceId": "",
+          "reactions": {},
+          "expirationTimestamp": 0,
+          "markdown": true,
+          "threadId": 1234,
+          "isThread": true,
+          "threadTitle": "Фикстурный тред",
+          "threadReplies": 1,
+          "metaData": {
+            "threadId": 1234,
+            "threadTitle": "Фикстурный тред"
+          }
+        },
+        "last": {
+          "id": 1300,
+          "token": "tok-team",
+          "actorType": "users",
+          "actorId": "boris.k",
+          "actorDisplayName": "Борис Крылов",
+          "timestamp": 1790686245,
+          "message": "nctalk threads fixture — ответ",
+          "messageParameters": [],
+          "systemMessage": "",
+          "messageType": "comment",
+          "isReplyable": true,
+          "referenceId": "",
+          "reactions": {},
+          "expirationTimestamp": 0,
+          "markdown": true,
+          "threadId": 1234,
+          "isThread": true,
+          "threadTitle": "Фикстурный тред",
+          "threadReplies": 1,
+          "metaData": {
+            "threadId": 1234
+          }
+        }
+      }
+    ]
+  }
+}

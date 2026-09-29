@@ -1,0 +1,33 @@
+{
+  "ocs": {
+    "meta": {
+      "status": "ok",
+      "statuscode": 201,
+      "message": "OK"
+    },
+    "data": {
+      "id": 1300,
+      "token": "tok-team",
+      "actorType": "users",
+      "actorId": "boris.k",
+      "actorDisplayName": "Борис Крылов",
+      "timestamp": 1790686245,
+      "message": "nctalk threads fixture — ответ",
+      "messageParameters": [],
+      "systemMessage": "",
+      "messageType": "comment",
+      "isReplyable": true,
+      "referenceId": "",
+      "reactions": {},
+      "expirationTimestamp": 0,
+      "markdown": true,
+      "threadId": 1234,
+      "isThread": true,
+      "threadTitle": "Фикстурный тред",
+      "threadReplies": 1,
+      "metaData": {
+        "threadId": 1234
+      }
+    }
+  }
+}
