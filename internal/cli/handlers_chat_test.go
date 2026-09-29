@@ -1350,8 +1350,9 @@ func TestChatThreadsEmpty(t *testing.T) {
 	}
 }
 
-// TestChatThreadsLast — --last: дефолт 20; явное N; клэмп 50; N<=0 → не задан
-// (дефолт 20, НЕ ошибка); нецелое → exit 1 (§2.1).
+// TestChatThreadsLast — --last: дефолт 20; явное N; клэмп 50; нецелое ИЛИ
+// неположительное при явном флаге → exit 1 ДО сети (симметрия с guard-ом
+// --thread; §2.1).
 func TestChatThreadsLast(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -1363,8 +1364,8 @@ func TestChatThreadsLast(t *testing.T) {
 		{"--last 5", []string{"TOK", "--last", "5"}, 5, ExitOK},
 		{"--last=7 (форма =)", []string{"TOK", "--last=7"}, 7, ExitOK},
 		{"--last 500 → клэмп 50", []string{"TOK", "--last", "500"}, 50, ExitOK},
-		{"--last 0 → не задан → 20", []string{"TOK", "--last", "0"}, 20, ExitOK},
-		{"--last -3 → не задан → 20", []string{"TOK", "--last", "-3"}, 20, ExitOK},
+		{"--last 0 → exit 1", []string{"TOK", "--last", "0"}, 20, ExitGeneric},
+		{"--last -3 → exit 1", []string{"TOK", "--last", "-3"}, 20, ExitGeneric},
 		{"--last abc → exit 1", []string{"TOK", "--last", "abc"}, 20, ExitGeneric},
 	}
 	for _, tc := range cases {
@@ -1378,7 +1379,35 @@ func TestChatThreadsLast(t *testing.T) {
 			if tc.wantCode == ExitOK && spy.gotThreadsLimit != tc.wantLimit {
 				t.Errorf("limit: got %d, want %d", spy.gotThreadsLimit, tc.wantLimit)
 			}
+			if tc.wantCode != ExitOK && spy.threadsCalls != 0 {
+				t.Errorf("ошибка валидации: ListThreads не должен зваться; got %d calls", spy.threadsCalls)
+			}
 		})
+	}
+}
+
+// TestChatThreadsLastClampWarn — клэмп --last>50 НЕ молчаливый: предупреждение
+// в stderr; ровно 50 — клэмп не срабатывает, stderr пуст.
+func TestChatThreadsLastClampWarn(t *testing.T) {
+	spy := &chatSpyClient{threadsResult: []client.ThreadInfo{}}
+	deps := newChatDeps(spy)
+	ee := chatThreadsHandler(context.Background(), deps, []string{"TOK", "--last", "500"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	if spy.gotThreadsLimit != 50 {
+		t.Errorf("limit: got %d, want 50", spy.gotThreadsLimit)
+	}
+	stderr := deps.Stderr.(*bytes.Buffer).String()
+	if !strings.Contains(stderr, "--last=500") || !strings.Contains(stderr, "50") {
+		t.Errorf("клэмп без предупреждения: stderr=%q", stderr)
+	}
+
+	spy2 := &chatSpyClient{threadsResult: []client.ThreadInfo{}}
+	deps2 := newChatDeps(spy2)
+	chatThreadsHandler(context.Background(), deps2, []string{"TOK", "--last", "50"}, false)
+	if got := deps2.Stderr.(*bytes.Buffer).String(); got != "" {
+		t.Errorf("ровно 50 — без предупреждения; stderr=%q", got)
 	}
 }
 
@@ -1600,6 +1629,39 @@ func TestChatShowThreadAnnotations(t *testing.T) {
 	}
 	if !strings.Contains(out, "просто сообщение") {
 		t.Errorf("нетредовое сообщение выводится; вывод=\n%s", out)
+	}
+}
+
+// TestChatShowThreadAnnotationsSystem — system-сообщение треда (thread_created:
+// ThreadId != Id, ThreadTitle загружен — как в фикстуре chat_thread_history.json
+// id 1250) ↩ НЕ получает даже в --system: пометка означает «ответ в треде»,
+// системная строка — не ответ (§2.4). Comment-ответ в той же выдаче пометку
+// сохраняет — ровно одна ↩ на всю выдачу.
+func TestChatShowThreadAnnotationsSystem(t *testing.T) {
+	sys := makeChatMsg(1250, "anna", "system", "You created thread {title}", chatFixedNow.Unix())
+	sys.ThreadId = 1234
+	sys.ThreadTitle = "Отчёт за сентябрь"
+
+	reply := makeChatMsg(1300, "bob", "comment", "цифры сверил", chatFixedNow.Unix())
+	reply.ThreadId = 1234
+	reply.ThreadTitle = "Отчёт за сентябрь"
+
+	spy := &chatSpyClient{chatMsgs: []client.Message{sys, reply}}
+	deps := newChatDeps(spy)
+
+	ee := chatShowHandler(context.Background(), deps, []string{"TOK", "--system"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	out := deps.Stdout.(*bytes.Buffer).String()
+	if !strings.Contains(out, "You created thread") {
+		t.Fatalf("system-сообщение должно выводиться с --system; вывод=\n%s", out)
+	}
+	if n := strings.Count(out, "↩"); n != 1 {
+		t.Errorf("↩ только у comment-ответа: got %d вхождений; вывод=\n%s", n, out)
+	}
+	if !strings.Contains(out, "цифры сверил   ↩1234") {
+		t.Errorf("ответ треда сохраняет ↩1234; вывод=\n%s", out)
 	}
 }
 

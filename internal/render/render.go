@@ -46,18 +46,24 @@ func RoomsTable(w io.Writer, rooms []client.Room) error {
 	return tw.Flush()
 }
 
+// previewText — текст для превью сообщения: message; пустой текст (актуально
+// для системных сообщений) → systemMessage. Общий фолбэк lastMessagePreview
+// (комнаты) и threadLastPreview (треды) — одна точка правды о фолбэке.
+func previewText(m *client.Message) string {
+	if m.Message != "" {
+		return m.Message
+	}
+	return m.SystemMessage
+}
+
 // lastMessagePreview собирает превью последнего сообщения комнаты в формате
 // "время автор: текст". При отсутствии сообщений (LastMessage == nil) — "—".
-// Если текст пуст, берётся systemMessage (актуально для системных сообщений).
+// Если текст пуст, берётся systemMessage (previewText).
 func lastMessagePreview(m *client.Message) string {
 	if m == nil {
 		return "—"
 	}
-	preview := m.Message
-	if preview == "" {
-		preview = m.SystemMessage
-	}
-	return fmt.Sprintf("%s %s: %s", FormatTime(m.Timestamp), m.ActorDisplayName, preview)
+	return fmt.Sprintf("%s %s: %s", FormatTime(m.Timestamp), m.ActorDisplayName, previewText(m))
 }
 
 // MessagesTable выводит сообщения построчно (спека §6 chat show):
@@ -74,8 +80,10 @@ func lastMessagePreview(m *client.Message) string {
 //     — в ОБОИХ режимах (общая история и --thread); при 0 не печатается:
 //     это ещё не обсуждение;
 //   - ответ в треде (ThreadId != Id && ThreadTitle != "") → ↩<ThreadId> —
-//     только в режиме общей истории (showThreadRefs=true); в выдаче --thread
-//     все сообщения из одного треда, ссылка бессмысленна. Условие
+//     только в режиме общей истории (showThreadRefs=true) и только у comment;
+//     в выдаче --thread все сообщения из одного треда, ссылка бессмысленна.
+//     System-сообщения пометки не получают: ↩ = «ответ в треде», системная
+//     строка (thread_created и пр.) — не ответ и уже называет тред. Условие
 //     ThreadTitle != "" = «Thread-запись загружена» (§3.4): quote-ответ без
 //     треда не помечается (↩ вёл бы на 404).
 //
@@ -98,7 +106,7 @@ func threadSuffix(m client.Message, showThreadRefs bool) string {
 	switch {
 	case m.ThreadId == m.Id && m.ThreadReplies > 0:
 		s += "   ⟲" + strconv.Itoa(m.ThreadReplies)
-	case showThreadRefs && m.ThreadId != m.Id && m.ThreadTitle != "":
+	case showThreadRefs && m.MessageType != "system" && m.ThreadId != m.Id && m.ThreadTitle != "":
 		s += "   ↩" + strconv.Itoa(m.ThreadId)
 	}
 	return s
@@ -278,11 +286,13 @@ func ParticipantsTable(w io.Writer, ps []client.Participant) error {
 //	[1234] 2026-09-29 14:02:05  Отчёт за сентябрь  ⟲5  Вася: цифры сверил
 //
 // Подстановка плейсхолдеров НЕ выполняется здесь — это слой cli (симметрия
-// шага 10 chatShowHandler); рендер получает готовый текст.
+// шага 10 chatShowHandler); рендер получает готовый текст. Название и превью
+// сворачиваются в одну строку (oneLine): многострочное сообщение иначе
+// разорвало бы формат «один тред — одна строка».
 func ThreadsTable(w io.Writer, ts []client.ThreadInfo) error {
 	for _, t := range ts {
 		line := fmt.Sprintf("[%d] %s  %s  ⟲%d",
-			t.Thread.Id, FormatTime(t.Thread.LastActivity), threadTitle(t), t.Thread.NumReplies)
+			t.Thread.Id, FormatTime(t.Thread.LastActivity), oneLine(threadTitle(t)), t.Thread.NumReplies)
 		if t.Last != nil {
 			line += "  " + threadLastPreview(t.Last)
 		}
@@ -306,12 +316,23 @@ func threadTitle(t client.ThreadInfo) string {
 	return "—"
 }
 
-// threadLastPreview — превью последнего сообщения: "автор: текст"
-// (system-фолбэк как в lastMessagePreview: пустой текст → systemMessage).
-func threadLastPreview(m *client.Message) string {
-	preview := m.Message
-	if preview == "" {
-		preview = m.SystemMessage
+// threadCellLimit — потолок длины названия/превью в ThreadsTable (руны):
+// список тредов — обзор, полный текст читается `chat show --thread`.
+const threadCellLimit = 100
+
+// oneLine — сворачивает текст в одну строку для построчной таблицы тредов:
+// пробельные последовательности (переносы, табы) → одиночный пробел, свыше
+// threadCellLimit рун — обрезка с многоточием «…».
+func oneLine(s string) string {
+	flat := strings.Join(strings.Fields(s), " ")
+	if r := []rune(flat); len(r) > threadCellLimit {
+		return string(r[:threadCellLimit]) + "…"
 	}
-	return fmt.Sprintf("%s: %s", m.ActorDisplayName, preview)
+	return flat
+}
+
+// threadLastPreview — превью последнего сообщения: "автор: текст"
+// (system-фолбэк previewText, как в lastMessagePreview; одна строка oneLine).
+func threadLastPreview(m *client.Message) string {
+	return fmt.Sprintf("%s: %s", m.ActorDisplayName, oneLine(previewText(m)))
 }

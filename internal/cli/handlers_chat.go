@@ -643,9 +643,12 @@ func chatEditHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 // Порядок шагов:
 //  1. ручной scan флагов (--name, --last, обе формы; неизвестный --* → exit 1);
 //  2. первый позиционный = room, лишние игнорируются — единообразно с chat show;
-//  3. --last: нецелое → exit 1; N<=0 → не задан → дефолт 20; N>50 → клэмп 50
-//     (серверный потолок int<1,50>; дефолт сервера 50 — наш ниже для
-//     читаемого вывода, симметрия с chat show --last 20);
+//  3. --last: нецелое или N<=0 при явном флаге → exit 1 (симметрия с guard-ом
+//     --thread: семантики «0 = не задан» из chat show здесь нет — в threads
+//     нет капа 200, где 0 осмыслен, явный 0/минус это потерянная опечатка);
+//     N>50 → клэмп 50 с предупреждением в stderr (серверный потолок int<1,50>;
+//     дефолт сервера 50 — наш дефолт 20 ниже для читаемого вывода, симметрия
+//     с chat show --last 20);
 //  4. ResolveRoom — коды 1/2/3 сохраняются (positional приоритетен, при
 //     конфликте предупреждение в stderr);
 //  5. ListThreads(token, limit) — клэмп уже применён, клиент не валидирует;
@@ -692,18 +695,25 @@ func chatThreadsHandler(ctx context.Context, deps Deps, args []string, jsonOut b
 		}
 	}
 
-	// 3. --last → limit.
+	// 3. --last → limit. Явное неположительное значение — ошибка ДО сети:
+	// «0 = не задан» из chat show здесь не применяется (в threads нет
+	// семантики «0 → потолок 200», где 0 осмыслен) — молчаливая подмена
+	// опечатки дефолтом прятала бы ошибку пользователя.
 	limit := 20
 	if lastExplicit {
 		n, err := strconv.Atoi(lastRaw)
 		if err != nil {
 			return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat threads: --last ожидает целое число, получено %q", lastRaw)}
 		}
-		if n > 0 {
-			limit = n
-			if limit > 50 {
-				limit = 50
-			}
+		if n <= 0 {
+			return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat threads: --last ожидает положительное число, получено %d", n)}
+		}
+		limit = n
+		if limit > 50 {
+			limit = 50
+			// Клэмп не молчаливый: пользователь должен видеть, почему тредов
+			// меньше, чем он просил.
+			fmt.Fprintf(deps.Stderr, "chat threads: --last=%d ограничен до 50 (серверный потолок)\n", n)
 		}
 	}
 
