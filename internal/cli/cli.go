@@ -70,9 +70,10 @@ var routes = map[string]map[string]handlerFn{
 		"participants": roomsParticipantsHandler,
 	},
 	"chat": {
-		"show": chatShowHandler,
-		"send": chatSendHandler,
-		"edit": chatEditHandler,
+		"show":    chatShowHandler,
+		"send":    chatSendHandler,
+		"threads": chatThreadsHandler,
+		"edit":    chatEditHandler,
 	},
 	"reactions": {
 		"get": reactionsGetHandler,
@@ -121,7 +122,7 @@ func Run(args []string, deps Deps) int {
 
 	// rooms/chat/reactions — двухуровневый разбор: args[0]=resource, args[1]=verb.
 	if len(rest) == 0 {
-		fmt.Fprintf(deps.Stderr, "nctalk %s: ожидается verb (list/find/search/participants/show/send/edit/get)\n", resource)
+		fmt.Fprintf(deps.Stderr, "nctalk %s: ожидается verb (list/find/search/participants/show/send/threads/edit/get)\n", resource)
 		return ExitGeneric
 	}
 

@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// TestCmdSpecs_CoverAllRoutes — cmdSpecs обязана содержать ровно те же 9 команд,
+// TestCmdSpecs_CoverAllRoutes — cmdSpecs обязана содержать ровно те же 10 команд,
 // что и таблица routes + searchHandlerFn (спека §6 anti-drift на уровне маршрутов).
 // Защита от drift: если добавить команду в routes и забыть в cmdSpecs (или наоборот) — тест падает.
 func TestCmdSpecs_CoverAllRoutes(t *testing.T) {
@@ -38,7 +38,7 @@ func TestCmdSpecs_CoverAllRoutes(t *testing.T) {
 func TestCmdSpecs_OrderMatchesHelpOrder(t *testing.T) {
 	want := []string{
 		"rooms list", "rooms find", "rooms search", "rooms participants",
-		"chat show", "chat send", "chat edit",
+		"chat show", "chat send", "chat threads", "chat edit",
 		"reactions get",
 		"search",
 	}
@@ -61,8 +61,9 @@ func TestCmdSpecs_FlagsExactly(t *testing.T) {
 		"rooms find":         {"--user"},
 		"rooms search":       {},
 		"rooms participants": {"--name"},
-		"chat show":          {"--name", "--last", "--from", "--since", "--system"},
-		"chat send":          {"--name", "--reply-to", "--reference-id", "--silent", "--file"},
+		"chat threads":       {"--name", "--last"},
+		"chat show":          {"--name", "--last", "--from", "--since", "--system", "--thread"},
+		"chat send":          {"--name", "--reply-to", "--reference-id", "--silent", "--file", "--thread", "--thread-title"},
 		"chat edit":          {"--name", "--file"},
 		"reactions get":      {"--name"},
 		"search":             {"--from", "--limit", "--all"},
@@ -175,7 +176,8 @@ func TestComputePath(t *testing.T) {
 // TestIsValueFlag — какие флаги едят значение, какие нет.
 func TestIsValueFlag(t *testing.T) {
 	valueFlags := []string{"--name", "--type", "--last", "--from", "--since",
-		"--user", "--file", "--reply-to", "--reference-id", "--limit"}
+		"--user", "--file", "--reply-to", "--reference-id", "--limit",
+		"--thread", "--thread-title"}
 	for _, f := range valueFlags {
 		if !isValueFlag(f) {
 			t.Errorf("isValueFlag(%q): want true, got false", f)
@@ -320,7 +322,7 @@ func TestHandleHelp_GeneralContent(t *testing.T) {
 	}
 }
 
-// TestHandleHelp_DetailedContent — для каждой из 9 команд проверяем: имя команды,
+// TestHandleHelp_DetailedContent — для каждой из 10 команд проверяем: имя команды,
 // заголовок, usage, каждый флаг, описание флага, --json, примеры.
 func TestHandleHelp_DetailedContent(t *testing.T) {
 	for _, cs := range cmdSpecs {
@@ -578,6 +580,8 @@ func buildPositionalArgs(cs cmdSpec) []string {
 		return []string{"term"}
 	case "rooms participants":
 		return []string{"tok123"}
+	case "chat threads":
+		return []string{"tok123"}
 	case "chat show", "chat send":
 		return []string{"tok123"}
 	case "chat edit":
@@ -613,6 +617,8 @@ func valueForFlag(name string) string {
 	case "--last", "--limit":
 		return "5"
 	case "--reply-to":
+		return "1"
+	case "--thread":
 		return "1"
 	case "--since":
 		return "1h" // валидный относительный формат — parseSinceAt разберёт, handler дойдёт до ResolveRoom

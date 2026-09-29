@@ -34,7 +34,7 @@ type cmdSpec struct {
 	Examples    []string
 }
 
-// cmdSpecs — единый источник правды: 9 команд базового CLI.
+// cmdSpecs — единый источник правды: 10 команд базового CLI.
 // Порядок соответствует общему help (спека §3). Флаги — строго по handler-ам
 // (handlers_rooms.go, handlers_chat.go, handlers_reactions.go, handlers_search.go);
 // --name включён только в тех командах, где handler его парсит.
@@ -99,6 +99,7 @@ var cmdSpecs = []cmdSpec{
 			{Name: "--from", Value: "<actorId>", Desc: "только сообщения автора"},
 			{Name: "--since", Value: "<время>", Desc: "с момента времени (1h, 2d или ISO)"},
 			{Name: "--system", Desc: "показывать system-сообщения (скрыты по умолчанию)"},
+			{Name: "--thread", Value: "<id>", Desc: "показать только тред (id корневого сообщения)"},
 		},
 		Examples: []string{
 			"nctalk chat show abc123 --last 50",
@@ -112,6 +113,8 @@ var cmdSpecs = []cmdSpec{
 		Flags: []flagSpec{
 			{Name: "--name", Value: "<имя>", Desc: "разрешить комнату по имени (вместо token)"},
 			{Name: "--reply-to", Value: "<id>", Desc: "id сообщения, на которое это ответ"},
+			{Name: "--thread", Value: "<id>", Desc: "ответ в тред без цитаты (взаимоисключаем с --reply-to/--thread-title)"},
+			{Name: "--thread-title", Value: "\"<тема>\"", Desc: "создать тред: сообщение станет корневым"},
 			{Name: "--reference-id", Value: "<uuid>", Desc: "клиентский dedup-идентификатор"},
 			{Name: "--silent", Desc: "отправить без уведомления получателей"},
 			{Name: "--file", Value: "<путь>", Desc: "взять тело из файла (иначе stdin)"},
@@ -119,6 +122,19 @@ var cmdSpecs = []cmdSpec{
 		Examples: []string{
 			"echo \"hi\" | nctalk chat send abc123",
 			"nctalk chat send --name \"Команда\" --file msg.txt",
+		},
+	},
+	{
+		Path:        []string{"chat", "threads"},
+		Short:       "список тредов комнаты",
+		UsageExtras: "<room>",
+		Flags: []flagSpec{
+			{Name: "--name", Value: "<имя>", Desc: "разрешить комнату по имени (вместо token)"},
+			{Name: "--last", Value: "N", Desc: "количество тредов (по умолчанию 20, максимум 50)"},
+		},
+		Examples: []string{
+			"nctalk chat threads abc123",
+			"nctalk chat threads --name \"Команда\" --last 10",
 		},
 	},
 	{

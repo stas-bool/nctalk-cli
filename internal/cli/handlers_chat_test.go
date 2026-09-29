@@ -1462,6 +1462,26 @@ func TestChatThreadsErrors(t *testing.T) {
 	}
 }
 
+// TestChatThreadsViaRun — `chat threads TOK123` через Run: роутинг, handler,
+// вывод (end-to-end без сети).
+func TestChatThreadsViaRun(t *testing.T) {
+	spy := &chatSpyClient{threadsResult: []client.ThreadInfo{
+		makeThreadInfo(1234, "Отчёт", 5, 1760000000, "корень", "Вася", "ответ"),
+	}}
+	deps := newChatDeps(spy)
+
+	code := Run([]string{"chat", "threads", "TOK123"}, deps)
+	if code != ExitOK {
+		t.Fatalf("Run code: got %d, want %d", code, ExitOK)
+	}
+	if spy.threadsCalls != 1 || spy.gotThreadsToken != "TOK123" {
+		t.Fatalf("ListThreads: got calls=%d token=%q", spy.threadsCalls, spy.gotThreadsToken)
+	}
+	if out := deps.Stdout.(*bytes.Buffer).String(); !strings.Contains(out, "[1234]") || !strings.Contains(out, "⟲5") {
+		t.Fatalf("stdout: ожидается строка треда; got %q", out)
+	}
+}
+
 // TestChatShowThread — --thread прокидывается в GetChatOpts.ThreadId (обе
 // формы); без флага → 0; нецелое/0/отрицательное → exit 1 ДО сети (§2.2).
 func TestChatShowThread(t *testing.T) {
