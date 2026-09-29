@@ -54,10 +54,10 @@
 - `PUT /chat/{token}/threads/{id}` (rename), `POST /chat/{token}/threads/{id}/notify`
   (уровень уведомлений), `GET /chat/subscribed-threads` (подписки по всем комнатам) —
   дёшево добавить отдельной дельтой при надобности.
-- Capability-гаrd на клиенте: на серверах без capability `threads` сервер **молча
+- Capability-guard на клиенте: на серверах без capability `threads` сервер **молча
   игнорирует** `threadId` в show/send — `chat show --thread` вернёт общую историю,
   `chat send --thread` уйдёт не в тред. Наш сервер поддерживает; клиент остаётся тонким,
-  поведение документируется (§4), не проверяется.
+  поведение документируется (§5, bullet правки CLAUDE.md), не проверяется.
 - Unread-индикация тредов: сервер не отдаёт per-thread read-marker
   (`ThreadAttendee` сериализует только `notificationLevel`) — считать не из чего.
 - Изменение семантики существующего `--reply-to` — не трогаем (сервер сам кладёт ответ
@@ -89,14 +89,20 @@
 - Время — `FormatTime(LastActivity)` (Unix-секунды; формат `2006-01-02 15:04:05`, как
   везде в клиенте).
 - Название — `thread.title`; пустое (старые данные) → текст корневого сообщения
-  (`first.message` как есть, без подстановки плейсхолдеров — тот же принцип, что у
-  `MessagesTable`); `first == nil` (корень истёк/удалён) → `—`.
+  (`first.message`; плейсхолдеры — см. следующий bullet); `first == nil`
+  (корень истёк/удалён) → `—`.
 - `⟲N` — `thread.numReplies`; печатается всегда, включая `⟲0` (недавно созданный тред).
 - Превью последнего — `last.actorDisplayName: last.message` (system-фолбэк как в
   `lastMessagePreview`); `last == nil` → без превью.
+- Плейсхолдеры `{actor}`/`{file}`/`{mention-*}` в фолбэк-названии и превью подставляются
+  в **текстовом режиме** на уровне handler-а до рендера (`render.SubstituteParams` —
+  тот же конвейер, что у `chat show`: подстановка — слой cli, рендер получает уже
+  готовый текст и сам ничего не подставляет). `--json` — без подстановки, канонический
+  ответ (оригинальные `message` + `messageParameters`, как у `chat show --json`).
 
 `--json` — канонический массив `ThreadInfo` (§4) в порядке сервера; пустой список → `[]`,
-не `null`. Пустой список → пустой stdout, exit `0` (поисковая семантика, как `rooms list`).
+не `null`. Пустой список **в текстовом режиме** → пустой stdout, exit `0` (поисковая
+семантика, как `rooms list`).
 
 ### 2.2 `chat show <room> --thread=<id>` — новый флаг
 
@@ -109,9 +115,12 @@
   клиентские фильтры `--from`/`--since`, `--system`, рендер.
 - В выдаче треда корень присутствует (§1); рендер как у обычной истории, но суффикс `↩`
   в этом режиме НЕ печатается (все сообщения по построению из одного треда), `⟲N` на
-  корне — печатается.
+  корне — печатается по правилу §2.4: только при `ThreadReplies > 0` (у свежесозданного
+  треда с нулём ответов пометки нет — это ещё не обсуждение; `⟲0` не печатается и здесь).
 
-### 2.3 `chat send <room> [--thread=<id> | --thread-title="<тема>"] "msg"` — новые флаги
+### 2.3 `chat send <room> [--thread=<id> | --thread-title="<тема>"]` — новые флаги
+
+(тело сообщения — stdin/`--file`, как и раньше; позиционного аргумента-сообщения нет)
 
 - `--thread <id>` — ответ в тред **без цитаты** (серверный параметр `threadId`). `<id>`
   положительное целое, иначе exit `1` без сети.
@@ -266,11 +275,16 @@ type ThreadInfo struct {
 func (c *TalkClient) ListThreads(ctx context.Context, token string, limit int) ([]ThreadInfo, error)
 ```
 
-- `ListThreads`: `GET pathChat + "/" + url.PathEscape(token) + "/threads/recent"` +
+- `ListThreads`: `GET pathChat + "/" + token + "/threads/recent"` +
   `query: limit` (клэмп [1,50] выполняет cli-слой; сюда приходит уже готовое значение,
   метод не валидирует — тонкий). Путь строится от существующей константы `pathChat`
-  (`chat.go`). Разбор: `doOCS` → `[]ThreadInfo`; `data: null`/`[]` → пустой non-nil
-  слайс, nil error (guard-прецедент `GetParticipants`).
+  (`chat.go`); token кладётся в путь КАК ЕСТЬ, без предварительного `url.PathEscape` —
+  эскейп path-сегмента выполняет транспорт при сборке URL (инвариант `GetParticipants`,
+  `participants.go`: предварительный PathEscape даёт двойной эскейп, пробел → `%2520`;
+  регресс-паттерн `TestGetParticipants_PathEscape`. PathEscape в `chat.go`/`reactions.go`
+  — легаси-шаблон до открытия инварианта, новый код его не копирует). Разбор: `doOCS` →
+  `[]ThreadInfo`; `data: null`/`[]` → пустой non-nil слайс, nil error
+  (guard-прецедент `GetParticipants`).
 - `GetChatOpts` + поле `ThreadId int` (`0` = не задан → параметр не шлётся; `>0` →
   query `threadId`). Прокидывается в существующий `getChatPage`.
 - `SendMessageOpts` + поля `ThreadId int`, `ThreadTitle string` (в JSON-body `omitempty`:
@@ -289,6 +303,8 @@ func (c *TalkClient) ListThreads(ctx context.Context, token string, limit int) (
 - `chatThreadsHandler` (в `handlers_chat.go` — verb ресурса chat): ручной scan флагов
   (`--name`, `--last`, обе формы; неизвестный `--*` → exit `1`) → первый позиционный =
   room, лишние игнорируются → `ResolveRoom` (коды `1/2/3` сохраняются) → `ListThreads` →
+  в текстовом режиме подстановка плейсхолдеров в `First`/`Last` до рендера
+  (`render.SubstituteParams`, симметрия шага 10 `chatShowHandler`; JSON — оригинал) →
   `render.ThreadsTable` / `render.ThreadsJSON` по `jsonOut`; пустой список → пустой
   stdout, exit `0`.
 - `chatShowHandler`: + флаг `--thread` (обе формы); валидация положительного целого;
@@ -318,8 +334,11 @@ func (c *TalkClient) ListThreads(ctx context.Context, token string, limit int) (
   `replyTo` в тред кладёт ответ в тред; выдача `?threadId` включает корень; общая история
   включает ответы тредов; молчаливое игнорирование `threadId` серверами без capability
   `threads`; взаимоисключаемость `--reply-to`/`--thread`/`--thread-title`.
-- Счётчики команд в док-комментариях кода (`internal/cli/help.go`, `internal/cli/cli.go`)
-  — заменить 9 → 10 (тот же drift, который ловят анти-drift-тесты).
+- Счётчики «9» в док-комментариях кода — заменить на 10 (тот же drift, который ловят
+  анти-drift-тесты). Пять мест: `internal/cli/help.go` (cmdSpecs, «9 команд»),
+  `internal/cli/cli.go` (интерфейс `TalkClient`, «9 методов» — `ListThreads` десятый),
+  `internal/cli/cli_test.go` (`TestRunRoutesAllStubs`), `internal/cli/help_test.go`
+  (`TestCmdSpecs_CoverAllRoutes`, `TestHandleHelp_DetailedContent`).
 - `docs/integration-run.md`: новый **мутационный** сценарий `TestIntegration_Threads`
   в таблицу тестов + в перечень мутационных (флаги `NCTALK_INTEGRATION_SEND=1` +
   `NCTALK_INTEGRATION_ROOM`).
@@ -337,7 +356,11 @@ func (c *TalkClient) ListThreads(ctx context.Context, token string, limit int) (
   `messageParameters`-**объект**; в обычной истории у корня есть `threadId == id` +
   `threadReplies`, у ответов — `threadId != id`.
 - **Моки интерфейса (compile-правка):** `ListThreads` добавляется во все шесть
-  существующих реализаций `TalkClient` в тестах. `chatSpyClient`
+  существующих реализаций `TalkClient` в тестах. Сюда же прямые call-site-ы
+  `MessagesTable` в `internal/render/render_test.go` (`TestMessagesTable`,
+  `TestMessagesTableNoReactions` вызывают её напрямую — новый параметр сигнатуры (§5)
+  роняет сборку render-тестов; правка механическая, поведение параметра `↩` покрывается
+  cli-тестами ниже, отдельные render-кейсы не заводятся). `chatSpyClient`
   (`handlers_chat_test.go`) получает полноценный spy (поля результат/ошибка/факт вызова —
   тот же паттерн, что у его `GetChat`/`SendMessage`): handler-тесты `chat threads` живут
   в `handlers_chat_test.go` и нуждаются в преднастраиваемом результате. Остальные пять —
@@ -347,20 +370,23 @@ func (c *TalkClient) ListThreads(ctx context.Context, token string, limit int) (
   трогают).
 - **client (`internal/client/threads_test.go` + правки `chat_test.go`):** httptest:
   - `ListThreads`: фикстура реального формата → декод всех полей, `first/last == null`
-    → nil-указатели; проверка метода/пути (`chat/{token}/threads/recent`, PathEscape)
-    и query `limit`; `data: []`/`null` → пустой non-nil слайс; OCS 404 →
-    `*client.OCSError{Code:404}`;
+    → nil-указатели; проверка метода/пути (`chat/{token}/threads/recent`; эскейп token —
+    транспортом, без предварительного PathEscape — кейс по образцу
+    `TestGetParticipants_PathEscape`) и query `limit`; `data: []`/`null` → пустой
+    non-nil слайс; OCS 404 → `*client.OCSError{Code:404}`;
   - `GetChat` c `ThreadId` → query содержит `threadId`; без — не содержит;
   - `SendMessage`: body содержит `threadId`/`threadTitle` только когда заданы
     (omitempty); комбинации флагов НЕ здесь — это cli;
   - `Message` decode: `threadTitle`/`threadReplies` при отсутствии полей → нули.
 - **cli (`handlers_chat_test.go`):** table-driven:
   - `chat threads`: успех (формат строк: `[id] время title ⟲N превью`, фолбэки пустого
-    title, `⟲0`, nil first/last), `--json` (включая `[]` для пустого), пустой список →
+    title, `⟲0`, nil first/last, подстановка плейсхолдеров §2.1 в текстовом режиме),
+    `--json` (включая `[]` для пустого), пустой список →
     пустой stdout exit `0`, `--last` (дефолт/клэмп 50/нецелое → `1`), `--name` ветки
     `0/3/2`, OCS 404 → exit `2` с текстом сервера, неизвестный флаг → `1`;
   - `chat show --thread`: query-прокидывание (через spy), нецелое/`0`/отрицательное →
-    exit `1`, рендер без `↩`, с `⟲N` на корне;
+    exit `1`, рендер без `↩`, с `⟲N` на корне при `ThreadReplies > 0` (`⟲0`
+    подавляется — §2.2);
   - `chat send`: `--thread` → `SendMessageOpts.ThreadId`; `--thread-title` →
     `ThreadTitle`; все три пары конфликтов → exit `1` ДО сети (spy: ноль вызовов),
     пустой `--thread-title` → exit `1` до сети;
