@@ -154,7 +154,11 @@ func (c *TalkClient) GetChat(ctx context.Context, token string, opts GetChatOpts
 // прочитанным» за рамками MVP, спека §11), threadId>0 → query threadId
 // (чтение конкретного треда, спека-дельта 2026-09-29 §3.2).
 func (c *TalkClient) getChatPage(ctx context.Context, token string, lastKnown, serverLimit, threadId int) ([]Message, string, error) {
-	p := pathChat + "/" + url.PathEscape(token)
+	// Token в пути КАК ЕСТЬ, без предварительного PathEscape — эскейп
+	// path-сегмента выполняет транспорт при сборке URL (инвариант
+	// GetParticipants: предварительный PathEscape дал бы двойной эскейп,
+	// пробел → %2520).
+	p := pathChat + "/" + token
 	q := url.Values{}
 	q.Set("limit", strconv.Itoa(serverLimit))
 	q.Set("lookIntoFuture", "0")
@@ -263,10 +267,11 @@ func (c *TalkClient) SendMessage(ctx context.Context, token string, opts SendMes
 		// всякий случай пропускаем через sanitizeErr.
 		return 0, sanitizeErr(fmt.Errorf("client: не удалось собрать тело SendMessage: %w", err))
 	}
-	// pathChat — локальная константа без trailing '/'; token эскейпим как
-	// path-сегмент через url.PathEscape. doOCS соберёт полный URL через
-	// path.Join с baseURL.Path.
-	p := pathChat + "/" + url.PathEscape(token)
+	// pathChat — локальная константа без trailing '/'; token кладём в путь
+	// КАК ЕСТЬ — эскейп path-сегмента выполняет транспорт при сборке URL
+	// (инвариант GetParticipants: предварительный PathEscape дал бы двойной
+	// эскейп, пробел → %2520).
+	p := pathChat + "/" + token
 	var out sendMessageResp
 	if _, err := c.doOCS(ctx, http.MethodPost, p, nil, bytes.NewReader(body), true, &out); err != nil {
 		return 0, err
@@ -325,9 +330,10 @@ func (c *TalkClient) EditMessage(ctx context.Context, token string, messageId in
 		// с SendMessage.
 		return 0, sanitizeErr(fmt.Errorf("client: не удалось собрать тело EditMessage: %w", err))
 	}
-	// token и messageId — отдельные path-сегменты: PathEscape токена,
-	// messageId форматируем через strconv.Itoa (целое — безопасно без эскейпа).
-	p := pathChat + "/" + url.PathEscape(token) + "/" + strconv.Itoa(messageId)
+	// token и messageId — отдельные path-сегменты; token кладём КАК ЕСТЬ
+	// (эскейп делает транспорт, инвариант GetParticipants), messageId —
+	// через strconv.Itoa (целое — безопасно без эскейпа).
+	p := pathChat + "/" + token + "/" + strconv.Itoa(messageId)
 	var out editMessageResp
 	if _, err := c.doOCS(ctx, http.MethodPut, p, nil, bytes.NewReader(body), true, &out); err != nil {
 		return 0, err

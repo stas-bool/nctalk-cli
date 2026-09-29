@@ -134,3 +134,25 @@ func TestGetReactions_NullData(t *testing.T) {
 		t.Errorf("len(reactions) = %d, want 0", len(reactions))
 	}
 }
+
+// TestGetReactions_PathEscape — token с пробелом эскейпится в path-сегменте
+// при сериализации URL в transport.DoOCS (клиент НЕ делает предварительный
+// url.PathEscape — тот дал бы двойной эскейп, инвариант GetParticipants):
+// запрос уходит как /reaction/tok%20team/8001.
+func TestGetReactions_PathEscape(t *testing.T) {
+	var gotEscaped string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEscaped = r.URL.EscapedPath()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ocs":{"meta":{"status":"ok","statuscode":200,"message":"OK"},"data":{}}}`))
+	}))
+	defer ts.Close()
+
+	c := NewTalkClient(testCfg(ts.URL))
+	if _, err := c.GetReactions(context.Background(), "tok team", 8001); err != nil {
+		t.Fatalf("GetReactions: %v", err)
+	}
+	if want := "/reaction/tok%20team/8001"; !strings.HasSuffix(gotEscaped, want) {
+		t.Errorf("escaped path: got %q, want suffix %q", gotEscaped, want)
+	}
+}

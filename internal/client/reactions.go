@@ -3,14 +3,14 @@ package client
 import (
 	"context"
 	"net/http"
-	"net/url"
 	"strconv"
 )
 
 // pathReaction — базовый путь эндпоинта реакций (спека §6 `reactions get`, §12).
 // Локальная константа (НЕ в paths.go), чтобы не конфликтовать с параллельной
-// работой над search.go/chat.go. Полная форма URL собирается как
-// pathReaction + "/" + url.PathEscape(token) + "/" + strconv.Itoa(messageId).
+// работой над search.go/chat.go. Полная форма пути — pathReaction + "/" +
+// token + "/" + strconv.Itoa(messageId); token кладётся КАК ЕСТЬ (эскейп
+// path-сегмента выполняет транспорт, инвариант GetParticipants).
 const pathReaction = "/ocs/v2.php/apps/spreed/api/v1/reaction"
 
 // ReactionActor — актёр, поставивший реакцию на сообщение (спека §12).
@@ -34,10 +34,11 @@ type ReactionActor struct {
 // «null» проходит guard len(data)>0, т.к. RawMessage("null") имеет len 4), —
 // поэтому после doOCS явно переинициализируем nil-map в пустую.
 func (c *TalkClient) GetReactions(ctx context.Context, token string, messageId int) (map[string][]ReactionActor, error) {
-	// Собираем путь: базовая константа + url.PathEscape(token) + messageId.
-	// PathEscape на token — защита от специальных символов в path-сегменте;
-	// messageId форматируем через strconv.Itoa (целое — безопасно без эскейпа).
-	p := pathReaction + "/" + url.PathEscape(token) + "/" + strconv.Itoa(messageId)
+	// Собираем путь: базовая константа + token + messageId. Token — КАК ЕСТЬ
+	// (эскейп делает транспорт: предварительный PathEscape дал бы двойной
+	// эскейп, пробел → %2520 — инвариант GetParticipants); messageId — через
+	// strconv.Itoa (целое — безопасно без эскейпа).
+	p := pathReaction + "/" + token + "/" + strconv.Itoa(messageId)
 
 	out := make(map[string][]ReactionActor)
 	if _, err := c.doOCS(ctx, http.MethodGet, p, nil, nil, false, &out); err != nil {

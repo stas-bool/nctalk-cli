@@ -48,8 +48,8 @@ type ThreadInfo struct {
 // путь КАК ЕСТЬ, без предварительного url.PathEscape: эскейп path-сегмента
 // выполняет транспорт при сборке URL (инвариант GetParticipants,
 // participants.go: предварительный PathEscape даёт двойной эскейп, пробел →
-// %2520, регресс-паттерн TestGetParticipants_PathEscape; PathEscape в
-// chat.go/reactions.go — легаси-шаблон, новый код его не копирует).
+// %2520, регресс-паттерн TestGetParticipants_PathEscape; легаси-PathEscape
+// из chat.go/reactions.go удалён — пакет унифицирован по этому инварианту).
 //
 // Пустой ответ (data:[] ИЛИ data:null) → пустой non-nil слайс, nil error
 // (guard-прецедент GetParticipants: «null» проходит len-guard doOCS и

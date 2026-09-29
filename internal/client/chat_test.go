@@ -741,3 +741,50 @@ func TestSendMessage_ThreadFields(t *testing.T) {
 		t.Errorf("body: thread-поля должны отсутствовать при нулях: %q", body2)
 	}
 }
+
+// TestChatTokenNotPreEscaped — token кладётся в путь всех трёх эндпоинтов
+// chat.go (GET история / POST send / PUT edit) без предварительного
+// url.PathEscape: эскейп path-сегмента выполняет транспорт при сборке URL
+// (инвариант GetParticipants/ListThreads — предварительный PathEscape дал бы
+// двойной эскейп, пробел → %2520).
+func TestChatTokenNotPreEscaped(t *testing.T) {
+	var gotEscaped []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEscaped = append(gotEscaped, r.Method+" "+r.URL.EscapedPath())
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodPost:
+			_, _ = w.Write([]byte(`{"ocs":{"meta":{"status":"ok","statuscode":200,"message":"OK"},"data":{"id":7}}}`))
+		case http.MethodPut:
+			_, _ = w.Write([]byte(`{"ocs":{"meta":{"status":"ok","statuscode":200,"message":"OK"},"data":{"parent":{"id":7}}}}`))
+		default:
+			_, _ = w.Write([]byte(`{"ocs":{"meta":{"status":"ok","statuscode":200,"message":"OK"},"data":[]}}`))
+		}
+	}))
+	defer ts.Close()
+
+	c := NewTalkClient(testCfg(ts.URL))
+	if _, err := c.GetChat(context.Background(), "tok team", GetChatOpts{Limit: 5}); err != nil {
+		t.Fatalf("GetChat: %v", err)
+	}
+	if _, err := c.SendMessage(context.Background(), "tok team", SendMessageOpts{Message: "hi"}); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if _, err := c.EditMessage(context.Background(), "tok team", 7, EditMessageOpts{Message: "hi"}); err != nil {
+		t.Fatalf("EditMessage: %v", err)
+	}
+
+	const prefix = "/ocs/v2.php/apps/spreed/api/v1/chat/tok%20team"
+	for _, want := range []string{"GET " + prefix, "POST " + prefix, "PUT " + prefix + "/7"} {
+		found := false
+		for _, g := range gotEscaped {
+			if g == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("escaped path %q отсутствует; запросы=%v", want, gotEscaped)
+		}
+	}
+}
