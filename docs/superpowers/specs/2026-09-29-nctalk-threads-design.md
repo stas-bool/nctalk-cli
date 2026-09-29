@@ -195,9 +195,12 @@ GET /ocs/v2.php/apps/spreed/api/v1/chat/{token}/threads/recent?limit=<1..50>
     "last":  { …сообщение chat-API… }    // может быть null
   }
   ```
-- `first`/`last` — обычные сообщения chat-API: **`messageParameters` — объект**
-  (инвариант CLAUDE.md: у chat-API всегда объект; формат массива бывает только в
-  `/v4/room` `lastMessage`). Фикстуры обязаны отражать это.
+- `first`/`last` — обычные сообщения chat-API: **`messageParameters` — объект при
+  непустых параметрах; у сообщений БЕЗ параметров живой сервер (spreed 24.0.4,
+  подтверждено при съёме фикстур 2026-09-29) отдаёт пустой массив `[]`** —
+  PHP-сериализация пустоты, НЕ признак формата `/v4/room`. Непустой массив в chat-API
+  не встречается и является стоп-сиглом (drift). Тип `client.MsgParams` принимает оба.
+  Фикстуры обязаны отражать реальный формат.
 - `attendee` — подписка запросившего на тред (`notificationLevel`: 0 default, 1 always,
   2 mention, 3 never). В текстовый вывод не идёт (out of scope), в `--json` — канонически.
 
@@ -353,8 +356,9 @@ func (c *TalkClient) ListThreads(ctx context.Context, token string, limit int) (
   curl: создать тред (`threadTitle`), ответить (`threadId`), снять обезличенные ответы
   `threads/recent`, `chat?threadId=N`, send-ответ — сложить в корневой `testdata/`
   (конвенция репо). Особо сверить: `first`/`last` в `threads/recent` несут
-  `messageParameters`-**объект**; в обычной истории у корня есть `threadId == id` +
-  `threadReplies`, у ответов — `threadId != id`.
+  `messageParameters`-**объект при непустых параметрах и пустой массив `[]` при
+  пустых** (живое наблюдение 2026-09-29; непустой массив — стоп-сигнал); в обычной
+  истории у корня есть `threadId == id` + `threadReplies`, у ответов — `threadId != id`.
 - **Моки интерфейса (compile-правка):** `ListThreads` добавляется во все шесть
   существующих реализаций `TalkClient` в тестах. Сюда же прямые call-site-ы
   `MessagesTable` в `internal/render/render_test.go` (`TestMessagesTable`,
