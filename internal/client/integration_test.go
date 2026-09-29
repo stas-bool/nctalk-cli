@@ -391,3 +391,117 @@ func TestIntegration_EditMessage(t *testing.T) {
 		t.Errorf("сообщение %d не найдено в последних %d сообщениях", id, len(msgs))
 	}
 }
+
+// TestIntegration_Threads — мутационный e2e-сценарий тредов (дизайн
+// 2026-09-29 §6): создать тред (threadTitle) → ответить (threadId) →
+// ListThreads (numReplies >= 1, title) → GetChat(threadId) видит корень и
+// ответ (инвариант «выдача включает корень», §1) → общая история: корень
+// несёт threadReplies >= 1, ответ несёт threadId корня (инвариант §1 на
+// живом). Защита та же, что у TestIntegration_EditMessage:
+// NCTALK_INTEGRATION_SEND=1 + NCTALK_INTEGRATION_ROOM (новых env не вводим).
+// Мусор (корень + ответ) остаётся в тестовой комнате, убирается вручную.
+func TestIntegration_Threads(t *testing.T) {
+	if got := os.Getenv("NCTALK_INTEGRATION_SEND"); got != "1" {
+		t.Skip("NCTALK_INTEGRATION_SEND != 1 — пропускаю мутационный тест Threads")
+	}
+	token := os.Getenv("NCTALK_INTEGRATION_ROOM")
+	if token == "" {
+		t.Skip("NCTALK_INTEGRATION_ROOM не задан — пропускаю Threads (нет целевой тестовой комнаты)")
+	}
+
+	c := integrationClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
+	defer cancel()
+
+	uniq := strconv.FormatInt(time.Now().Unix(), 10)
+	title := "Тред интеграции " + uniq
+
+	// 1. Создание треда: новое сообщение с threadTitle → id корня = id треда.
+	rootId, err := c.SendMessage(ctx, token, SendMessageOpts{
+		Message:     "nctalk threads root " + uniq,
+		ThreadTitle: title,
+	})
+	if err != nil {
+		t.Fatalf("SendMessage(threadTitle): %v", err)
+	}
+	t.Logf("создан тред: корень id=%d, title=%q", rootId, title)
+
+	// 2. Ответ в тред без цитаты (threadId = id корня).
+	replyId, err := c.SendMessage(ctx, token, SendMessageOpts{
+		Message:  "nctalk threads reply " + uniq,
+		ThreadId: rootId,
+	})
+	if err != nil {
+		t.Fatalf("SendMessage(threadId=%d): %v", rootId, err)
+	}
+	t.Logf("ответ в тред id=%d", replyId)
+
+	// 3. ListThreads: тред присутствует, numReplies >= 1, title совпадает.
+	threads, err := c.ListThreads(ctx, token, 50)
+	if err != nil {
+		t.Fatalf("ListThreads: %v", err)
+	}
+	found := false
+	for _, ti := range threads {
+		if ti.Thread.Id == rootId {
+			found = true
+			if ti.Thread.NumReplies < 1 {
+				t.Errorf("тред %d: NumReplies=%d, want >= 1", rootId, ti.Thread.NumReplies)
+			}
+			if ti.Thread.Title != title {
+				t.Errorf("тред %d: Title=%q, want %q", rootId, ti.Thread.Title, title)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("тред %d не найден в threads/recent (len=%d)", rootId, len(threads))
+	}
+
+	// 4. Чтение треда: выдача включает корень и ответ (§1-инвариант).
+	threadMsgs, err := c.GetChat(ctx, token, GetChatOpts{Limit: 200, ThreadId: rootId})
+	if err != nil {
+		t.Fatalf("GetChat(threadId=%d): %v", rootId, err)
+	}
+	var hasRoot, hasReply bool
+	for _, m := range threadMsgs {
+		switch m.Id {
+		case rootId:
+			hasRoot = true
+		case replyId:
+			hasReply = true
+		}
+	}
+	if !hasRoot || !hasReply {
+		t.Errorf("GetChat(threadId): корень=%v ответ=%v, want оба true (инвариант «выдача включает корень»)", hasRoot, hasReply)
+	}
+
+	// 5. Общая история: корень несёт threadReplies >= 1, ответ — threadId корня.
+	history, err := c.GetChat(ctx, token, GetChatOpts{Limit: 200})
+	if err != nil {
+		t.Fatalf("GetChat: %v", err)
+	}
+	var (
+		seenRoot, seenReply  bool
+		rootReplies, replyTh int
+	)
+	for _, m := range history {
+		switch m.Id {
+		case rootId:
+			seenRoot = true
+			rootReplies = m.ThreadReplies
+		case replyId:
+			seenReply = true
+			replyTh = m.ThreadId
+		}
+	}
+	if !seenRoot || !seenReply {
+		t.Fatalf("общая история: корень=%v ответ=%v, want оба true (Limit=200 мал?)", seenRoot, seenReply)
+	}
+	if rootReplies < 1 {
+		t.Errorf("корень %d: ThreadReplies=%d, want >= 1", rootId, rootReplies)
+	}
+	if replyTh != rootId {
+		t.Errorf("ответ %d: ThreadId=%d, want %d", replyId, replyTh, rootId)
+	}
+}
