@@ -47,6 +47,11 @@ type GetChatOpts struct {
 	// как только страница пересекает порог (пагинация идёт в прошлое, поэтому
 	// следующие страницы только старше). 0 = без раннего стопа.
 	StopBeforeTs int64
+	// ThreadId — фильтр «только тред» (id корневого сообщения, спека-дельта
+	// 2026-09-29 §3.2): >0 → query-параметр threadId, выдача включает корень;
+	// 0 = общая история (параметр не шлётся). Вся механика пагинации
+	// наследуется без изменений.
+	ThreadId int
 }
 
 // GetChat возвращает сообщения комнаты token (спека §6 `chat show`, §12).
@@ -77,7 +82,7 @@ func (c *TalkClient) GetChat(ctx context.Context, token string, opts GetChatOpts
 	result := make([]Message, 0)
 	lastKnown := opts.LastKnownMessageId
 	for {
-		page, lastGiven, err := c.getChatPage(ctx, token, lastKnown, serverLimit)
+		page, lastGiven, err := c.getChatPage(ctx, token, lastKnown, serverLimit, opts.ThreadId)
 		if err != nil {
 			return nil, err
 		}
@@ -146,9 +151,14 @@ func (c *TalkClient) GetChat(ctx context.Context, token string, opts GetChatOpts
 // query: limit=serverLimit, lookIntoFuture=0, lastKnownMessageId (только при
 // lastKnown>0 — иначе сервер отдаёт самое свежее), setReadMarker=0 (читающий
 // `chat show` НЕ должен молча помечать комнату прочитанной — «отметка
-// прочитанным» за рамками MVP, спека §11).
-func (c *TalkClient) getChatPage(ctx context.Context, token string, lastKnown, serverLimit int) ([]Message, string, error) {
-	p := pathChat + "/" + url.PathEscape(token)
+// прочитанным» за рамками MVP, спека §11), threadId>0 → query threadId
+// (чтение конкретного треда, спека-дельта 2026-09-29 §3.2).
+func (c *TalkClient) getChatPage(ctx context.Context, token string, lastKnown, serverLimit, threadId int) ([]Message, string, error) {
+	// Token в пути КАК ЕСТЬ, без предварительного PathEscape — эскейп
+	// path-сегмента выполняет транспорт при сборке URL (инвариант
+	// GetParticipants: предварительный PathEscape дал бы двойной эскейп,
+	// пробел → %2520).
+	p := pathChat + "/" + token
 	q := url.Values{}
 	q.Set("limit", strconv.Itoa(serverLimit))
 	q.Set("lookIntoFuture", "0")
@@ -158,6 +168,12 @@ func (c *TalkClient) getChatPage(ctx context.Context, token string, lastKnown, s
 	q.Set("setReadMarker", "0")
 	if lastKnown > 0 {
 		q.Set("lastKnownMessageId", strconv.Itoa(lastKnown))
+	}
+	// threadId>0 — чтение конкретного треда (спека-дельта 2026-09-29 §3.2):
+	// сервер фильтрует «id = threadId OR topmost_parent_id = threadId», корень
+	// включён. При 0 параметр не шлётся — общая история.
+	if threadId > 0 {
+		q.Set("threadId", strconv.Itoa(threadId))
 	}
 	var out []Message
 	header, err := c.doOCS(ctx, http.MethodGet, p, q, nil, false, &out)
@@ -184,6 +200,16 @@ type SendMessageOpts struct {
 	// ReferenceId — опц. клиентский UUID для client-side dedup (спека §6).
 	// Пустая строка → поле не попадает в JSON (omitempty).
 	ReferenceId string
+	// ThreadId — ответ в существующий тред БЕЗ цитаты (серверный параметр
+	// threadId, спека-дельта 2026-09-29 §3.3; несуществующий тред → HTTP 400
+	// {"error":"reply-to"}). 0 = не задан (omitempty).
+	ThreadId int
+	// ThreadTitle — создать тред: текст сообщения станет корневым, тема —
+	// названием. Действует только при ReplyTo=0 и ThreadId=0 (клиент
+	// гарантирует взаимоисключаемость сам, cli-слой). Пустая строка → поле
+	// не попадает в JSON: сервер пустое значение игнорирует (тред не
+	// создаётся), непустоту проверяет cli до сети.
+	ThreadTitle string
 }
 
 // sendMessageReq — форма JSON-тела запроса chat send (спека §6).
@@ -192,12 +218,16 @@ type SendMessageOpts struct {
 //   - message — всегда (обязательное);
 //   - replyTo — только при >0 (omitempty для int пропускает 0);
 //   - silent — ВСЕГДА (без omitempty): сервер получает явный true/false;
-//   - referenceId — только при непустом (omitempty для string пропускает "").
+//   - referenceId — только при непустом (omitempty для string пропускает "");
+//   - threadId/threadTitle — только при заданных значениях (omitempty,
+//     спека-дельта 2026-09-29 §3.3).
 type sendMessageReq struct {
 	Message     string `json:"message"`
 	ReplyTo     int    `json:"replyTo,omitempty"`
 	Silent      bool   `json:"silent"`
 	ReferenceId string `json:"referenceId,omitempty"`
+	ThreadId    int    `json:"threadId,omitempty"`
+	ThreadTitle string `json:"threadTitle,omitempty"`
 }
 
 // sendMessageResp — минимальная форма ocs.data ответа chat send: нужно только
@@ -229,16 +259,19 @@ func (c *TalkClient) SendMessage(ctx context.Context, token string, opts SendMes
 		ReplyTo:     opts.ReplyTo,
 		Silent:      opts.Silent,
 		ReferenceId: opts.ReferenceId,
+		ThreadId:    opts.ThreadId,
+		ThreadTitle: opts.ThreadTitle,
 	})
 	if err != nil {
 		// json.Marshal на этой структуре практически не может упасть, но на
 		// всякий случай пропускаем через sanitizeErr.
 		return 0, sanitizeErr(fmt.Errorf("client: не удалось собрать тело SendMessage: %w", err))
 	}
-	// pathChat — локальная константа без trailing '/'; token эскейпим как
-	// path-сегмент через url.PathEscape. doOCS соберёт полный URL через
-	// path.Join с baseURL.Path.
-	p := pathChat + "/" + url.PathEscape(token)
+	// pathChat — локальная константа без trailing '/'; token кладём в путь
+	// КАК ЕСТЬ — эскейп path-сегмента выполняет транспорт при сборке URL
+	// (инвариант GetParticipants: предварительный PathEscape дал бы двойной
+	// эскейп, пробел → %2520).
+	p := pathChat + "/" + token
 	var out sendMessageResp
 	if _, err := c.doOCS(ctx, http.MethodPost, p, nil, bytes.NewReader(body), true, &out); err != nil {
 		return 0, err
@@ -297,9 +330,10 @@ func (c *TalkClient) EditMessage(ctx context.Context, token string, messageId in
 		// с SendMessage.
 		return 0, sanitizeErr(fmt.Errorf("client: не удалось собрать тело EditMessage: %w", err))
 	}
-	// token и messageId — отдельные path-сегменты: PathEscape токена,
-	// messageId форматируем через strconv.Itoa (целое — безопасно без эскейпа).
-	p := pathChat + "/" + url.PathEscape(token) + "/" + strconv.Itoa(messageId)
+	// token и messageId — отдельные path-сегменты; token кладём КАК ЕСТЬ
+	// (эскейп делает транспорт, инвариант GetParticipants), messageId —
+	// через strconv.Itoa (целое — безопасно без эскейпа).
+	p := pathChat + "/" + token + "/" + strconv.Itoa(messageId)
 	var out editMessageResp
 	if _, err := c.doOCS(ctx, http.MethodPut, p, nil, bytes.NewReader(body), true, &out); err != nil {
 		return 0, err

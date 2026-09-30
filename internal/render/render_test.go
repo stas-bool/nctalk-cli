@@ -98,7 +98,7 @@ func TestMessagesTable(t *testing.T) {
 		},
 	}
 	var buf bytes.Buffer
-	if err := MessagesTable(&buf, msgs); err != nil {
+	if err := MessagesTable(&buf, msgs, false); err != nil {
 		t.Fatalf("MessagesTable: %v", err)
 	}
 	out := buf.String()
@@ -112,7 +112,7 @@ func TestMessagesTableNoReactions(t *testing.T) {
 		{Id: 1, ActorDisplayName: "Bob", Message: "hi", Timestamp: 1700000000},
 	}
 	var buf bytes.Buffer
-	if err := MessagesTable(&buf, msgs); err != nil {
+	if err := MessagesTable(&buf, msgs, false); err != nil {
 		t.Fatalf("MessagesTable: %v", err)
 	}
 	if strings.Contains(buf.String(), "×") {
@@ -310,4 +310,41 @@ func TestCandidates(t *testing.T) {
 		t.Fatalf("Candidates: %v", err)
 	}
 	containsAll(t, buf.String(), "1", "Первый", "tokA", "2", "Второй", "tokB")
+}
+
+// ----- Threads -----
+
+// TestThreadsTable_OneLine — название-фолбэк и превью сворачиваются в одну
+// строку (переносы/табы → одиночный пробел) и обрезаются до 100 рун с «…»:
+// многострочное сообщение иначе разорвало бы формат «один тред — одна
+// строка» (спека-дельта 2026-09-29 §2.1).
+func TestThreadsTable_OneLine(t *testing.T) {
+	long := strings.Repeat("длинный корень ", 20) // 300 рун — выше лимита
+	ts := []client.ThreadInfo{
+		{
+			Thread: client.Thread{Id: 1, NumReplies: 2, LastActivity: 1700000000},
+			First:  &client.Message{Id: 1, Message: "многострочный\nкорень \n\tс переносами", MessageType: "comment"},
+			Last:   &client.Message{Id: 2, ActorDisplayName: "Борис", Message: "ответ\nв две строки", MessageType: "comment"},
+		},
+		{
+			Thread: client.Thread{Id: 3, NumReplies: 0, LastActivity: 1700000001},
+			First:  &client.Message{Id: 3, Message: long, MessageType: "comment"},
+		},
+	}
+	var buf bytes.Buffer
+	if err := ThreadsTable(&buf, ts); err != nil {
+		t.Fatalf("ThreadsTable: %v", err)
+	}
+	out := buf.String()
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("строк: got %d, want 2 (один тред — одна строка)\nвывод=\n%s", len(lines), out)
+	}
+	containsAll(t, lines[0], "многострочный корень с переносами", "Борис: ответ в две строки")
+	if strings.Contains(lines[1], long) {
+		t.Errorf("длинное фолбэк-название обрезается; строка=%q", lines[1])
+	}
+	if !strings.Contains(lines[1], "…") {
+		t.Errorf("обрезка помечается многоточием; строка=%q", lines[1])
+	}
 }

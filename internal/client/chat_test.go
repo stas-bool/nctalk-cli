@@ -43,6 +43,7 @@ type chatReq struct {
 	lookIntoFuture     string
 	lastKnownMessageId string
 	setReadMarker      string
+	threadId           string
 }
 
 // chatReqLog — потокобезопасный лог запросов, полученных тест-сервером.
@@ -82,6 +83,7 @@ func chatPagesServer(t *testing.T, page1, page2 []Message) (*httptest.Server, *c
 			lookIntoFuture:     q.Get("lookIntoFuture"),
 			lastKnownMessageId: q.Get("lastKnownMessageId"),
 			setReadMarker:      q.Get("setReadMarker"),
+			threadId:           q.Get("threadId"),
 		})
 		w.Header().Set("Content-Type", "application/json")
 		var data []Message
@@ -671,5 +673,118 @@ func TestEditMessage_Guards(t *testing.T) {
 	}
 	if got := len(log.snapshot()); got != 0 {
 		t.Errorf("запросов: got %d, want 0 (guard-ы отсекают ДО сети)", got)
+	}
+}
+
+// TestGetChat_ThreadId — ThreadId>0 → каждый запрос несёт query threadId;
+// ThreadId=0 → параметр не шлётся вовсе (спека-дельта 2026-09-29 §3.2).
+func TestGetChat_ThreadId(t *testing.T) {
+	page := genMessages(1000, 991)
+
+	ts, log := chatPagesServer(t, page, nil)
+	defer ts.Close()
+	c := NewTalkClient(testCfg(ts.URL))
+	if _, err := c.GetChat(context.Background(), "tok", GetChatOpts{Limit: 20, ThreadId: 1234}); err != nil {
+		t.Fatalf("GetChat: %v", err)
+	}
+	for i, r := range log.snapshot() {
+		if r.threadId != "1234" {
+			t.Errorf("req[%d].threadId: got %q, want %q", i, r.threadId, "1234")
+		}
+	}
+
+	ts2, log2 := chatPagesServer(t, page, nil)
+	defer ts2.Close()
+	c2 := NewTalkClient(testCfg(ts2.URL))
+	if _, err := c2.GetChat(context.Background(), "tok", GetChatOpts{Limit: 20}); err != nil {
+		t.Fatalf("GetChat: %v", err)
+	}
+	for i, r := range log2.snapshot() {
+		if r.threadId != "" {
+			t.Errorf("req[%d].threadId: got %q, want пусто (параметр не шлётся при 0)", i, r.threadId)
+		}
+	}
+}
+
+// TestSendMessage_ThreadFields — тело POST содержит threadId/threadTitle
+// только когда заданы (omitempty); комбинации флагов — НЕ здесь, это cli
+// (спека-дельта §6).
+func TestSendMessage_ThreadFields(t *testing.T) {
+	ts, log := chatSendServer(t, 200, "OK", 1)
+	defer ts.Close()
+
+	c := NewTalkClient(testCfg(ts.URL))
+	if _, err := c.SendMessage(context.Background(), "tok", SendMessageOpts{
+		Message:     "m",
+		ThreadId:    1234,
+		ThreadTitle: "Тема",
+	}); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	body := log.snapshot()[0].body
+	if !strings.Contains(body, `"threadId":1234`) {
+		t.Errorf("body: нет \"threadId\":1234: %q", body)
+	}
+	if !strings.Contains(body, `"threadTitle":"Тема"`) {
+		t.Errorf("body: нет \"threadTitle\":\"Тема\": %q", body)
+	}
+
+	// Оба нулевые/пустые → поля отсутствуют (omitempty).
+	ts2, log2 := chatSendServer(t, 200, "OK", 1)
+	defer ts2.Close()
+	c2 := NewTalkClient(testCfg(ts2.URL))
+	if _, err := c2.SendMessage(context.Background(), "tok", SendMessageOpts{Message: "m"}); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	body2 := log2.snapshot()[0].body
+	if strings.Contains(body2, "threadId") || strings.Contains(body2, "threadTitle") {
+		t.Errorf("body: thread-поля должны отсутствовать при нулях: %q", body2)
+	}
+}
+
+// TestChatTokenNotPreEscaped — token кладётся в путь всех трёх эндпоинтов
+// chat.go (GET история / POST send / PUT edit) без предварительного
+// url.PathEscape: эскейп path-сегмента выполняет транспорт при сборке URL
+// (инвариант GetParticipants/ListThreads — предварительный PathEscape дал бы
+// двойной эскейп, пробел → %2520).
+func TestChatTokenNotPreEscaped(t *testing.T) {
+	var gotEscaped []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEscaped = append(gotEscaped, r.Method+" "+r.URL.EscapedPath())
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodPost:
+			_, _ = w.Write([]byte(`{"ocs":{"meta":{"status":"ok","statuscode":200,"message":"OK"},"data":{"id":7}}}`))
+		case http.MethodPut:
+			_, _ = w.Write([]byte(`{"ocs":{"meta":{"status":"ok","statuscode":200,"message":"OK"},"data":{"parent":{"id":7}}}}`))
+		default:
+			_, _ = w.Write([]byte(`{"ocs":{"meta":{"status":"ok","statuscode":200,"message":"OK"},"data":[]}}`))
+		}
+	}))
+	defer ts.Close()
+
+	c := NewTalkClient(testCfg(ts.URL))
+	if _, err := c.GetChat(context.Background(), "tok team", GetChatOpts{Limit: 5}); err != nil {
+		t.Fatalf("GetChat: %v", err)
+	}
+	if _, err := c.SendMessage(context.Background(), "tok team", SendMessageOpts{Message: "hi"}); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if _, err := c.EditMessage(context.Background(), "tok team", 7, EditMessageOpts{Message: "hi"}); err != nil {
+		t.Fatalf("EditMessage: %v", err)
+	}
+
+	const prefix = "/ocs/v2.php/apps/spreed/api/v1/chat/tok%20team"
+	for _, want := range []string{"GET " + prefix, "POST " + prefix, "PUT " + prefix + "/7"} {
+		found := false
+		for _, g := range gotEscaped {
+			if g == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("escaped path %q отсутствует; запросы=%v", want, gotEscaped)
+		}
 	}
 }

@@ -56,6 +56,9 @@ func (m *roomMockClient) GetReactions(_ context.Context, _ string, _ int) (map[s
 func (m *roomMockClient) GetParticipants(_ context.Context, _ string) ([]client.Participant, error) {
 	return nil, errMock
 }
+func (m *roomMockClient) ListThreads(_ context.Context, _ string, _ int) ([]client.ThreadInfo, error) {
+	return nil, errMock
+}
 func (m *roomMockClient) SearchMessages(_ context.Context, _ string, _ client.SearchMessagesOpts) ([]client.MessageResult, error) {
 	panic("SearchMessages: не должен вызываться из ResolveRoom")
 }

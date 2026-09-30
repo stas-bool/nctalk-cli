@@ -46,36 +46,70 @@ func RoomsTable(w io.Writer, rooms []client.Room) error {
 	return tw.Flush()
 }
 
+// previewText — текст для превью сообщения: message; пустой текст (актуально
+// для системных сообщений) → systemMessage. Общий фолбэк lastMessagePreview
+// (комнаты) и threadLastPreview (треды) — одна точка правды о фолбэке.
+func previewText(m *client.Message) string {
+	if m.Message != "" {
+		return m.Message
+	}
+	return m.SystemMessage
+}
+
 // lastMessagePreview собирает превью последнего сообщения комнаты в формате
 // "время автор: текст". При отсутствии сообщений (LastMessage == nil) — "—".
-// Если текст пуст, берётся systemMessage (актуально для системных сообщений).
+// Если текст пуст, берётся systemMessage (previewText).
 func lastMessagePreview(m *client.Message) string {
 	if m == nil {
 		return "—"
 	}
-	preview := m.Message
-	if preview == "" {
-		preview = m.SystemMessage
-	}
-	return fmt.Sprintf("%s %s: %s", FormatTime(m.Timestamp), m.ActorDisplayName, preview)
+	return fmt.Sprintf("%s %s: %s", FormatTime(m.Timestamp), m.ActorDisplayName, previewText(m))
 }
 
 // MessagesTable выводит сообщения построчно (спека §6 chat show):
 //
-//	[id] время автор: текст   👍×2 ✅×1
+//	[id] время автор: текст   👍×2 ✅×1   ⟲5 / ↩1234
 //
 // Реакции-счётчики берутся из Message.Reactions БЕЗ N+1 (печать через range).
-// Подстановка messageParameters НЕ выполняется здесь — это слой CLI (Task 3.2);
+// Подстановка messageParameters НЕ выполняется здесь — это слой CLI;
 // рендерится поле Message как есть.
-func MessagesTable(w io.Writer, msgs []client.Message) error {
+//
+// Аннотации тредов (спека-дельта 2026-09-29 §2.4), после реакций тем же
+// разделителем "   ":
+//   - корень треда (ThreadId == Id && ThreadReplies > 0) → ⟲<ThreadReplies>
+//     — в ОБОИХ режимах (общая история и --thread); при 0 не печатается:
+//     это ещё не обсуждение;
+//   - ответ в треде (ThreadId != Id && ThreadTitle != "") → ↩<ThreadId> —
+//     только в режиме общей истории (showThreadRefs=true) и только у comment;
+//     в выдаче --thread все сообщения из одного треда, ссылка бессмысленна.
+//     System-сообщения пометки не получают: ↩ = «ответ в треде», системная
+//     строка (thread_created и пр.) — не ответ и уже называет тред. Условие
+//     ThreadTitle != "" = «Thread-запись загружена» (§3.4): quote-ответ без
+//     треда не помечается (↩ вёл бы на 404).
+//
+// showThreadRefs — показывать ли ↩-ссылки (false в режиме --thread).
+func MessagesTable(w io.Writer, msgs []client.Message, showThreadRefs bool) error {
 	for _, m := range msgs {
 		if _, err := fmt.Fprintf(w, "[%d] %s %s: %s%s\n",
 			m.Id, FormatTime(m.Timestamp), m.ActorDisplayName, m.Message,
-			reactionsSuffix(m.Reactions)); err != nil {
+			threadSuffix(m, showThreadRefs)); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// threadSuffix — суффикс строки сообщения: реакции, затем аннотация треда
+// (§2.4). ⟲ (U+27F2), ↩ (U+21A9) — в духе существующих ×/эмодзи реакций.
+func threadSuffix(m client.Message, showThreadRefs bool) string {
+	s := reactionsSuffix(m.Reactions)
+	switch {
+	case m.ThreadId == m.Id && m.ThreadReplies > 0:
+		s += "   ⟲" + strconv.Itoa(m.ThreadReplies)
+	case showThreadRefs && m.MessageType != "system" && m.ThreadId != m.Id && m.ThreadTitle != "":
+		s += "   ↩" + strconv.Itoa(m.ThreadId)
+	}
+	return s
 }
 
 // reactionsSuffix формирует суффикс вида "   👍×2 ✅×1" из мапы реакций
@@ -242,4 +276,63 @@ func ParticipantsTable(w io.Writer, ps []client.Participant) error {
 		}
 	}
 	return tw.Flush()
+}
+
+// ThreadsTable выводит список тредов построчно, без tabwriter — в стиле
+// MessagesTable (спека-дельта 2026-09-29 §2.1), порядок сервера (по
+// lastActivity убыванию). Разделители — ДВОЙНОЙ пробел, точно по образцу §2.1
+// (эталон контракта; широкие разделители — визуальное сканирование колонок):
+//
+//	[1234] 2026-09-29 14:02:05  Отчёт за сентябрь  ⟲5  Вася: цифры сверил
+//
+// Подстановка плейсхолдеров НЕ выполняется здесь — это слой cli (симметрия
+// шага 10 chatShowHandler); рендер получает готовый текст. Название и превью
+// сворачиваются в одну строку (oneLine): многострочное сообщение иначе
+// разорвало бы формат «один тред — одна строка».
+func ThreadsTable(w io.Writer, ts []client.ThreadInfo) error {
+	for _, t := range ts {
+		line := fmt.Sprintf("[%d] %s  %s  ⟲%d",
+			t.Thread.Id, FormatTime(t.Thread.LastActivity), oneLine(threadTitle(t)), t.Thread.NumReplies)
+		if t.Last != nil {
+			line += "  " + threadLastPreview(t.Last)
+		}
+		if _, err := fmt.Fprintln(w, line); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// threadTitle — название треда для вывода: thread.title; при пустом (старые
+// данные) — текст корневого сообщения (плейсхолдеры уже подставлены слоем
+// cli); при nil-корне (истёк/удалён) — прочерк.
+func threadTitle(t client.ThreadInfo) string {
+	if t.Thread.Title != "" {
+		return t.Thread.Title
+	}
+	if t.First != nil {
+		return t.First.Message
+	}
+	return "—"
+}
+
+// threadCellLimit — потолок длины названия/превью в ThreadsTable (руны):
+// список тредов — обзор, полный текст читается `chat show --thread`.
+const threadCellLimit = 100
+
+// oneLine — сворачивает текст в одну строку для построчной таблицы тредов:
+// пробельные последовательности (переносы, табы) → одиночный пробел, свыше
+// threadCellLimit рун — обрезка с многоточием «…».
+func oneLine(s string) string {
+	flat := strings.Join(strings.Fields(s), " ")
+	if r := []rune(flat); len(r) > threadCellLimit {
+		return string(r[:threadCellLimit]) + "…"
+	}
+	return flat
+}
+
+// threadLastPreview — превью последнего сообщения: "автор: текст"
+// (system-фолбэк previewText, как в lastMessagePreview; одна строка oneLine).
+func threadLastPreview(m *client.Message) string {
+	return fmt.Sprintf("%s: %s", m.ActorDisplayName, oneLine(previewText(m)))
 }

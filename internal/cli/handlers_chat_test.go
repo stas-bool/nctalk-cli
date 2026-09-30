@@ -60,6 +60,15 @@ type chatSpyClient struct {
 	editId  int
 	editErr error
 
+	// ListThreads-запись (chat threads, спека-дельта 2026-09-29)
+	gotThreadsToken string
+	gotThreadsLimit  int
+	threadsCalls     int
+
+	// ListThreads-результат
+	threadsResult []client.ThreadInfo
+	threadsErr    error
+
 	// FindRooms-результат (для --name)
 	findRooms []client.Room
 	findErr   error
@@ -86,6 +95,13 @@ func (m *chatSpyClient) EditMessage(_ context.Context, token string, messageId i
 	m.gotEditId = messageId
 	m.gotEditOpts = opts
 	return m.editId, m.editErr
+}
+
+func (m *chatSpyClient) ListThreads(_ context.Context, token string, limit int) ([]client.ThreadInfo, error) {
+	m.threadsCalls++
+	m.gotThreadsToken = token
+	m.gotThreadsLimit = limit
+	return m.threadsResult, m.threadsErr
 }
 
 func (m *chatSpyClient) FindRooms(_ context.Context, _, _ string) ([]client.Room, error) {
@@ -1128,5 +1144,615 @@ func TestChatEdit_NamePositionalConflict(t *testing.T) {
 	}
 	if stderr := deps.Stderr.(*bytes.Buffer).String(); !strings.Contains(stderr, "приоритет у token") {
 		t.Errorf("stderr должен содержать предупреждение о конфликте; got %q", stderr)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// chat threads (спека-дельта 2026-09-29)
+// -----------------------------------------------------------------------------
+
+// makeThreadInfo — конструктор ThreadInfo: full-вариант с first/last.
+func makeThreadInfo(id int, title string, numReplies int, lastActivity int64,
+	firstText, lastActor, lastText string) client.ThreadInfo {
+	return client.ThreadInfo{
+		Thread: client.Thread{
+			Id:           id,
+			RoomToken:    "TOK",
+			NumReplies:   numReplies,
+			LastActivity: lastActivity,
+			Title:        title,
+		},
+		Attendee: client.ThreadAttendee{NotificationLevel: 0},
+		First:    &client.Message{Id: id, ActorDisplayName: "Анна", Message: firstText, MessageType: "comment"},
+		Last:     &client.Message{Id: id + 1, ActorDisplayName: lastActor, Message: lastText, MessageType: "comment"},
+	}
+}
+
+// TestChatThreadsText — формат строки текстового вывода (§2.1):
+// [id] время название ⟲N автор: превью; дефолт --last 20; один вызов клиента.
+func TestChatThreadsText(t *testing.T) {
+	spy := &chatSpyClient{threadsResult: []client.ThreadInfo{
+		makeThreadInfo(1234, "Отчёт за сентябрь", 5, 1760000000, "текст корня", "Вася", "цифры сверил"),
+	}}
+	deps := newChatDeps(spy)
+
+	ee := chatThreadsHandler(context.Background(), deps, []string{"TOK"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	if spy.threadsCalls != 1 || spy.gotThreadsToken != "TOK" {
+		t.Fatalf("ListThreads: got calls=%d token=%q, want 1 вызов с TOK", spy.threadsCalls, spy.gotThreadsToken)
+	}
+	if spy.gotThreadsLimit != 20 {
+		t.Errorf("limit: got %d, want 20 (дефолт)", spy.gotThreadsLimit)
+	}
+	out := deps.Stdout.(*bytes.Buffer).String()
+	for _, want := range []string{"[1234]", "Отчёт за сентябрь", "⟲5", "Вася: цифры сверил"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout не содержит %q\nвывод=\n%s", want, out)
+		}
+	}
+	if got := strings.Count(out, "\n"); got != 1 {
+		t.Errorf("строк: got %d, want 1\nвывод=\n%s", got, out)
+	}
+}
+
+// TestChatThreadsFallbacks — фолбэки §2.1: пустой title → текст корневого
+// сообщения; непустой title при first == nil → title (не «—»); пустой title
+// и first == nil → «—»; last == nil → без превью (строка заканчивается ⟲N);
+// ⟲0 печатается всегда (недавно созданный тред).
+func TestChatThreadsFallbacks(t *testing.T) {
+	spy := &chatSpyClient{threadsResult: []client.ThreadInfo{
+		{ // пустой title, есть first, нет last
+			Thread: client.Thread{Id: 1100, NumReplies: 0, LastActivity: 1760000000, Title: ""},
+			First:  &client.Message{Id: 1100, ActorDisplayName: "Анна", Message: "текст корня как название"},
+		},
+		{ // нет ни first, ни last; title непустой → печатается title, НЕ «—»
+			Thread: client.Thread{Id: 1107, NumReplies: 2, LastActivity: 1760000001, Title: "Есть название"},
+		},
+		{ // нет ни first, ни last; title пустой → «—» (корень истёк/удалён)
+			Thread: client.Thread{Id: 1108, NumReplies: 2, LastActivity: 1760000002, Title: ""},
+		},
+	}}
+	deps := newChatDeps(spy)
+
+	ee := chatThreadsHandler(context.Background(), deps, []string{"TOK"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	out := deps.Stdout.(*bytes.Buffer).String()
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("строк: got %d, want 3\nвывод=\n%s", len(lines), out)
+	}
+	if !strings.Contains(lines[0], "текст корня как название") || !strings.Contains(lines[0], "⟲0") {
+		t.Errorf("пустой title → first.message; ⟲0 печатается; got %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "Есть название") || strings.Contains(lines[1], "—") {
+		t.Errorf("nil first при непустом title → title без «—»; got %q", lines[1])
+	}
+	if !strings.Contains(lines[2], "—") {
+		t.Errorf("nil first и пустой title → «—»; got %q", lines[2])
+	}
+	if !strings.HasSuffix(lines[0], "⟲0") || !strings.HasSuffix(lines[1], "⟲2") || !strings.HasSuffix(lines[2], "⟲2") {
+		t.Errorf("нет last → строка заканчивается ⟲N без превью; got %q / %q / %q", lines[0], lines[1], lines[2])
+	}
+}
+
+// TestChatThreadsSubstituteParams — плейсхолдеры {actor}/{file}/{mention-*}
+// подставляются в текстовом режиме (фолбэк-название и превью); --json —
+// оригинальный message (канонический ответ, §2.1).
+//
+// ВАЖНО: каждая ветка берёт СВЕЖИЙ литерал (newResult), не общий слайс.
+// Handler в текстовом режиме мутирует First/Last ЧЕРЕЗ УКАЗАТЕЛИ (шаг 6:
+// ts[i].First.Message = SubstituteParams(...)), поэтому слайс, переиспользованный
+// вторым шпионом, уже нёс бы подставленные строки — JSON-ассерт ловил бы
+// подмену вместо оригинала (ложное падение на ПРАВИЛЬНОЙ реализации; красная
+// фаза Step 2 этого не видит — падение на компиляции). У chat show этот
+// паттерн переиспользования безопасен: там подстановка идёт по value-копиям
+// (filtered в chatShowHandler), а First/Last в ThreadInfo — указатели.
+func TestChatThreadsSubstituteParams(t *testing.T) {
+	newResult := func() []client.ThreadInfo {
+		return []client.ThreadInfo{{
+			Thread: client.Thread{Id: 1, NumReplies: 1, LastActivity: 1760000000, Title: ""},
+			First: &client.Message{
+				Id:      1,
+				Message: "{actor} поделился файлом {file}",
+				MessageParameters: client.MsgParams{
+					"actor": client.MsgParam{Type: "user", Name: "Анна"},
+					"file":  client.MsgParam{Type: "file", Name: "report.pdf"},
+				},
+			},
+			Last: &client.Message{
+				Id:               2,
+				ActorDisplayName: "Борис",
+				Message:          "упомянул {mention-user1}",
+				MessageParameters: client.MsgParams{
+					"mention-user1": client.MsgParam{Type: "user", Name: "Вера"},
+				},
+			},
+		}}
+	}
+
+	spy := &chatSpyClient{threadsResult: newResult()}
+	deps := newChatDeps(spy)
+	ee := chatThreadsHandler(context.Background(), deps, []string{"TOK"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	out := deps.Stdout.(*bytes.Buffer).String()
+	for _, want := range []string{"Анна поделился файлом report.pdf", "Борис: упомянул Вера"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("подстановка: нет %q\nвывод=\n%s", want, out)
+		}
+	}
+
+	// JSON — БЕЗ подстановки (свежий шпион со СВОИМИ First/Last — см. комментарий теста).
+	deps2 := newChatDeps(&chatSpyClient{threadsResult: newResult()})
+	ee = chatThreadsHandler(context.Background(), deps2, []string{"TOK"}, true)
+	if ee.Code != ExitOK {
+		t.Fatalf("json: code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	if raw := deps2.Stdout.(*bytes.Buffer).String(); !strings.Contains(raw, "{actor} поделился файлом {file}") {
+		t.Errorf("JSON хранит оригинальный message; raw=%s", raw)
+	}
+}
+
+// TestChatThreadsJSON — --json: канонический массив ThreadInfo (порядок
+// сервера), first/last и attendee сохраняются.
+func TestChatThreadsJSON(t *testing.T) {
+	spy := &chatSpyClient{threadsResult: []client.ThreadInfo{
+		makeThreadInfo(1234, "Отчёт", 5, 1760000000, "корень", "Вася", "ответ"),
+	}}
+	deps := newChatDeps(spy)
+
+	ee := chatThreadsHandler(context.Background(), deps, []string{"TOK"}, true)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	raw := deps.Stdout.(*bytes.Buffer).String()
+	var got []client.ThreadInfo
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("stdout не валидный JSON: %v; raw=%s", err, raw)
+	}
+	if len(got) != 1 || got[0].Thread.Id != 1234 || got[0].Thread.NumReplies != 5 || got[0].Thread.Title != "Отчёт" {
+		t.Fatalf("JSON: got %+v, want тред 1234/⟲5/Отчёт", got)
+	}
+	if got[0].First == nil || got[0].Last == nil {
+		t.Fatalf("JSON: first/last должны сохраниться; got %+v", got[0])
+	}
+	if got[0].Attendee.NotificationLevel != 0 {
+		t.Errorf("JSON: attendee.notificationLevel: got %d, want 0", got[0].Attendee.NotificationLevel)
+	}
+}
+
+// TestChatThreadsEmpty — пустой список: текст → пустой stdout exit 0;
+// JSON → канонический [] (не null) — отличие от rooms participants, §2.1.
+func TestChatThreadsEmpty(t *testing.T) {
+	spy := &chatSpyClient{threadsResult: []client.ThreadInfo{}}
+	deps := newChatDeps(spy)
+	ee := chatThreadsHandler(context.Background(), deps, []string{"TOK"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("текст: code: got %d, want %d", ee.Code, ExitOK)
+	}
+	if buf := deps.Stdout.(*bytes.Buffer); buf.Len() != 0 {
+		t.Fatalf("текст: stdout: got %q, want пусто", buf.String())
+	}
+
+	spy2 := &chatSpyClient{threadsResult: []client.ThreadInfo{}}
+	deps2 := newChatDeps(spy2)
+	ee = chatThreadsHandler(context.Background(), deps2, []string{"TOK"}, true)
+	if ee.Code != ExitOK {
+		t.Fatalf("json: code: got %d, want %d", ee.Code, ExitOK)
+	}
+	if raw := deps2.Stdout.(*bytes.Buffer).String(); strings.TrimSpace(raw) != "[]" {
+		t.Fatalf("json: stdout: got %q, want []", raw)
+	}
+}
+
+// TestChatThreadsLast — --last: дефолт 20; явное N; клэмп 50; нецелое ИЛИ
+// неположительное при явном флаге → exit 1 ДО сети (симметрия с guard-ом
+// --thread; §2.1).
+func TestChatThreadsLast(t *testing.T) {
+	cases := []struct {
+		name      string
+		args      []string
+		wantLimit int
+		wantCode  int
+	}{
+		{"без --last → 20", []string{"TOK"}, 20, ExitOK},
+		{"--last 5", []string{"TOK", "--last", "5"}, 5, ExitOK},
+		{"--last=7 (форма =)", []string{"TOK", "--last=7"}, 7, ExitOK},
+		{"--last 500 → клэмп 50", []string{"TOK", "--last", "500"}, 50, ExitOK},
+		{"--last 0 → exit 1", []string{"TOK", "--last", "0"}, 20, ExitGeneric},
+		{"--last -3 → exit 1", []string{"TOK", "--last", "-3"}, 20, ExitGeneric},
+		{"--last abc → exit 1", []string{"TOK", "--last", "abc"}, 20, ExitGeneric},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := &chatSpyClient{threadsResult: []client.ThreadInfo{}}
+			deps := newChatDeps(spy)
+			ee := chatThreadsHandler(context.Background(), deps, tc.args, false)
+			if ee.Code != tc.wantCode {
+				t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, tc.wantCode, ee.Err)
+			}
+			if tc.wantCode == ExitOK && spy.gotThreadsLimit != tc.wantLimit {
+				t.Errorf("limit: got %d, want %d", spy.gotThreadsLimit, tc.wantLimit)
+			}
+			if tc.wantCode != ExitOK && spy.threadsCalls != 0 {
+				t.Errorf("ошибка валидации: ListThreads не должен зваться; got %d calls", spy.threadsCalls)
+			}
+		})
+	}
+}
+
+// TestChatThreadsLastClampWarn — клэмп --last>50 НЕ молчаливый: предупреждение
+// в stderr; ровно 50 — клэмп не срабатывает, stderr пуст.
+func TestChatThreadsLastClampWarn(t *testing.T) {
+	spy := &chatSpyClient{threadsResult: []client.ThreadInfo{}}
+	deps := newChatDeps(spy)
+	ee := chatThreadsHandler(context.Background(), deps, []string{"TOK", "--last", "500"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	if spy.gotThreadsLimit != 50 {
+		t.Errorf("limit: got %d, want 50", spy.gotThreadsLimit)
+	}
+	stderr := deps.Stderr.(*bytes.Buffer).String()
+	if !strings.Contains(stderr, "--last=500") || !strings.Contains(stderr, "50") {
+		t.Errorf("клэмп без предупреждения: stderr=%q", stderr)
+	}
+
+	spy2 := &chatSpyClient{threadsResult: []client.ThreadInfo{}}
+	deps2 := newChatDeps(spy2)
+	chatThreadsHandler(context.Background(), deps2, []string{"TOK", "--last", "50"}, false)
+	if got := deps2.Stderr.(*bytes.Buffer).String(); got != "" {
+		t.Errorf("ровно 50 — без предупреждения; stderr=%q", got)
+	}
+}
+
+// TestChatThreadsNameResolution — --name ветки: 1 совпадение → 0; >1 → 3
+// (ListThreads не звался); 0 → 2 (тоже без вызова). Позиционный+--name —
+// приоритет у позиционного с предупреждением.
+func TestChatThreadsNameResolution(t *testing.T) {
+	cases := []struct {
+		name       string
+		findResult []client.Room
+		wantExit   int
+		wantCalls  int
+	}{
+		{"1 совпадение → 0", []client.Room{{Type: 2, Token: "tok-1", DisplayName: "Команда"}}, ExitOK, 1},
+		{">1 → 3", []client.Room{
+			{Type: 2, Token: "tokA", DisplayName: "Команда X"},
+			{Type: 2, Token: "tokB", DisplayName: "Команда Y"},
+		}, ExitAmbiguous, 0},
+		{"0 → 2", []client.Room{}, ExitNotFound, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := &chatSpyClient{findRooms: tc.findResult, threadsResult: []client.ThreadInfo{}}
+			deps := newChatDeps(spy)
+			ee := chatThreadsHandler(context.Background(), deps, []string{"--name", "Команда"}, false)
+			if ee.Code != tc.wantExit {
+				t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, tc.wantExit, ee.Err)
+			}
+			if spy.threadsCalls != tc.wantCalls {
+				t.Fatalf("ListThreads вызовов: got %d, want %d", spy.threadsCalls, tc.wantCalls)
+			}
+		})
+	}
+
+	spy := &chatSpyClient{threadsResult: []client.ThreadInfo{}}
+	deps := newChatDeps(spy)
+	ee := chatThreadsHandler(context.Background(), deps, []string{"tok-pos", "--name", "Команда"}, false)
+	if ee.Code != ExitOK || spy.gotThreadsToken != "tok-pos" {
+		t.Fatalf("конфликт: code=%d token=%q, want 0/tok-pos", ee.Code, spy.gotThreadsToken)
+	}
+	if stderr := deps.Stderr.(*bytes.Buffer).String(); !strings.Contains(stderr, "приоритет у token") {
+		t.Errorf("stderr: должен содержать предупреждение о конфликте; got %q", stderr)
+	}
+}
+
+// TestChatThreadsErrors — OCS 404 → exit 2 с текстом сервера; неизвестный
+// флаг → exit 1 без вызова клиента; пустой ввод → exit 1; лишние позиционные
+// игнорируются.
+func TestChatThreadsErrors(t *testing.T) {
+	spy := &chatSpyClient{threadsErr: &client.OCSError{Code: 404, Message: "thread"}}
+	deps := newChatDeps(spy)
+	ee := chatThreadsHandler(context.Background(), deps, []string{"TOK"}, false)
+	if ee.Code != ExitNotFound {
+		t.Fatalf("404: code: got %d, want %d", ee.Code, ExitNotFound)
+	}
+	if ee.Err == nil || !strings.Contains(ee.Err.Error(), "thread") {
+		t.Fatalf("404: err: got %v, want текст сервера", ee.Err)
+	}
+
+	spy2 := &chatSpyClient{}
+	deps2 := newChatDeps(spy2)
+	ee = chatThreadsHandler(context.Background(), deps2, []string{"TOK", "--no-such"}, false)
+	if ee.Code != ExitGeneric {
+		t.Fatalf("unknown flag: code: got %d, want %d", ee.Code, ExitGeneric)
+	}
+	if spy2.threadsCalls != 0 {
+		t.Errorf("ListThreads не должен зваться; got %d", spy2.threadsCalls)
+	}
+
+	deps3 := newChatDeps(&chatSpyClient{})
+	ee = chatThreadsHandler(context.Background(), deps3, nil, false)
+	if ee.Code != ExitGeneric {
+		t.Fatalf("empty input: code: got %d, want %d", ee.Code, ExitGeneric)
+	}
+
+	spy4 := &chatSpyClient{threadsResult: []client.ThreadInfo{}}
+	deps4 := newChatDeps(spy4)
+	ee = chatThreadsHandler(context.Background(), deps4, []string{"tok-main", "extra"}, false)
+	if ee.Code != ExitOK || spy4.gotThreadsToken != "tok-main" {
+		t.Fatalf("лишние позиционные: code=%d token=%q, want 0/tok-main", ee.Code, spy4.gotThreadsToken)
+	}
+}
+
+// TestChatThreadsViaRun — `chat threads TOK123` через Run: роутинг, handler,
+// вывод (end-to-end без сети).
+func TestChatThreadsViaRun(t *testing.T) {
+	spy := &chatSpyClient{threadsResult: []client.ThreadInfo{
+		makeThreadInfo(1234, "Отчёт", 5, 1760000000, "корень", "Вася", "ответ"),
+	}}
+	deps := newChatDeps(spy)
+
+	code := Run([]string{"chat", "threads", "TOK123"}, deps)
+	if code != ExitOK {
+		t.Fatalf("Run code: got %d, want %d", code, ExitOK)
+	}
+	if spy.threadsCalls != 1 || spy.gotThreadsToken != "TOK123" {
+		t.Fatalf("ListThreads: got calls=%d token=%q", spy.threadsCalls, spy.gotThreadsToken)
+	}
+	if out := deps.Stdout.(*bytes.Buffer).String(); !strings.Contains(out, "[1234]") || !strings.Contains(out, "⟲5") {
+		t.Fatalf("stdout: ожидается строка треда; got %q", out)
+	}
+}
+
+// TestChatShowThread — --thread прокидывается в GetChatOpts.ThreadId (обе
+// формы); без флага → 0; нецелое/0/отрицательное → exit 1 ДО сети (§2.2).
+func TestChatShowThread(t *testing.T) {
+	msgs := []client.Message{makeChatMsg(1234, "alice", "comment", "корень", chatFixedNow.Unix())}
+
+	spy := &chatSpyClient{chatMsgs: msgs}
+	deps := newChatDeps(spy)
+	ee := chatShowHandler(context.Background(), deps, []string{"TOK", "--thread", "1234"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	if spy.gotOpts.ThreadId != 1234 {
+		t.Errorf("ThreadId: got %d, want 1234", spy.gotOpts.ThreadId)
+	}
+
+	spy2 := &chatSpyClient{chatMsgs: msgs}
+	deps2 := newChatDeps(spy2)
+	ee = chatShowHandler(context.Background(), deps2, []string{"TOK", "--thread=77"}, false)
+	if ee.Code != ExitOK || spy2.gotOpts.ThreadId != 77 {
+		t.Fatalf("=форма: code=%d ThreadId=%d, want 0/77", ee.Code, spy2.gotOpts.ThreadId)
+	}
+
+	spy3 := &chatSpyClient{chatMsgs: msgs}
+	deps3 := newChatDeps(spy3)
+	chatShowHandler(context.Background(), deps3, []string{"TOK"}, false)
+	if spy3.gotOpts.ThreadId != 0 {
+		t.Errorf("без --thread: ThreadId: got %d, want 0", spy3.gotOpts.ThreadId)
+	}
+
+	for _, raw := range []string{"abc", "0", "-5"} {
+		spyN := &chatSpyClient{chatMsgs: msgs}
+		depsN := newChatDeps(spyN)
+		ee := chatShowHandler(context.Background(), depsN, []string{"TOK", "--thread", raw}, false)
+		if ee.Code != ExitGeneric {
+			t.Fatalf("--thread %s: code: got %d, want %d", raw, ee.Code, ExitGeneric)
+		}
+		if spyN.chatCalls != 0 {
+			t.Errorf("--thread %s: GetChat не должен зваться; got %d calls", raw, spyN.chatCalls)
+		}
+	}
+}
+
+// TestChatShowThreadRender — режим --thread: ↩ НЕ печатается; ⟲N на корне
+// при ThreadReplies > 0; ⟲0 подавляется (§2.2).
+func TestChatShowThreadRender(t *testing.T) {
+	root := makeChatMsg(1234, "alice", "comment", "корень", chatFixedNow.Unix())
+	root.ThreadId = 1234
+	root.ThreadReplies = 5
+	root.ThreadTitle = "Отчёт"
+	reply := makeChatMsg(1300, "bob", "comment", "ответ", chatFixedNow.Unix())
+	reply.ThreadId = 1234
+	reply.ThreadTitle = "Отчёт"
+	spy := &chatSpyClient{chatMsgs: []client.Message{root, reply}}
+	deps := newChatDeps(spy)
+
+	ee := chatShowHandler(context.Background(), deps, []string{"TOK", "--thread", "1234"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	out := deps.Stdout.(*bytes.Buffer).String()
+	if !strings.Contains(out, "⟲5") {
+		t.Errorf("корень должен нести ⟲5; вывод=\n%s", out)
+	}
+	if strings.Contains(out, "↩") {
+		t.Errorf("режим --thread не должен печатать ↩; вывод=\n%s", out)
+	}
+
+	fresh := makeChatMsg(1400, "alice", "comment", "корень без ответов", chatFixedNow.Unix())
+	fresh.ThreadId = 1400
+	fresh.ThreadReplies = 0
+	spy2 := &chatSpyClient{chatMsgs: []client.Message{fresh}}
+	deps2 := newChatDeps(spy2)
+	chatShowHandler(context.Background(), deps2, []string{"TOK", "--thread", "1400"}, false)
+	if out2 := deps2.Stdout.(*bytes.Buffer).String(); strings.Contains(out2, "⟲") {
+		t.Errorf("⟲0 должен подавляться; вывод=\n%s", out2)
+	}
+}
+
+// TestChatShowThreadAnnotations — общая история (без --thread): ⟲N у корня
+// (ThreadId==Id && ThreadReplies>0), ↩id у ответа (ThreadId!=Id &&
+// ThreadTitle!=""), quote-ответ без треда и нетредовые — без пометок;
+// суффикс после реакций тем же разделителем (§2.4).
+func TestChatShowThreadAnnotations(t *testing.T) {
+	root := makeChatMsg(1234, "alice", "comment", "Отчёт за сентябрь", chatFixedNow.Unix())
+	root.ThreadId = 1234
+	root.ThreadReplies = 5
+	root.ThreadTitle = "Отчёт за сентябрь"
+	root.Reactions = map[string]int{"👍": 2}
+
+	reply := makeChatMsg(1300, "bob", "comment", "цифры сверил", chatFixedNow.Unix())
+	reply.ThreadId = 1234
+	reply.ThreadTitle = "Отчёт за сентябрь"
+
+	quote := makeChatMsg(1310, "carol", "comment", "цитата без треда", chatFixedNow.Unix())
+	quote.ThreadId = 1310 // нетредовое: threadId == собственный id; ThreadTitle пуст (Thread-записи нет)
+
+	plain := makeChatMsg(1320, "dave", "comment", "просто сообщение", chatFixedNow.Unix())
+	plain.ThreadId = 1320
+
+	spy := &chatSpyClient{chatMsgs: []client.Message{root, reply, quote, plain}}
+	deps := newChatDeps(spy)
+
+	ee := chatShowHandler(context.Background(), deps, []string{"TOK"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	out := deps.Stdout.(*bytes.Buffer).String()
+	if !strings.Contains(out, "👍×2   ⟲5") {
+		t.Errorf("корень: реакции затем ⟲5 тем же разделителем; вывод=\n%s", out)
+	}
+	if !strings.Contains(out, "↩1234") {
+		t.Errorf("ответ треда должен нести ↩1234; вывод=\n%s", out)
+	}
+	if strings.Contains(out, "↩1310") || strings.Contains(out, "↩1320") {
+		t.Errorf("quote-ответ/нетредовое сообщение не помечаются ↩; вывод=\n%s", out)
+	}
+	if !strings.Contains(out, "просто сообщение") {
+		t.Errorf("нетредовое сообщение выводится; вывод=\n%s", out)
+	}
+}
+
+// TestChatShowThreadAnnotationsSystem — system-сообщение треда (thread_created:
+// ThreadId != Id, ThreadTitle загружен — как в фикстуре chat_thread_history.json
+// id 1250) ↩ НЕ получает даже в --system: пометка означает «ответ в треде»,
+// системная строка — не ответ (§2.4). Comment-ответ в той же выдаче пометку
+// сохраняет — ровно одна ↩ на всю выдачу.
+func TestChatShowThreadAnnotationsSystem(t *testing.T) {
+	sys := makeChatMsg(1250, "anna", "system", "You created thread {title}", chatFixedNow.Unix())
+	sys.ThreadId = 1234
+	sys.ThreadTitle = "Отчёт за сентябрь"
+
+	reply := makeChatMsg(1300, "bob", "comment", "цифры сверил", chatFixedNow.Unix())
+	reply.ThreadId = 1234
+	reply.ThreadTitle = "Отчёт за сентябрь"
+
+	spy := &chatSpyClient{chatMsgs: []client.Message{sys, reply}}
+	deps := newChatDeps(spy)
+
+	ee := chatShowHandler(context.Background(), deps, []string{"TOK", "--system"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	out := deps.Stdout.(*bytes.Buffer).String()
+	if !strings.Contains(out, "You created thread") {
+		t.Fatalf("system-сообщение должно выводиться с --system; вывод=\n%s", out)
+	}
+	if n := strings.Count(out, "↩"); n != 1 {
+		t.Errorf("↩ только у comment-ответа: got %d вхождений; вывод=\n%s", n, out)
+	}
+	if !strings.Contains(out, "цифры сверил   ↩1234") {
+		t.Errorf("ответ треда сохраняет ↩1234; вывод=\n%s", out)
+	}
+}
+
+// TestChatSendThreadFlags — --thread → SendMessageOpts.ThreadId;
+// --thread-title → ThreadTitle; обе =формы; невалидный --thread → exit 1
+// ДО сети (§2.3).
+func TestChatSendThreadFlags(t *testing.T) {
+	spy := &chatSpyClient{sendId: 77}
+	deps := newChatSendDeps(spy, strings.NewReader("ответ в тред"))
+	ee := chatSendHandler(context.Background(), deps, []string{"TOK", "--thread", "1234"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	if spy.gotSendOpts.ThreadId != 1234 || spy.gotSendOpts.ThreadTitle != "" {
+		t.Errorf("opts: got ThreadId=%d ThreadTitle=%q, want 1234/пусто", spy.gotSendOpts.ThreadId, spy.gotSendOpts.ThreadTitle)
+	}
+
+	spy2 := &chatSpyClient{sendId: 78}
+	deps2 := newChatSendDeps(spy2, strings.NewReader("корень треда"))
+	ee = chatSendHandler(context.Background(), deps2, []string{"TOK", "--thread-title", "Тема"}, false)
+	if ee.Code != ExitOK {
+		t.Fatalf("code: got %d, want %d (err=%v)", ee.Code, ExitOK, ee.Err)
+	}
+	if spy2.gotSendOpts.ThreadTitle != "Тема" || spy2.gotSendOpts.ThreadId != 0 {
+		t.Errorf("opts: got ThreadTitle=%q ThreadId=%d, want Тема/0", spy2.gotSendOpts.ThreadTitle, spy2.gotSendOpts.ThreadId)
+	}
+
+	spy3 := &chatSpyClient{sendId: 79}
+	deps3 := newChatSendDeps(spy3, strings.NewReader("x"))
+	chatSendHandler(context.Background(), deps3, []string{"TOK", "--thread=55"}, false)
+	if spy3.gotSendOpts.ThreadId != 55 {
+		t.Errorf("=форма --thread: got %d, want 55", spy3.gotSendOpts.ThreadId)
+	}
+
+	spy4 := &chatSpyClient{sendId: 80}
+	deps4 := newChatSendDeps(spy4, strings.NewReader("x"))
+	chatSendHandler(context.Background(), deps4, []string{"TOK", "--thread-title=Тема2"}, false)
+	if spy4.gotSendOpts.ThreadTitle != "Тема2" {
+		t.Errorf("=форма --thread-title: got %q, want Тема2", spy4.gotSendOpts.ThreadTitle)
+	}
+
+	for _, raw := range []string{"abc", "0", "-5"} {
+		spyN := &chatSpyClient{sendId: 1}
+		depsN := newChatSendDeps(spyN, strings.NewReader("x"))
+		ee := chatSendHandler(context.Background(), depsN, []string{"TOK", "--thread", raw}, false)
+		if ee.Code != ExitGeneric {
+			t.Fatalf("--thread %s: code: got %d, want %d", raw, ee.Code, ExitGeneric)
+		}
+		if spyN.sendCalls != 0 {
+			t.Errorf("--thread %s: SendMessage не должен зваться; got %d calls", raw, spyN.sendCalls)
+		}
+	}
+}
+
+// TestChatSendThreadConflict — любые два из --reply-to/--thread/
+// --thread-title → exit 1 ДО сети (spy: ноль вызовов SendMessage);
+// пустой --thread-title → exit 1 до сети (§2.3).
+func TestChatSendThreadConflict(t *testing.T) {
+	conflicts := [][]string{
+		{"--reply-to", "10", "--thread", "1234"},
+		{"--reply-to", "10", "--thread-title", "Тема"},
+		{"--thread", "1234", "--thread-title", "Тема"},
+		{"--reply-to=10", "--thread=1234"},
+	}
+	for _, flags := range conflicts {
+		spy := &chatSpyClient{sendId: 1}
+		deps := newChatSendDeps(spy, strings.NewReader("x"))
+		ee := chatSendHandler(context.Background(), deps, append([]string{"TOK"}, flags...), false)
+		if ee.Code != ExitGeneric {
+			t.Fatalf("%v: code: got %d, want %d", flags, ee.Code, ExitGeneric)
+		}
+		if ee.Err == nil || !strings.Contains(ee.Err.Error(), "взаимоисключаемы") {
+			t.Fatalf("%v: err: got %v, want «взаимоисключаемы»", flags, ee.Err)
+		}
+		if spy.sendCalls != 0 {
+			t.Fatalf("%v: SendMessage не должен зваться; got %d calls", flags, spy.sendCalls)
+		}
+	}
+
+	for _, args := range [][]string{
+		{"TOK", "--thread-title", ""},
+		{"TOK", "--thread-title="},
+	} {
+		spy := &chatSpyClient{sendId: 1}
+		deps := newChatSendDeps(spy, strings.NewReader("x"))
+		ee := chatSendHandler(context.Background(), deps, args, false)
+		if ee.Code != ExitGeneric {
+			t.Fatalf("%v: code: got %d, want %d", args, ee.Code, ExitGeneric)
+		}
+		if spy.sendCalls != 0 {
+			t.Fatalf("%v: SendMessage не должен зваться; got %d calls", args, spy.sendCalls)
+		}
 	}
 }

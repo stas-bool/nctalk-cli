@@ -68,3 +68,11 @@ func NewMessageIDJSON(w io.Writer, id int) error {
 func ParticipantsJSON(w io.Writer, ps []client.Participant) error {
 	return writeJSON(w, ps)
 }
+
+// ThreadsJSON выводит []ThreadInfo как JSON-массив (спека-дельта
+// 2026-09-29 §2.1, --json). Канонический ответ: оригинальные message +
+// messageParameters (подстановку cli делает только в текстовом режиме).
+// Пустой non-nil слайс печатается как [], не null.
+func ThreadsJSON(w io.Writer, ts []client.ThreadInfo) error {
+	return writeJSON(w, ts)
+}

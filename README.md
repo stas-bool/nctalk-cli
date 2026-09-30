@@ -4,7 +4,7 @@
 
 `nctalk` is a thin terminal CLI for [Nextcloud Talk](https://github.com/nextcloud/spreed) (Spreed) built on top of the OCS API.
 
-- 8 primitives over rooms, chat, reactions and search — no business logic, composable in scripts
+- 10 primitives over rooms, chat, threads, reactions and search — no business logic, composable in scripts
 - Machine-friendly: `--json` on every command, predictable exit codes (`0`/`1`/`2`/`3`)
 - Credentials only via environment variables (app-password), never in flags or files
 - Pure Go 1.21 stdlib, CGO-free single binary
@@ -23,7 +23,7 @@ nctalk rooms list
 <a name="nctalk-ru"></a>
 # nctalk (рус.)
 
-Тонкий CLI-клиент над **Nextcloud Talk** (приложение Spreed) поверх OCS-API. Только примитивы: список/поиск чатов, участники комнаты, чтение, отправка и редактирование сообщений, реакции, поиск. Основной потребитель — агент (через skill-обёртку), вторичный — человек в терминале. Бизнес-логики не содержит.
+Тонкий CLI-клиент над **Nextcloud Talk** (приложение Spreed) поверх OCS-API. Только примитивы: список/поиск чатов, участники комнаты, чтение, отправка и редактирование сообщений, треды, реакции, поиск. Основной потребитель — агент (через skill-обёртку), вторичный — человек в терминале. Бизнес-логики не содержит.
 
 Написан на Go 1.21 (только стандартная библиотека).
 
@@ -107,7 +107,10 @@ nctalk chat show kytxaiyc --from daiana.zhukotskaia   # фильтр по авт
 nctalk chat show kytxaiyc --since 2h    # сообщения за последние 2 часа
 nctalk chat show kytxaiyc --since 2026-07-17
 nctalk chat show kytxaiyc --system      # показать системные сообщения (по умолчанию скрыты)
+nctalk chat show kytxaiyc --thread 2927    # только тред 2927 (включая корневое сообщение)
 ```
+
+`--thread <id>` — выдача одного треда (id корневого сообщения, из `chat threads` или пометки `⟲N`); корень включён, пагинация/фильтры `--last`/`--from`/`--since`/`--system` работают как обычно.
 
 `<room>` разрешается так: позиционный аргумент = **token** (primary); `--name` = case-insensitive подстрока в `displayName`. **1 совпадение** → выполняем; **>1** → кандидаты + exit `3`; **0** → exit `2`.
 
@@ -122,9 +125,24 @@ echo "Привет" | nctalk chat send kytxaiyc                       # тело
 nctalk chat send kytxaiyc --file msg.txt                        # тело из файла
 echo "ответ" | nctalk chat send kytxaiyc --reply-to 2927        # ответ на сообщение
 echo "тихо"  | nctalk chat send kytxaiyc --silent               # без уведомления
+echo "ответ" | nctalk chat send kytxaiyc --thread 2927          # ответ в тред (без цитаты)
+echo "текст" | nctalk chat send kytxaiyc --thread-title "Тема"  # создать тред (вывод — id корня)
 ```
 
 Вывод: `id` отправленного сообщения.
+
+`--reply-to`/`--thread`/`--thread-title` взаимоисключаемы (конфликт → exit `1` до отправки). При создании треда вывод — id корневого сообщения = будущий id треда. `--reply-to` на сообщение треда кладёт ответ в тред с цитатой (сервер).
+
+### `chat threads <room>` — список тредов
+
+```sh
+nctalk chat threads kytxaiyc               # последние треды (до 20)
+nctalk chat threads --name "review team"   # комнату по имени
+nctalk chat threads kytxaiyc --last 50     # до 50 (потолок сервера)
+nctalk chat threads kytxaiyc --json        # канонический массив (thread/attendee/first/last)
+```
+
+Строки: `[id] время название ⟲N автор: превью`. `[id]` — id треда = id корневого сообщения: им же читают (`chat show --thread <id>`) и в нём отвечают (`chat send --thread <id>`). Пустое название (старые данные) → текст корневого сообщения. Пусто → exit `0` (текст) / `[]` (`--json`).
 
 ### `chat edit <room> <messageId>` — отредактировать сообщение
 

@@ -25,6 +25,8 @@ type Message struct {
 	IsReplyable         bool          `json:"isReplyable"`
 	Markdown            bool          `json:"markdown"`
 	ThreadId            int           `json:"threadId"`
+	ThreadTitle         string        `json:"threadTitle,omitempty"`   // только когда сервер загрузил объект треда (спека-дельта 2026-09-29 §3.4)
+	ThreadReplies       int           `json:"threadReplies,omitempty"` // только когда сервер загрузил объект треда (§3.4)
 	ExpirationTimestamp int           `json:"expirationTimestamp"`
 	Token               string        `json:"token"`
 }
