@@ -1,0 +1,29 @@
+{
+  "ocs": {
+    "meta": {
+      "status": "ok",
+      "statuscode": 200,
+      "message": "OK"
+    },
+    "data": [
+      {
+        "id": 1510,
+        "token": "tok-team",
+        "actorType": "users",
+        "actorId": "anna.s",
+        "actorDisplayName": "Анна Смирнова",
+        "timestamp": 1791563221,
+        "message": "nctalk attach fixture — сосед",
+        "messageParameters": [],
+        "systemMessage": "",
+        "messageType": "comment",
+        "isReplyable": true,
+        "referenceId": "",
+        "reactions": {},
+        "expirationTimestamp": 0,
+        "markdown": true,
+        "threadId": 1510
+      }
+    ]
+  }
+}

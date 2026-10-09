@@ -1,0 +1,22 @@
+{
+  "ocs": {
+    "meta": {
+      "status": "ok",
+      "statuscode": 200,
+      "message": "OK"
+    },
+    "data": {
+      "capabilities": {
+        "spreed": {
+          "config": {
+            "attachments": {
+              "allowed": true,
+              "conversation-subfolders": true,
+              "folder": "/Talk"
+            }
+          }
+        }
+      }
+    }
+  }
+}

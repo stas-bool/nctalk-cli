@@ -1,0 +1,47 @@
+{
+  "ocs": {
+    "meta": {
+      "status": "ok",
+      "statuscode": 200,
+      "message": "OK"
+    },
+    "data": {
+      "id": "3001",
+      "share_type": 10,
+      "uid_owner": "anna.s",
+      "displayname_owner": "Анна Смирнова",
+      "permissions": 19,
+      "can_edit": true,
+      "can_delete": true,
+      "stime": 1791563095,
+      "parent": null,
+      "expiration": null,
+      "token": null,
+      "uid_file_owner": "anna.s",
+      "note": "",
+      "label": "",
+      "displayname_file_owner": "Анна Смирнова",
+      "path": "/Talk/nctalk-fixture-plain.txt",
+      "item_type": "file",
+      "item_permissions": 27,
+      "is-mount-root": false,
+      "mount-type": "",
+      "mimetype": "text/plain",
+      "has_preview": true,
+      "storage_id": "home::anna.s",
+      "storage": 41,
+      "item_source": 2001,
+      "file_source": 2001,
+      "file_parent": 2000,
+      "file_target": "/{TALK_PLACEHOLDER}/nctalk-fixture-plain.txt",
+      "item_size": 28,
+      "item_mtime": 1791563071,
+      "share_with": "tok-team",
+      "share_with_displayname": "Команда",
+      "share_with_link": "https://nc.example.org/call/tok-team",
+      "mail_send": 0,
+      "hide_download": 0,
+      "attributes": null
+    }
+  }
+}
