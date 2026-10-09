@@ -151,6 +151,118 @@ func TestDoDAV_ContentLengthNoChunked(t *testing.T) {
 	}
 }
 
+// TestDoDAV_NegativeContentLength — отрицательная длина — ошибка до сети: у
+// net/http это «длина неизвестна», и тело ушло бы chunked (спека §3.4: за
+// php-fpm chunked-тело в части конфигураций приходит пустым). Регресс
+// code-review 2026-10-10 (M-1): сервер не получает ни одного запроса.
+func TestDoDAV_NegativeContentLength(t *testing.T) {
+	var hits int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer ts.Close()
+
+	for _, n := range []int64{-1, -5} {
+		resp, err := DoDAV(context.Background(), http.DefaultClient, authFromURL(t, ts.URL),
+			http.MethodPut, "/f.bin", nil, strings.NewReader("hello"), n)
+		if err == nil || !strings.Contains(err.Error(), "отрицательная длина тела") {
+			t.Errorf("contentLength=%d: resp=%v err=%v, want ошибку «отрицательная длина тела»", n, resp, err)
+		}
+	}
+	if got := atomic.LoadInt32(&hits); got != 0 {
+		t.Errorf("сервер получил %d запросов, want 0 (ошибка до сети, без chunked)", got)
+	}
+}
+
+// TestDoDAV_BodyLongerThanContentLength — тело длиннее contentLength (в файл
+// дописали после Stat — растущий лог): уходит ровно contentLength байт,
+// снимок на момент Stat, хвост не отправляется, ошибки транспорта нет. Без
+// снимка net/http дочитывал хвост и возвращал «http: ContentLength=N with Body
+// length M», хотя сервер уже создал файл (201): exit 1 и файл-сирота в папке
+// вложений. Регресс code-review 2026-10-10.
+func TestDoDAV_BodyLongerThanContentLength(t *testing.T) {
+	// Растущий файл: Stat видит 6 байт, после него дописана ещё строка.
+	logPath := filepath.Join(t.TempDir(), "app.log")
+	if err := os.WriteFile(logPath, []byte("line1\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	grown, err := os.Open(logPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer grown.Close()
+	st, err := grown.Stat()
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	app, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open на дозапись: %v", err)
+	}
+	if _, err := app.WriteString("line2\n"); err != nil {
+		t.Fatalf("дозапись: %v", err)
+	}
+	if err := app.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		body io.Reader
+		n    int64
+		want string
+	}{
+		{"reader длиннее", strings.NewReader("hello, world"), 5, "hello"},
+		{"растущий файл", grown, st.Size(), "line1\n"},
+	}
+	for _, tc := range cases {
+		var (
+			gotLen  int64
+			gotTE   []string
+			gotBody []byte
+		)
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotLen = r.ContentLength
+			gotTE = r.TransferEncoding
+			gotBody, _ = io.ReadAll(r.Body)
+			w.WriteHeader(http.StatusCreated)
+		}))
+		resp, err := DoDAV(context.Background(), http.DefaultClient, authFromURL(t, ts.URL),
+			http.MethodPut, "/f.bin", nil, tc.body, tc.n)
+		ts.Close()
+		if err != nil {
+			t.Errorf("%s: DoDAV: %v, want ответ 201 без ошибки транспорта", tc.name, err)
+			continue
+		}
+		if resp.StatusCode != http.StatusCreated {
+			t.Errorf("%s: StatusCode %d, want 201", tc.name, resp.StatusCode)
+		}
+		if gotLen != tc.n || len(gotTE) != 0 || string(gotBody) != tc.want {
+			t.Errorf("%s: сервер видит ContentLength=%d TransferEncoding=%v тело %q, want %d, без chunked, %q",
+				tc.name, gotLen, gotTE, gotBody, tc.n, tc.want)
+		}
+	}
+}
+
+// TestDoDAV_BodyShorterThanContentLength — тело короче contentLength (файл
+// укоротили после Stat): ошибка транспорта net/http, прошедшая SanitizeErr;
+// снимок первых N байт собрать не из чего. Сервер ждёт недостающие байты и
+// ответить не успевает — исход детерминирован.
+func TestDoDAV_BodyShorterThanContentLength(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer ts.Close()
+
+	resp, err := DoDAV(context.Background(), http.DefaultClient, authFromURL(t, ts.URL),
+		http.MethodPut, "/f.bin", nil, strings.NewReader("hello"), 10)
+	if err == nil || !strings.Contains(err.Error(), "ContentLength=10 with Body length 5") {
+		t.Errorf("resp=%v err=%v, want ошибку «ContentLength=10 with Body length 5»", resp, err)
+	}
+}
+
 // TestDoDAV_BodyReusableAfterSend — после PUT тело не закрыто: вызывающий
 // перематывает его и шлёт тот же файл повторно (сценарий 409/412 → повтор).
 // Реальный *os.File: без не-закрывающей обёртки Seek упал бы «file already closed».

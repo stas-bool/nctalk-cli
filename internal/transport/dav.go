@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/xml"
+	"fmt"
 	"io"
 	"net/http"
 	"path"
@@ -42,19 +43,33 @@ type DAVResponse struct {
 //     и не даёт закрыть его Transport-у: net/http закрывает тело-io.Closer
 //     (например *os.File) после отправки и даже при ошибке, а вызывающий
 //     перематывает тот же файл для повтора PUT после 409/412;
-//   - contentLength — точная длина body (>= 0). Уходит заголовком
-//     Content-Length, без chunked transfer-encoding: за php-fpm chunked-тело в
-//     части конфигураций приходит пустым.
+//   - contentLength — длина body (>= 0; без тела — 0), её знает только
+//     вызывающий. Уходит заголовком Content-Length, без chunked
+//     transfer-encoding: за php-fpm chunked-тело в части конфигураций
+//     приходит пустым. Отрицательная длина (у net/http — «длина неизвестна»,
+//     т.е. chunked) — ошибка до сети. Из body уходит ровно contentLength байт
+//     — снимок на момент Stat: хвост, дописанный после (растущий лог), не
+//     отправляется; тело короче contentLength (файл укоротили) — ошибка
+//     транспорта net/http. При 0 body не читается: уходит http.NoBody
+//     (пустой файл).
 //
-// error — только транспортные сбои: сеть, отмена ctx, редирект на чужой хост
-// (политика doer-а SameHostRedirectPolicy), чтение тела ответа; всегда через
-// SanitizeErr. HTTP-статусы, включая 4xx/5xx, возвращаются в DAVResponse.
+// error — транспортные сбои (сеть, отмена ctx, редирект на чужой хост —
+// политика doer-а SameHostRedirectPolicy, чтение тела ответа) и отрицательная
+// contentLength (до сети); всегда через SanitizeErr. HTTP-статусы, включая
+// 4xx/5xx, возвращаются в DAVResponse.
 // Редиректы PUT: на 307/308 тело без GetBody Go не переотправляет (вернётся
 // сам 307), а 301/302 превращает PUT в GET — в обоих случаях статус не совпадёт
 // с ожидаемым вызывающим, молчаливого успеха нет.
 //
 // Тело ответа дочитывается не дальше davBodyLimit и закрывается.
 func DoDAV(ctx context.Context, doer Doer, auth Auth, method, p string, header http.Header, body io.Reader, contentLength int64) (*DAVResponse, error) {
+	// Отрицательная длина: net/http отправил бы тело chunked, а за php-fpm в
+	// части конфигураций оно приходит пустым — сервер создал бы пустой файл с
+	// 201, молчаливая потеря данных. Отказ до сети (code-review 2026-10-10).
+	if contentLength < 0 {
+		return nil, SanitizeErr(fmt.Errorf("transport: DoDAV: отрицательная длина тела %d (нужна точная длина: chunked transfer-encoding запрещён)", contentLength))
+	}
+
 	// Сборка URL — как в DoOCS: path.Join без двойных слэшей, RawPath сброшен,
 	// чтобы url.String() экранировал сегменты из Path. Query у WebDAV нет.
 	fullURL := *auth.BaseURL
@@ -72,13 +87,18 @@ func DoDAV(ctx context.Context, doer Doer, auth Auth, method, p string, header h
 	case body == nil:
 		// HEAD/MKCOL/DELETE — без тела.
 	case contentLength == 0:
-		// Пустой файл: http.NoBody → Content-Length: 0. Не-nil тело с нулевой
-		// ContentLength Go считает «длина неизвестна» и шлёт chunked.
+		// Пустой файл: http.NoBody → Content-Length: 0, body не читается.
+		// Не-nil тело с нулевой ContentLength Go считает «длина неизвестна» и
+		// шлёт chunked.
 		reqBody = http.NoBody
 	default:
-		// Не-закрывающая обёртка: Transport закрыл бы *os.File, и Seek перед
-		// повтором PUT упал бы «file already closed».
-		reqBody = io.NopCloser(body)
+		// Снимок: ровно contentLength байт. Файл, выросший после Stat (лог),
+		// иначе дал бы ошибку net/http «ContentLength=N with Body length M»
+		// уже после 201 сервера — файл-сирота. Обёртка — на каждый вызов:
+		// повтор PUT после Seek(0) читает файл заново. Не-закрывающая
+		// обёртка: Transport закрыл бы *os.File, и Seek перед повтором PUT
+		// упал бы «file already closed».
+		reqBody = io.NopCloser(io.LimitReader(body, contentLength))
 		explicitLength = true
 	}
 
