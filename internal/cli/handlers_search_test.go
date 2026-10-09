@@ -53,6 +53,9 @@ func (m *searchSpyClient) GetParticipants(_ context.Context, _ string) ([]client
 func (m *searchSpyClient) ListThreads(_ context.Context, _ string, _ int) ([]client.ThreadInfo, error) {
 	return nil, errMock
 }
+func (m *searchSpyClient) SendFile(_ context.Context, _ string, _ client.FileUpload, _ client.SendFileOpts) (client.SendFileResult, error) {
+	return client.SendFileResult{}, errMock
+}
 func (m *searchSpyClient) SearchMessages(_ context.Context, term string, opts client.SearchMessagesOpts) ([]client.MessageResult, error) {
 	m.gotTerm = term
 	m.gotOpts = opts

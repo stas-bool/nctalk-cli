@@ -82,6 +82,9 @@ func (m *roomsSpyClient) GetParticipants(_ context.Context, token string) ([]cli
 func (m *roomsSpyClient) ListThreads(_ context.Context, _ string, _ int) ([]client.ThreadInfo, error) {
 	return nil, errMock
 }
+func (m *roomsSpyClient) SendFile(_ context.Context, _ string, _ client.FileUpload, _ client.SendFileOpts) (client.SendFileResult, error) {
+	return client.SendFileResult{}, errMock
+}
 
 // Неиспользуемые в rooms-тестах методы — возвращают errMock (маркер).
 func (m *roomsSpyClient) GetChat(_ context.Context, _ string, _ client.GetChatOpts) ([]client.Message, error) {

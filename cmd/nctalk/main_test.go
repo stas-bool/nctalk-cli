@@ -12,10 +12,14 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -341,5 +345,119 @@ func TestRun_HelpWithoutEnv_WorksWithoutCreds(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// attachE2EServer — httptest-сервер шагов SendFile для e2e `chat send
+// --attach` (спека-дельта 2026-10-09 §7): cloud/user, capabilities, HEAD 404,
+// PUT 201, шаринг, страница chat — живые фикстуры Task 1 из testdata/.
+// leakTo непусто → PUT отвечает 302 на этот URL (проверка утечки пароля).
+// Возвращает сервер и счётчик запросов шаринга.
+func attachE2EServer(t *testing.T, leakTo string) (*httptest.Server, *int32) {
+	t.Helper()
+	read := func(name string) []byte {
+		b, err := os.ReadFile(filepath.Join("..", "..", "testdata", name))
+		if err != nil {
+			t.Fatalf("read fixture %s: %v", name, err)
+		}
+		return b
+	}
+	user := read("cloud_user.json")
+	caps := read("capabilities_attachments.json")
+	share := read("share_create.json")
+	chat := read("chat_file_messages.json")
+	var shares int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		writeJSON := func(b []byte) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(b)
+		}
+		switch {
+		case r.Method == http.MethodHead && strings.HasPrefix(p, "/remote.php/dav/files/"):
+			w.WriteHeader(http.StatusNotFound)
+		case r.Method == http.MethodPut && strings.HasPrefix(p, "/remote.php/dav/files/"):
+			_, _ = io.Copy(io.Discard, r.Body)
+			if leakTo != "" {
+				http.Redirect(w, r, leakTo, http.StatusFound)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+		case p == "/ocs/v2.php/cloud/user":
+			writeJSON(user)
+		case p == "/ocs/v2.php/cloud/capabilities":
+			writeJSON(caps)
+		case r.Method == http.MethodPost && p == "/ocs/v2.php/apps/files_sharing/api/v1/shares":
+			atomic.AddInt32(&shares, 1)
+			writeJSON(share)
+		case r.Method == http.MethodGet && p == "/ocs/v2.php/apps/spreed/api/v1/chat/tok-team":
+			writeJSON(chat)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &shares
+}
+
+// TestRun_ChatSendAttach_E2E — полный цикл config → client → cli для
+// `chat send <token> --attach <файл> --json`: загрузка, шаринг и поиск id по
+// referenceId (фикстура: сообщение 1500 с referenceId 0…01).
+func TestRun_ChatSendAttach_E2E(t *testing.T) {
+	srv, shares := attachE2EServer(t, "")
+	setEnv(t, srv.URL)
+	file := filepath.Join(t.TempDir(), "report.pdf")
+	if err := os.WriteFile(file, []byte("e2e-содержимое"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	ref := strings.Repeat("0", 63) + "1"
+
+	var out, errOut bytes.Buffer
+	code := run([]string{"chat", "send", "tok-team", "--attach", file, "--reference-id", ref, "--json"},
+		&out, &errOut, strings.NewReader("подпись e2e"))
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, errOut.String())
+	}
+	var got struct {
+		Id int `json:"id"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil || got.Id != 1500 {
+		t.Errorf("stdout %q: id=%d err=%v, want 1500", out.String(), got.Id, err)
+	}
+	if n := atomic.LoadInt32(shares); n != 1 {
+		t.Errorf("запросов шаринга: %d, want 1", n)
+	}
+}
+
+// TestRun_PasswordDoesNotLeak_AttachPutRedirect — регресс безопасности
+// (спека-дельта 2026-10-09 §4.1) по образцу
+// TestRun_PasswordDoesNotLeak_CrossHostRedirect: PUT загрузки получает 302 на
+// чужой хост → upload-клиент блокирует редирект, exit 1, SECRET_MARKER нет ни
+// в stdout, ни в stderr, шаринга нет.
+func TestRun_PasswordDoesNotLeak_AttachPutRedirect(t *testing.T) {
+	const secret = "SECRET_MARKER"
+	srv, shares := attachE2EServer(t, "https://evil.example.com/leak")
+	t.Setenv("NEXTCLOUD_URL", srv.URL)
+	t.Setenv("NEXTCLOUD_LOGIN", "user")
+	t.Setenv("NEXTCLOUD_PASS", secret)
+	t.Setenv("NEXTCLOUD_TIMEOUT", "5s")
+	file := filepath.Join(t.TempDir(), "report.pdf")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	var out, errOut bytes.Buffer
+	code := run([]string{"chat", "send", "tok-team", "--attach", file}, &out, &errOut, strings.NewReader(""))
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1 (stderr=%q)", code, errOut.String())
+	}
+	if strings.Contains(out.String(), secret) || strings.Contains(errOut.String(), secret) {
+		t.Errorf("УТЕЧКА: пароль в выводе: stdout=%q stderr=%q", out.String(), errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "cross-host redirect blocked") {
+		t.Errorf("stderr %q, want «cross-host redirect blocked»", errOut.String())
+	}
+	if n := atomic.LoadInt32(shares); n != 0 {
+		t.Errorf("шаринг после заблокированного PUT: %d, want 0", n)
 	}
 }

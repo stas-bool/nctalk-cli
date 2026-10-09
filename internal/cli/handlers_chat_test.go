@@ -69,6 +69,17 @@ type chatSpyClient struct {
 	threadsResult []client.ThreadInfo
 	threadsErr    error
 
+	// SendFile-запись (chat send --attach, спека-дельта 2026-10-09)
+	gotFileToken   string
+	gotFile        client.FileUpload
+	gotFileContent string // содержимое Body, прочитанное во время вызова
+	gotFileOpts    client.SendFileOpts
+	fileCalls      int
+
+	// SendFile-результат
+	fileResult client.SendFileResult
+	fileErr    error
+
 	// FindRooms-результат (для --name)
 	findRooms []client.Room
 	findErr   error
@@ -102,6 +113,18 @@ func (m *chatSpyClient) ListThreads(_ context.Context, token string, limit int) 
 	m.gotThreadsToken = token
 	m.gotThreadsLimit = limit
 	return m.threadsResult, m.threadsErr
+}
+
+func (m *chatSpyClient) SendFile(_ context.Context, token string, f client.FileUpload, opts client.SendFileOpts) (client.SendFileResult, error) {
+	m.fileCalls++
+	m.gotFileToken = token
+	m.gotFile = f
+	m.gotFileOpts = opts
+	if f.Body != nil {
+		b, _ := io.ReadAll(f.Body)
+		m.gotFileContent = string(b)
+	}
+	return m.fileResult, m.fileErr
 }
 
 func (m *chatSpyClient) FindRooms(_ context.Context, _, _ string) ([]client.Room, error) {

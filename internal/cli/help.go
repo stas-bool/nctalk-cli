@@ -108,7 +108,7 @@ var cmdSpecs = []cmdSpec{
 	},
 	{
 		Path:        []string{"chat", "send"},
-		Short:       "отправить сообщение (stdin или --file)",
+		Short:       "отправить сообщение или файл",
 		UsageExtras: "<room>",
 		Flags: []flagSpec{
 			{Name: "--name", Value: "<имя>", Desc: "разрешить комнату по имени (вместо token)"},
@@ -118,10 +118,12 @@ var cmdSpecs = []cmdSpec{
 			{Name: "--reference-id", Value: "<uuid>", Desc: "клиентский dedup-идентификатор"},
 			{Name: "--silent", Desc: "отправить без уведомления получателей"},
 			{Name: "--file", Value: "<путь>", Desc: "взять тело из файла (иначе stdin)"},
+			{Name: "--attach", Value: "<путь>", Desc: "приложить файл; тело из stdin/--file станет подписью (необязательной)"},
 		},
 		Examples: []string{
 			"echo \"hi\" | nctalk chat send abc123",
 			"nctalk chat send --name \"Команда\" --file msg.txt",
+			"echo \"Отчёт\" | nctalk chat send abc123 --attach report.pdf",
 		},
 	},
 	{
