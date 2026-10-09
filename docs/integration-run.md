@@ -56,7 +56,7 @@ CGO_ENABLED=0 go test -tags=integration ./internal/client/... -v -run TestIntegr
 CGO_ENABLED=0 go test -tags=integration ./internal/client/... -v -run TestIntegration_GetParticipants
 ```
 
-### Мутация (отправка и правка сообщений)
+### Мутация (отправка и правка сообщений, загрузка файлов)
 
 **Только в тестовую комнату.** Двухслойная защита: флаг + token.
 
