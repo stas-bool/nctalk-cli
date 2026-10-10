@@ -4,7 +4,7 @@
 
 `nctalk` is a thin terminal CLI for [Nextcloud Talk](https://github.com/nextcloud/spreed) (Spreed) built on top of the OCS API.
 
-- 10 primitives over rooms, chat, threads, reactions and search — no business logic, composable in scripts
+- 10 primitives over rooms, chat (incl. file attachments), threads, reactions and search — no business logic, composable in scripts
 - Machine-friendly: `--json` on every command, predictable exit codes (`0`/`1`/`2`/`3`)
 - Credentials only via environment variables (app-password), never in flags or files
 - Pure Go 1.21 stdlib, CGO-free single binary
@@ -23,7 +23,7 @@ nctalk rooms list
 <a name="nctalk-ru"></a>
 # nctalk (рус.)
 
-Тонкий CLI-клиент над **Nextcloud Talk** (приложение Spreed) поверх OCS-API. Только примитивы: список/поиск чатов, участники комнаты, чтение, отправка и редактирование сообщений, треды, реакции, поиск. Основной потребитель — агент (через skill-обёртку), вторичный — человек в терминале. Бизнес-логики не содержит.
+Тонкий CLI-клиент над **Nextcloud Talk** (приложение Spreed) поверх OCS-API. Только примитивы: список/поиск чатов, участники комнаты, чтение, отправка и редактирование сообщений, отправка файлов, треды, реакции, поиск. Основной потребитель — агент (через skill-обёртку), вторичный — человек в терминале. Бизнес-логики не содержит.
 
 Написан на Go 1.21 (только стандартная библиотека).
 
@@ -47,7 +47,7 @@ CGO_ENABLED=0 go build -o nctalk ./cmd/nctalk
 | `NEXTCLOUD_URL`      | да          | База сервера, напр. `https://nc.example.org` (без userinfo и trailing `/`).  |
 | `NEXTCLOUD_LOGIN`    | да          | Логин пользователя.                                                          |
 | `NEXTCLOUD_PASS`     | да          | App-password (НЕ основной пароль аккаунта).                                  |
-| `NEXTCLOUD_TIMEOUT`  | нет         | HTTP-таймаут, по умолчанию `30s` (Go duration: `45s`, `1m`, `90s`).          |
+| `NEXTCLOUD_TIMEOUT`  | нет         | HTTP-таймаут, по умолчанию `30s` (Go duration: `45s`, `1m`, `90s`); загрузке файла (`chat send --attach`) — плюс 1 с на каждые начатые 64 КиБ. |
 
 ```sh
 export NEXTCLOUD_URL=https://nc.example.org
@@ -118,7 +118,7 @@ nctalk chat show kytxaiyc --thread 2927    # только тред 2927 (вкл�
 
 `--from`/`--since` — клиентские фильтры (в chat-API нет серверного фильтра по автору/времени). Если они заданы без `--last`, выборка идёт до cap 200 сообщений.
 
-### `chat send <room>` — отправить сообщение
+### `chat send <room>` — отправить сообщение или файл
 
 ```sh
 echo "Привет" | nctalk chat send kytxaiyc                       # тело из stdin (по умолчанию)
@@ -127,11 +127,16 @@ echo "ответ" | nctalk chat send kytxaiyc --reply-to 2927        # отве�
 echo "тихо"  | nctalk chat send kytxaiyc --silent               # без уведомления
 echo "ответ" | nctalk chat send kytxaiyc --thread 2927          # ответ в тред (без цитаты)
 echo "текст" | nctalk chat send kytxaiyc --thread-title "Тема"  # создать тред (вывод — id корня)
+nctalk chat send kytxaiyc --attach report.pdf                   # файл без подписи
+echo "Отчёт" | nctalk chat send kytxaiyc --attach report.pdf    # файл с подписью (stdin или --file)
+nctalk chat send kytxaiyc --attach build.log --thread 2927      # файл в тред
 ```
 
 Вывод: `id` отправленного сообщения.
 
 `--reply-to`/`--thread`/`--thread-title` взаимоисключаемы (конфликт → exit `1` до отправки). При создании треда вывод — id корневого сообщения = будущий id треда. `--reply-to` на сообщение треда кладёт ответ в тред с цитатой (сервер).
+
+`--attach <путь>` — отправить локальный файл, один за вызов. Файл загружается в папку вложений Talk (по умолчанию `/Talk`; занятое имя → `имя (2).ext`, существующие файлы не перезаписываются) и публикуется в чат. Текст из stdin/`--file` становится подписью — необязательной: stdin-терминал не читается, без пайпа файл уходит без подписи. `--reply-to`/`--thread` проверяются до загрузки: «не найдено» → exit `2`. Вывод — `id` сообщения с файлом; если id найти не удалось, файл всё равно отправлен: exit `0`, пустой stdout (`{"id": null}` в `--json`) и предупреждение в stderr — повторный вызов создал бы дубликат. Срок загрузки — `NEXTCLOUD_TIMEOUT` плюс 1 с на каждые начатые 64 КиБ файла.
 
 ### `chat threads <room>` — список тредов
 
@@ -178,7 +183,7 @@ nctalk search deploy --all              # собрать несколько ст
 | --- | ------------------------------------------------------------------------------ |
 | `0` | успех (в т.ч. пустой результат поиска `rooms find`/`rooms search`/`search`)    |
 | `1` | общая ошибка (сеть, авторизация 401, таймаут)                                 |
-| `2` | not found — комната/сообщение не найдены, либо 0 совпадений по `--name`        |
+| `2` | not found — комната/сообщение/тред не найдены, либо 0 совпадений по `--name`   |
 | `3` | неоднозначно — >1 совпадение по `--name`                                      |
 
 Для агентского конвейера: `rooms find`/`search` → взять `token` → далее работать с каноническим id.
@@ -194,7 +199,7 @@ CGO_ENABLED=0 go test ./...              # unit-тесты (httptest + table-dri
 CGO_ENABLED=0 go vet ./...
 ```
 
-Интеграционные тесты на боевом сервере — за build-тегом `integration`, не входят в обычный прогон; требуют env-кредов; отправка сообщения — под флагом. См. [`docs/integration-run.md`](docs/integration-run.md).
+Интеграционные тесты на боевом сервере — за build-тегом `integration`, не входят в обычный прогон; требуют env-кредов; мутационные (отправка сообщений и файлов, треды) — под флагом. См. [`docs/integration-run.md`](docs/integration-run.md).
 
 ## Архитектура
 
@@ -202,7 +207,7 @@ CGO_ENABLED=0 go vet ./...
 
 - `cmd/nctalk/main.go` — точка входа, связка слоёв.
 - `internal/config` — чтение/валидация env.
-- `internal/client` — `TalkClient` (HTTP, Basic Auth, OCS-конверт, redact).
+- `internal/client` — `TalkClient` (HTTP, Basic Auth, OCS-конверт, WebDAV-загрузка вложений, redact).
 - `internal/cli` — разбор флагов, роутинг, правило разрешения `<room>`, exit-коды.
 - `internal/render` — текстовые таблицы и JSON.
 - `testdata/` — обезличенные JSON-фикстуры ответов Talk.

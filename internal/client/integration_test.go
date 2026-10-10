@@ -19,12 +19,17 @@ package client
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"os"
+	"path"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stas-bool/nctalk-cli/internal/config"
+	"github.com/stas-bool/nctalk-cli/internal/transport"
 )
 
 // integrationTimeout — пер-тестовый потолок времени на один сетевой сценарий.
@@ -503,5 +508,161 @@ func TestIntegration_Threads(t *testing.T) {
 	}
 	if replyTh != rootId {
 		t.Errorf("ответ %d: ThreadId=%d, want %d", replyId, replyTh, rootId)
+	}
+}
+
+// TestIntegration_SendFile — мутационный e2e отправки файла (спека-дельта
+// 2026-10-09 §7): файл с подписью → id > 0, в истории имя файла и текст
+// подписи → то же имя → путь с « (2)» → файл с threadTitle → тред в
+// ListThreads → файл в этот тред несёт threadId корня → несуществующий тред →
+// 404, файл не загружен. Защита та же, что у TestIntegration_Threads:
+// NCTALK_INTEGRATION_SEND=1 + NCTALK_INTEGRATION_ROOM (новых env не вводим).
+// Загруженные файлы удаляются через WebDAV (t.Cleanup, best-effort);
+// сообщения остаются в integration-комнате («файл больше недоступен»).
+func TestIntegration_SendFile(t *testing.T) {
+	if got := os.Getenv("NCTALK_INTEGRATION_SEND"); got != "1" {
+		t.Skip("NCTALK_INTEGRATION_SEND != 1 — пропускаю мутационный тест SendFile")
+	}
+	token := os.Getenv("NCTALK_INTEGRATION_ROOM")
+	if token == "" {
+		t.Skip("NCTALK_INTEGRATION_ROOM не задан — пропускаю SendFile (нет целевой тестовой комнаты)")
+	}
+
+	c := integrationClient(t)
+	// ~40 запросов к боевому серверу (5 вызовов SendFile по 6–7 шагов + сверки)
+	// — общий срок втрое больше обычного.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*integrationTimeout)
+	defer cancel()
+
+	uid, err := c.currentUserId(ctx)
+	if err != nil {
+		t.Fatalf("currentUserId: %v", err)
+	}
+	var uploaded []string
+	t.Cleanup(func() {
+		cctx, ccancel := context.WithTimeout(context.Background(), integrationTimeout)
+		defer ccancel()
+		for _, p := range uploaded {
+			if err := c.davDelete(cctx, uid, p); err != nil {
+				t.Logf("cleanup: %s не удалён: %v", p, err)
+			}
+		}
+	})
+
+	uniq := strconv.FormatInt(time.Now().UnixNano(), 10)
+	name := "nctalk-it-" + uniq + ".txt"
+	content := "nctalk integration " + uniq + "\n"
+	file := func() FileUpload {
+		return FileUpload{Name: name, Size: int64(len(content)), Body: strings.NewReader(content)}
+	}
+
+	// 1. Файл с подписью → id > 0.
+	caption := "nctalk attach it " + uniq
+	res, err := c.SendFile(ctx, token, file(), SendFileOpts{Caption: caption})
+	if err != nil {
+		t.Fatalf("SendFile(caption): %v", err)
+	}
+	uploaded = append(uploaded, res.Path)
+	if res.MessageId <= 0 {
+		t.Fatalf("SendFile(caption): MessageId=%d LookupErr=%v, want > 0", res.MessageId, res.LookupErr)
+	}
+	t.Logf("файл %s → сообщение %d", res.Path, res.MessageId)
+
+	// 2. История: у сообщения messageParameters.file.name = имя, message = подпись.
+	msgs, err := c.GetChat(ctx, token, GetChatOpts{Limit: 50})
+	if err != nil {
+		t.Fatalf("GetChat: %v", err)
+	}
+	found := false
+	for _, m := range msgs {
+		if m.Id != res.MessageId {
+			continue
+		}
+		found = true
+		if got := m.MessageParameters["file"].Name; got != name {
+			t.Errorf("сообщение %d: file.name=%q, want %q", m.Id, got, name)
+		}
+		if m.Message != caption {
+			t.Errorf("сообщение %d: message=%q, want подпись %q", m.Id, m.Message, caption)
+		}
+	}
+	if !found {
+		t.Errorf("сообщение %d не найдено в последних 50", res.MessageId)
+	}
+
+	// 3. То же имя → « (2)» (существующий файл не перезаписан).
+	res2, err := c.SendFile(ctx, token, file(), SendFileOpts{})
+	if err != nil {
+		t.Fatalf("SendFile(повтор имени): %v", err)
+	}
+	uploaded = append(uploaded, res2.Path)
+	if want := path.Join(path.Dir(res.Path), strings.TrimSuffix(name, ".txt")+" (2).txt"); res2.Path != want {
+		t.Errorf("повтор имени: Path=%q, want %q", res2.Path, want)
+	}
+
+	// 4. threadTitle → сообщение-файл стал корнем треда: ListThreads видит тред.
+	title := "Тред с файлом " + uniq
+	root, err := c.SendFile(ctx, token, file(), SendFileOpts{ThreadTitle: title})
+	if err != nil {
+		t.Fatalf("SendFile(threadTitle): %v", err)
+	}
+	uploaded = append(uploaded, root.Path)
+	if root.MessageId <= 0 {
+		t.Fatalf("SendFile(threadTitle): MessageId=%d LookupErr=%v, want > 0", root.MessageId, root.LookupErr)
+	}
+	threads, err := c.ListThreads(ctx, token, 50)
+	if err != nil {
+		t.Fatalf("ListThreads: %v", err)
+	}
+	threadFound := false
+	for _, ti := range threads {
+		if ti.Thread.Id == root.MessageId {
+			threadFound = true
+			if ti.Thread.Title != title {
+				t.Errorf("тред %d: Title=%q, want %q", root.MessageId, ti.Thread.Title, title)
+			}
+		}
+	}
+	if !threadFound {
+		t.Errorf("тред %d не найден в threads/recent (len=%d)", root.MessageId, len(threads))
+	}
+
+	// 5. ThreadId → файл в треде: сообщение несёт threadId корня.
+	reply, err := c.SendFile(ctx, token, file(), SendFileOpts{ThreadId: root.MessageId})
+	if err != nil {
+		t.Fatalf("SendFile(threadId=%d): %v", root.MessageId, err)
+	}
+	uploaded = append(uploaded, reply.Path)
+	threadMsgs, err := c.GetChat(ctx, token, GetChatOpts{Limit: 50, ThreadId: root.MessageId})
+	if err != nil {
+		t.Fatalf("GetChat(threadId=%d): %v", root.MessageId, err)
+	}
+	replyTh := 0
+	for _, m := range threadMsgs {
+		if m.Id == reply.MessageId {
+			replyTh = m.ThreadId
+		}
+	}
+	if reply.MessageId <= 0 || replyTh != root.MessageId {
+		t.Errorf("файл в треде: MessageId=%d threadId=%d, want threadId %d", reply.MessageId, replyTh, root.MessageId)
+	}
+
+	// 6. Несуществующий тред → *OCSError{404} до загрузки: файла на сервере нет.
+	missing := "nctalk-it-missing-" + uniq + ".txt"
+	_, err = c.SendFile(ctx, token, FileUpload{Name: missing, Size: 1, Body: strings.NewReader("x")}, SendFileOpts{ThreadId: 2147483647})
+	var oe *OCSError
+	if !errors.As(err, &oe) || oe.Code != http.StatusNotFound {
+		t.Errorf("несуществующий тред: err=%v, want *OCSError{404}", err)
+	}
+	folder, err := c.attachmentFolder(ctx)
+	if err != nil {
+		t.Fatalf("attachmentFolder: %v", err)
+	}
+	head, err := transport.DoDAV(ctx, c.doer, c.auth, http.MethodHead, davFilesPath(uid, path.Join(folder, missing)), nil, nil, 0)
+	if err != nil {
+		t.Fatalf("HEAD: %v", err)
+	}
+	if head.StatusCode != http.StatusNotFound {
+		t.Errorf("файл %s загружен вопреки 404 pre-check (HEAD %d)", missing, head.StatusCode)
 	}
 }

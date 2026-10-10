@@ -1,0 +1,49 @@
+{
+  "ocs": {
+    "meta": {
+      "status": "ok",
+      "statuscode": 200,
+      "message": "OK"
+    },
+    "data": [
+      {
+        "id": 1501,
+        "token": "tok-team",
+        "actorType": "users",
+        "actorId": "anna.s",
+        "actorDisplayName": "Анна Смирнова",
+        "timestamp": 1791563096,
+        "message": "nctalk attach fixture — подпись",
+        "messageParameters": {
+          "actor": {
+            "type": "user",
+            "id": "anna.s",
+            "name": "Анна Смирнова",
+            "mention-id": "anna.s"
+          },
+          "file": {
+            "type": "file",
+            "id": "2002",
+            "name": "nctalk-fixture-caption.txt",
+            "size": "30",
+            "path": "Talk/nctalk-fixture-caption.txt",
+            "link": "https://nc.example.org/f/2002",
+            "etag": "b4862594906dede8e20b973a4963366d",
+            "permissions": "27",
+            "mimetype": "text/plain",
+            "preview-available": "yes",
+            "hide-download": "no"
+          }
+        },
+        "systemMessage": "",
+        "messageType": "comment",
+        "isReplyable": true,
+        "referenceId": "0000000000000000000000000000000000000000000000000000000000000002",
+        "reactions": {},
+        "expirationTimestamp": 0,
+        "markdown": true,
+        "threadId": 1501
+      }
+    ]
+  }
+}

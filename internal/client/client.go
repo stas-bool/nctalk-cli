@@ -30,26 +30,38 @@ import (
 // TalkClient — HTTP-клиент Nextcloud Talk.
 //
 // Поля unexported: cfg (креды/таймаут — источник правды о конфигурации),
-// doer (транспорт, подменяется в тестах), auth (распарсенный BaseURL + креды
-// в формате, готовом для transport.DoOCS — без timeout, он выставлен на
-// http.Client в NewTalkClient).
+// doer (транспорт, подменяется в тестах), uploadDoer (транспорт PUT загрузки
+// файла — без общего таймаута, срок задаёт контекст; спека-дельта 2026-10-09
+// §4.2), auth (распарсенный BaseURL + креды в формате, готовом для
+// transport.DoOCS — без timeout, он выставлен на http.Client в NewTalkClient).
 type TalkClient struct {
-	cfg  config.Config
-	doer transport.Doer
-	auth transport.Auth
+	cfg        config.Config
+	doer       transport.Doer
+	uploadDoer transport.Doer
+	auth       transport.Auth
 }
 
 // NewTalkClient — production-конструктор: создаёт http.Client на базе
 // http.DefaultTransport (пулы соединений, прокси из env) с таймаутом из cfg и
 // same-host redirect-политикой (transport.SameHostRedirectPolicy блокирует
 // cross-host auth-leak и https→http downgrade).
+//
+// Для PUT загрузки файла — отдельный http.Client с тем же Transport и
+// CheckRedirect, но БЕЗ Timeout (спека-дельта 2026-10-09 §4.2):
+// http.Client.Timeout покрывает и передачу тела, большой файл на медленном
+// канале не успел бы загрузиться. Срок PUT задаёт контекст (uploadTimeout).
 func NewTalkClient(cfg config.Config) *TalkClient {
 	hc := &http.Client{
 		Transport:     http.DefaultTransport,
 		Timeout:       cfg.Timeout,
 		CheckRedirect: transport.SameHostRedirectPolicy,
 	}
-	return NewTalkClientWithDoer(cfg, hc)
+	c := NewTalkClientWithDoer(cfg, hc)
+	c.uploadDoer = &http.Client{
+		Transport:     hc.Transport,
+		CheckRedirect: hc.CheckRedirect,
+	}
+	return c
 }
 
 // NewTalkClientWithDoer — конструктор для тестов: принимает любой transport.Doer.
@@ -67,7 +79,9 @@ func NewTalkClientWithDoer(cfg config.Config, doer transport.Doer) *TalkClient {
 	return &TalkClient{
 		cfg:  cfg,
 		doer: doer,
-		auth: transport.Auth{BaseURL: u, Login: cfg.Login, Password: cfg.Password},
+		// Тесты подменяют один doer — им же идёт и загрузка (§4.2).
+		uploadDoer: doer,
+		auth:       transport.Auth{BaseURL: u, Login: cfg.Login, Password: cfg.Password},
 	}
 }
 

@@ -62,6 +62,15 @@ func NewMessageIDJSON(w io.Writer, id int) error {
 	}{Id: id})
 }
 
+// NewMessageIDNullJSON выводит {"id": null} — файл отправлен, но id сообщения
+// не определён (спека-дельта 2026-10-09 §2.5: поиск по referenceId промахнулся).
+// Ключ id присутствует всегда: потребитель различает «нет id» и «нет ответа».
+func NewMessageIDNullJSON(w io.Writer) error {
+	return writeJSON(w, struct {
+		Id *int `json:"id"`
+	}{})
+}
+
 // ParticipantsJSON выводит []Participant как JSON-массив (спека-дельта
 // 2026-09-09 §2, --json). Сырой ответ API не проксируется — каноническая
 // модель, json-теги структур client определяют имена полей.

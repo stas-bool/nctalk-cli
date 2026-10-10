@@ -355,3 +355,49 @@ func mustParseURL(s string) *url.URL {
 	}
 	return u
 }
+
+// TestNewTalkClient_UploadDoer — production-конструктор: PUT загрузки идёт
+// через отдельный *http.Client без Timeout (срок задаёт контекст, спека-дельта
+// 2026-10-09 §4.2) с тем же Transport и той же redirect-политикой; обычный
+// doer сохраняет таймаут cfg.
+func TestNewTalkClient_UploadDoer(t *testing.T) {
+	c := NewTalkClient(testCfg("https://nc.example.org"))
+	hc, ok := c.doer.(*http.Client)
+	if !ok {
+		t.Fatalf("doer: got %T, want *http.Client", c.doer)
+	}
+	uc, ok := c.uploadDoer.(*http.Client)
+	if !ok {
+		t.Fatalf("uploadDoer: got %T, want *http.Client", c.uploadDoer)
+	}
+	if uc == hc {
+		t.Fatal("uploadDoer совпадает с doer — нужен отдельный клиент без Timeout")
+	}
+	if hc.Timeout != 5*time.Second {
+		t.Errorf("doer.Timeout: got %v, want 5s (cfg.Timeout)", hc.Timeout)
+	}
+	if uc.Timeout != 0 {
+		t.Errorf("uploadDoer.Timeout: got %v, want 0 (срок — из контекста)", uc.Timeout)
+	}
+	if uc.Transport != hc.Transport {
+		t.Error("uploadDoer.Transport отличается от doer.Transport (нужен общий пул соединений)")
+	}
+	if uc.CheckRedirect == nil {
+		t.Fatal("uploadDoer.CheckRedirect = nil — cross-host редирект унёс бы пароль")
+	}
+	err := uc.CheckRedirect(&http.Request{URL: mustParseURL("https://evil.example.com/x")},
+		[]*http.Request{{URL: mustParseURL("https://nc.example.org/x")}})
+	if err == nil || !strings.Contains(err.Error(), "cross-host redirect blocked") {
+		t.Errorf("uploadDoer.CheckRedirect(cross-host): got %v, want cross-host redirect blocked", err)
+	}
+}
+
+// TestNewTalkClientWithDoer_UploadDoerIsDoer — тестовый конструктор: загрузка
+// идёт через тот же подменённый doer (спека-дельта 2026-10-09 §4.2).
+func TestNewTalkClientWithDoer_UploadDoerIsDoer(t *testing.T) {
+	d := &http.Client{}
+	c := NewTalkClientWithDoer(testCfg("https://nc.example.org"), d)
+	if c.uploadDoer != transport.Doer(d) {
+		t.Errorf("uploadDoer: got %v, want переданный doer", c.uploadDoer)
+	}
+}

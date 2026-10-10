@@ -298,6 +298,23 @@ func TestNewMessageIDJSON(t *testing.T) {
 	}
 }
 
+// TestNewMessageIDNullJSON — {"id": null}: ключ есть, значение null
+// (спека-дельта 2026-10-09 §2.5).
+func TestNewMessageIDNullJSON(t *testing.T) {
+	var buf bytes.Buffer
+	if err := NewMessageIDNullJSON(&buf); err != nil {
+		t.Fatalf("NewMessageIDNullJSON: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("Unmarshal: %v\n%s", err, buf.String())
+	}
+	v, ok := got["id"]
+	if !ok || v != nil || len(got) != 1 {
+		t.Fatalf("ожидалось ровно {\"id\": null}, получено %s", buf.String())
+	}
+}
+
 // ----- Candidates -----
 
 func TestCandidates(t *testing.T) {

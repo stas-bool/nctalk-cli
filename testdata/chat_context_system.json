@@ -1,0 +1,86 @@
+{
+  "ocs": {
+    "meta": {
+      "status": "ok",
+      "statuscode": 200,
+      "message": "OK"
+    },
+    "data": [
+      {
+        "id": 1503,
+        "token": "tok-team",
+        "actorType": "users",
+        "actorId": "anna.s",
+        "actorDisplayName": "Анна Смирнова",
+        "timestamp": 1791563097,
+        "message": "You created thread {title}",
+        "messageParameters": {
+          "actor": {
+            "type": "user",
+            "id": "anna.s",
+            "name": "Анна Смирнова",
+            "mention-id": "anna.s"
+          },
+          "title": {
+            "type": "highlight",
+            "id": "thread/1502",
+            "name": "Фикстурный тред с файлом"
+          }
+        },
+        "systemMessage": "thread_created",
+        "messageType": "system",
+        "isReplyable": false,
+        "referenceId": "0000000000000000000000000000000000000000000000000000000000000003",
+        "reactions": {},
+        "expirationTimestamp": 0,
+        "markdown": false,
+        "threadId": 1502,
+        "isThread": true,
+        "threadTitle": "Фикстурный тред с файлом",
+        "threadReplies": 0,
+        "silent": true,
+        "parent": {
+          "id": 1502,
+          "token": "tok-team",
+          "actorType": "users",
+          "actorId": "anna.s",
+          "actorDisplayName": "Анна Смирнова",
+          "timestamp": 1791563097,
+          "message": "nctalk attach fixture — тред",
+          "messageParameters": {
+            "actor": {
+              "type": "user",
+              "id": "anna.s",
+              "name": "Анна Смирнова",
+              "mention-id": "anna.s"
+            },
+            "file": {
+              "type": "file",
+              "id": "2003",
+              "name": "nctalk-fixture-thread.txt",
+              "size": "29",
+              "path": "Talk/nctalk-fixture-thread.txt",
+              "link": "https://nc.example.org/f/2003",
+              "etag": "c65c18b3a34799d49148fafaa2303887",
+              "permissions": "27",
+              "mimetype": "text/plain",
+              "preview-available": "yes",
+              "hide-download": "no"
+            }
+          },
+          "systemMessage": "",
+          "messageType": "comment",
+          "isReplyable": true,
+          "referenceId": "0000000000000000000000000000000000000000000000000000000000000003",
+          "reactions": {},
+          "expirationTimestamp": 0,
+          "markdown": true,
+          "threadId": 1502,
+          "isThread": true,
+          "threadTitle": "Фикстурный тред с файлом",
+          "threadReplies": 0
+        }
+      }
+    ]
+  }
+}

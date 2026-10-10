@@ -61,6 +61,9 @@ func (m *reactionsSpyClient) GetParticipants(_ context.Context, _ string) ([]cli
 func (m *reactionsSpyClient) ListThreads(_ context.Context, _ string, _ int) ([]client.ThreadInfo, error) {
 	return nil, errMock
 }
+func (m *reactionsSpyClient) SendFile(_ context.Context, _ string, _ client.FileUpload, _ client.SendFileOpts) (client.SendFileResult, error) {
+	return client.SendFileResult{}, errMock
+}
 func (m *reactionsSpyClient) SearchMessages(_ context.Context, _ string, _ client.SearchMessagesOpts) ([]client.MessageResult, error) {
 	return nil, errMock
 }

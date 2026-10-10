@@ -1,9 +1,9 @@
 package cli
 
 // handlers_chat.go — реализации команд `chat show` (Task 4.3), `chat send`
-// (Task 4.4, пока stub), `chat threads` (спека-дельта 2026-09-29) и
-// `chat edit` (дизайн 2026-09-08). Сигнатуры handler-функций фиксированы
-// схемой роутинга cli.go (handlerFn).
+// (Task 4.4, пока stub; `--attach` — спека-дельта 2026-10-09), `chat threads`
+// (спека-дельта 2026-09-29) и `chat edit` (дизайн 2026-09-08). Сигнатуры
+// handler-функций фиксированы схемой роутинга cli.go (handlerFn).
 //
 // Разбор флагов — ручной (scan args), без flag-пакета (спека §3). Глобальный
 // --json уже вынесен в jsonOut слоем Run (cli.go extractJSON).
@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -273,13 +274,33 @@ func parseSinceAt(s string, now time.Time) (int64, error) {
 // 2026-09-08 §2). Возвращает готовый текст или ошибку с префиксом cmd:
 //   - --file <path> → os.ReadFile, файл читается целиком;
 //   - иначе → io.ReadAll(deps.Stdin), при deps.Stdin==nil fallback на os.Stdin
-//     (production-путь: main не проставляет Stdin; тесты кладут свой io.Reader);
+//     (main передаёт os.Stdin; nil — у тестов и прямых вызовов handler-а);
 //   - срезается РОВНО ОДИН завершающий перевод строки (\n или \r\n):
 //     `echo "hi" | nctalk chat send` отправил бы "hi\n" (с сохранением сервером
 //     \n); многострочные тела (с \n внутри) валидны — пачку не тримим;
 //   - пустое тело (пустой stdin/файл или только перевод строки) — ошибка
 //     пользователя, не сети; клиент не зовём.
 func readMessageBody(deps Deps, fileFlag, cmd string) (string, error) {
+	return readBody(deps, fileFlag, cmd, false)
+}
+
+// readCaption — подпись к файлу `chat send --attach` (спека-дельта 2026-10-09
+// §2.2): источник и трим — как у readMessageBody, но подпись необязательна
+// (пусто → файл без подписи), а stdin-терминал не читается: иначе
+// `nctalk chat send x --attach f` в терминале ждал бы Ctrl-D.
+func readCaption(deps Deps, fileFlag, cmd string) (string, error) {
+	return readBody(deps, fileFlag, cmd, true)
+}
+
+// readBody — общий блок readMessageBody/readCaption. optional=true: stdin —
+// символьное устройство (терминал, /dev/null) → не читается, результат
+// пуст; пустой результат — не ошибка. Правило терминала проверяется на
+// ИТОГОВОМ reader-е — после fallback nil → os.Stdin.
+func readBody(deps Deps, fileFlag, cmd string, optional bool) (string, error) {
+	what := "тело"
+	if optional {
+		what = "подпись"
+	}
 	var body []byte
 	var readErr error
 	if fileFlag != "" {
@@ -289,10 +310,13 @@ func readMessageBody(deps Deps, fileFlag, cmd string) (string, error) {
 		if stdin == nil {
 			stdin = os.Stdin
 		}
+		if optional && isCharDevice(stdin) {
+			return "", nil
+		}
 		body, readErr = io.ReadAll(stdin)
 	}
 	if readErr != nil {
-		return "", fmt.Errorf("%s: не удалось прочитать тело: %w", cmd, readErr)
+		return "", fmt.Errorf("%s: не удалось прочитать %s: %w", cmd, what, readErr)
 	}
 	text := string(body)
 	if strings.HasSuffix(text, "\r\n") {
@@ -300,10 +324,25 @@ func readMessageBody(deps Deps, fileFlag, cmd string) (string, error) {
 	} else if strings.HasSuffix(text, "\n") {
 		text = text[:len(text)-1]
 	}
-	if len(text) == 0 {
+	if len(text) == 0 && !optional {
 		return "", fmt.Errorf("%s: тело сообщения пусто", cmd)
 	}
 	return text, nil
+}
+
+// isCharDevice — r это *os.File на символьном устройстве (терминал,
+// /dev/null). Не *os.File (буфер тестов, strings.Reader) или ошибка Stat →
+// false: такой источник читается.
+func isCharDevice(r io.Reader) bool {
+	f, ok := r.(*os.File)
+	if !ok {
+		return false
+	}
+	st, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return st.Mode()&os.ModeCharDevice != 0
 }
 
 // chatSendHandler — реализация `chat send <room>` (спека §6 chat send).
@@ -312,7 +351,9 @@ func readMessageBody(deps Deps, fileFlag, cmd string) (string, error) {
 // (по умолчанию) либо из файла через --file <path>. Опциональные параметры:
 //   - --reply-to <int> — id сообщения, на которое это ответ;
 //   - --silent — отправить без уведомления получателей;
-//   - --reference-id <uuid> — клиентский dedup-идентификатор.
+//   - --reference-id <uuid> — клиентский dedup-идентификатор;
+//   - --attach <путь> — отправить файл (спека-дельта 2026-10-09): тело из
+//     stdin/--file становится необязательной подписью, ветка — chatSendAttach.
 //
 // Источник тела:
 //   - --file <path> → os.ReadFile(path), файл читается целиком;
@@ -344,6 +385,8 @@ func chatSendHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 		threadSet       bool
 		threadTitle     string
 		threadTitleSet  bool
+		attachPath      string
+		attachSet       bool
 	)
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -404,6 +447,22 @@ func chatSendHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 			i++
 		case strings.HasPrefix(a, "--reference-id="):
 			referenceId = strings.TrimPrefix(a, "--reference-id=")
+		case a == "--attach":
+			if i+1 >= len(args) {
+				return ExitError{Code: ExitGeneric, Err: errors.New("chat send: --attach требует значение (путь к файлу)")}
+			}
+			if attachSet {
+				return ExitError{Code: ExitGeneric, Err: errAttachRepeated}
+			}
+			attachPath = args[i+1]
+			attachSet = true
+			i++
+		case strings.HasPrefix(a, "--attach="):
+			if attachSet {
+				return ExitError{Code: ExitGeneric, Err: errAttachRepeated}
+			}
+			attachPath = strings.TrimPrefix(a, "--attach=")
+			attachSet = true
 		case strings.HasPrefix(a, "--"):
 			return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat send: неизвестный флаг %q", a)}
 		default:
@@ -466,6 +525,26 @@ func chatSendHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 		return ExitError{Code: ExitGeneric, Err: errors.New("chat send: --thread-title не может быть пустым (сервер безымянные треды не создаёт)")}
 	}
 
+	// 2.7. --attach (спека-дельта 2026-10-09 §2.1): пустой путь → exit 1 ДО
+	// сети. Ветка вложения — chatSendAttach: подпись вместо тела, SendFile
+	// вместо SendMessage; прочие флаги и guard-ы выше — общие.
+	if attachSet {
+		if attachPath == "" {
+			return ExitError{Code: ExitGeneric, Err: errors.New("chat send: --attach требует непустой путь к файлу")}
+		}
+		var positional string
+		if len(positionals) > 0 {
+			positional = positionals[0]
+		}
+		return chatSendAttach(ctx, deps, attachPath, positional, nameFlag, fileFlag, client.SendFileOpts{
+			ReplyTo:     replyTo,
+			ThreadId:    threadId,
+			ThreadTitle: threadTitle,
+			Silent:      silentFlag,
+			ReferenceId: referenceId,
+		}, jsonOut)
+	}
+
 	// 3. Чтение тела ДО ResolveRoom: пустое тело отсекается без единого
 	// сетевого вызова (ни FindRooms, ни SendMessage) — это явно требует спека
 	// и DoD Task 4.4. Общий блок с chat edit — readMessageBody.
@@ -512,6 +591,98 @@ func chatSendHandler(ctx context.Context, deps Deps, args []string, jsonOut bool
 		}
 	} else {
 		if err := render.NewMessageID(deps.Stdout, id); err != nil {
+			return ExitError{Code: ExitGeneric, Err: err}
+		}
+	}
+	return ExitError{Code: ExitOK}
+}
+
+// errAttachRepeated — повтор --attach (спека-дельта 2026-10-09 §2.1): молча
+// брать последний нельзя — повтор означает, что ждали несколько файлов.
+var errAttachRepeated = errors.New("chat send: --attach можно указать только один раз (один файл за вызов)")
+
+// chatSendAttach — ветка `chat send --attach <путь>` (спека-дельта 2026-10-09
+// §2, §6). Порядок «всё локальное до сети»: файл → подпись → ResolveRoom →
+// SendFile → вывод; файл закрывается по завершении.
+//
+// os.Stat — ДО os.Open: open(2) FIFO без писателя блокируется навсегда, так
+// что не-обычный файл отсекается до открытия. Повторный Stat открытого
+// дескриптора берёт тип и размер у того, что будет прочитано, и ловит подмену
+// пути на не-обычный файл между Stat и Open. Подмену на FIFO без писателя в
+// этом окне (ln -sf) он не закрывает: open(2) заблокируется раньше. Окно —
+// микросекунды, путь задаёт сам пользователь, выход — Ctrl-C; O_NONBLOCK
+// закрыл бы окно ценой unix-only кода — не оправдано (спека §2.3, уточнено по
+// code-review 2026-10-10).
+func chatSendAttach(ctx context.Context, deps Deps, attachPath, positional, nameFlag, fileFlag string, opts client.SendFileOpts, jsonOut bool) ExitError {
+	// 1. Файл: существует, обычный, читается (§2.3).
+	st, err := os.Stat(attachPath)
+	if err != nil {
+		return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat send: --attach: %w", err)}
+	}
+	if !st.Mode().IsRegular() {
+		return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat send: --attach: %s — не обычный файл", attachPath)}
+	}
+	fh, err := os.Open(attachPath)
+	if err != nil {
+		return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat send: --attach: %w", err)}
+	}
+	defer fh.Close()
+	if st, err = fh.Stat(); err != nil {
+		return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat send: --attach: %w", err)}
+	}
+	if !st.Mode().IsRegular() {
+		return ExitError{Code: ExitGeneric, Err: fmt.Errorf("chat send: --attach: %s — не обычный файл", attachPath)}
+	}
+
+	// 2. Подпись (§2.2): stdin или --file, необязательная.
+	caption, err := readCaption(deps, fileFlag, "chat send")
+	if err != nil {
+		return ExitError{Code: ExitGeneric, Err: err}
+	}
+	opts.Caption = caption
+
+	// 3. Разрешение <room> — как у текстового chat send.
+	token, err := ResolveRoom(ctx, deps.Client, positional, nameFlag, deps.Stderr)
+	if err != nil {
+		var ee ExitError
+		if errors.As(err, &ee) {
+			return ee
+		}
+		return ExitError{Code: ExitGeneric, Err: err}
+	}
+
+	// 4. Загрузка и публикация. Имя на сервере — базовое имя локального пути.
+	res, err := deps.Client.SendFile(ctx, token, client.FileUpload{
+		Name: filepath.Base(attachPath),
+		Size: st.Size(),
+		Body: fh,
+	}, opts)
+	if err != nil {
+		// «Не найдено» (комната, тред, сообщение) — *OCSError{404} → exit 2.
+		return exitFromClientErr(err)
+	}
+
+	// 5. Вывод (§2.5). id не определён — файл УЖЕ отправлен: exit 0 и
+	// предупреждение в stderr; повтор вызова создал бы дубликат.
+	if res.MessageId == 0 {
+		reason := "причина не указана"
+		if res.LookupErr != nil {
+			reason = res.LookupErr.Error()
+		}
+		fmt.Fprintf(deps.Stderr, "chat send: файл отправлен, но id сообщения не определён: %s\n", reason)
+		if jsonOut {
+			if err := render.NewMessageIDNullJSON(deps.Stdout); err != nil {
+				return ExitError{Code: ExitGeneric, Err: err}
+			}
+		}
+		return ExitError{Code: ExitOK}
+	}
+	if jsonOut {
+		if err := render.NewMessageIDJSON(deps.Stdout, res.MessageId); err != nil {
+			return ExitError{Code: ExitGeneric, Err: err}
+		}
+	} else {
+		if err := render.NewMessageID(deps.Stdout, res.MessageId); err != nil {
 			return ExitError{Code: ExitGeneric, Err: err}
 		}
 	}

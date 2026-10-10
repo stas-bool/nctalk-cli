@@ -63,7 +63,7 @@ func TestCmdSpecs_FlagsExactly(t *testing.T) {
 		"rooms participants": {"--name"},
 		"chat threads":       {"--name", "--last"},
 		"chat show":          {"--name", "--last", "--from", "--since", "--system", "--thread"},
-		"chat send":          {"--name", "--reply-to", "--reference-id", "--silent", "--file", "--thread", "--thread-title"},
+		"chat send":          {"--name", "--reply-to", "--reference-id", "--silent", "--file", "--thread", "--thread-title", "--attach"},
 		"chat edit":          {"--name", "--file"},
 		"reactions get":      {"--name"},
 		"search":             {"--from", "--limit", "--all"},
@@ -177,7 +177,7 @@ func TestComputePath(t *testing.T) {
 func TestIsValueFlag(t *testing.T) {
 	valueFlags := []string{"--name", "--type", "--last", "--from", "--since",
 		"--user", "--file", "--reply-to", "--reference-id", "--limit",
-		"--thread", "--thread-title"}
+		"--thread", "--thread-title", "--attach"}
 	for _, f := range valueFlags {
 		if !isValueFlag(f) {
 			t.Errorf("isValueFlag(%q): want true, got false", f)
