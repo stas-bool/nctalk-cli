@@ -45,6 +45,6 @@ go.work.sum
 pw-webrtc.mjs
 .playwright-mcp/
 
-# Local session-state (управляется через /checkpoint, не версионится в git)
-docs/session-state/
+# Документы (спеки, планы, ревью, session-state) — локальные, в публичный репозиторий не идут
+docs/
 
