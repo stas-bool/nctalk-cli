@@ -199,11 +199,11 @@ CGO_ENABLED=0 go test ./...              # unit-тесты (httptest + table-dri
 CGO_ENABLED=0 go vet ./...
 ```
 
-Интеграционные тесты на боевом сервере — за build-тегом `integration`, не входят в обычный прогон; требуют env-кредов; мутационные (отправка сообщений и файлов, треды) — под флагом. См. [`docs/integration-run.md`](docs/integration-run.md).
+Интеграционные тесты на боевом сервере — за build-тегом `integration`, не входят в обычный прогон; требуют env-кредов; мутационные (отправка сообщений и файлов, треды) — под флагом.
 
 ## Архитектура
 
-Четыре слоя: `config` (env) → `client` (ядро над OCS-API) → `cli` (роутинг, exit-коды) → `render` (вывод). Только стандартная библиотека. Подробности — в [`CLAUDE.md`](CLAUDE.md) и спеке `docs/superpowers/specs/`.
+Четыре слоя: `config` (env) → `client` (ядро над OCS-API) → `cli` (роутинг, exit-коды) → `render` (вывод). Только стандартная библиотека. Подробности — в [`CLAUDE.md`](CLAUDE.md).
 
 - `cmd/nctalk/main.go` — точка входа, связка слоёв.
 - `internal/config` — чтение/валидация env.
