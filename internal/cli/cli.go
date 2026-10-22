@@ -80,6 +80,9 @@ var routes = map[string]map[string]handlerFn{
 	"reactions": {
 		"get": reactionsGetHandler,
 	},
+	"users": {
+		"show": usersShowHandler,
+	},
 }
 
 // searchHandlerFn — handler для `search` (спека §6), вынесен в переменную:
@@ -110,7 +113,7 @@ func Run(args []string, deps Deps) int {
 	args, jsonOut := extractJSON(args)
 
 	if len(args) == 0 {
-		fmt.Fprintln(deps.Stderr, "nctalk: неизвестная команда; ожидается одна из: rooms, chat, reactions, search")
+		fmt.Fprintln(deps.Stderr, "nctalk: неизвестная команда; ожидается одна из: rooms, chat, reactions, users, search")
 		return ExitGeneric
 	}
 
@@ -122,7 +125,7 @@ func Run(args []string, deps Deps) int {
 		return invokeHandler(deps, searchHandlerFn, ctx, rest, jsonOut)
 	}
 
-	// rooms/chat/reactions — двухуровневый разбор: args[0]=resource, args[1]=verb.
+	// rooms/chat/reactions/users — двухуровневый разбор: args[0]=resource, args[1]=verb.
 	if len(rest) == 0 {
 		fmt.Fprintf(deps.Stderr, "nctalk %s: ожидается verb (list/find/search/participants/show/send/threads/edit/get)\n", resource)
 		return ExitGeneric

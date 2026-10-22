@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// TestCmdSpecs_CoverAllRoutes — cmdSpecs обязана содержать ровно те же 10 команд,
+// TestCmdSpecs_CoverAllRoutes — cmdSpecs обязана содержать ровно те же 11 команд,
 // что и таблица routes + searchHandlerFn (спека §6 anti-drift на уровне маршрутов).
 // Защита от drift: если добавить команду в routes и забыть в cmdSpecs (или наоборот) — тест падает.
 func TestCmdSpecs_CoverAllRoutes(t *testing.T) {
@@ -34,12 +34,13 @@ func TestCmdSpecs_CoverAllRoutes(t *testing.T) {
 
 // TestCmdSpecs_OrderMatchesHelpOrder — порядок cmdSpecs соответствует
 // нумерации в общем help (спека §3): rooms list, rooms find, rooms search,
-// chat show, chat send, reactions get, search. drift в порядке → тест падает.
+// chat show, chat send, reactions get, users show, search. drift в порядке → тест падает.
 func TestCmdSpecs_OrderMatchesHelpOrder(t *testing.T) {
 	want := []string{
 		"rooms list", "rooms find", "rooms search", "rooms participants",
 		"chat show", "chat send", "chat threads", "chat edit",
 		"reactions get",
+		"users show",
 		"search",
 	}
 	if len(cmdSpecs) != len(want) {
@@ -66,6 +67,7 @@ func TestCmdSpecs_FlagsExactly(t *testing.T) {
 		"chat send":          {"--name", "--reply-to", "--reference-id", "--silent", "--file", "--thread", "--thread-title", "--attach"},
 		"chat edit":          {"--name", "--file"},
 		"reactions get":      {"--name"},
+		"users show":         {},
 		"search":             {"--from", "--limit", "--all"},
 	}
 	for i, cs := range cmdSpecs {
@@ -209,6 +211,8 @@ func TestHandleHelp_Routing(t *testing.T) {
 		{"h flag alone", []string{"-h"}, 0, "stdout"},
 		{"help word alone", []string{"help"}, 0, "stdout"},
 		{"help word resource", []string{"help", "rooms"}, 0, "stdout"},
+		{"help word resource users", []string{"help", "users"}, 0, "stdout"},
+		{"cmd users show with help flag", []string{"users", "show", "--help"}, 0, "stdout"},
 		{"help word detailed", []string{"help", "rooms", "list"}, 0, "stdout"},
 		{"help word leaf", []string{"help", "search"}, 0, "stdout"},
 		{"cmd with help flag", []string{"rooms", "list", "--help"}, 0, "stdout"},
@@ -312,7 +316,7 @@ func TestHandleHelp_GeneralContent(t *testing.T) {
 		"Использование:",
 		"rooms list", "rooms find", "rooms search",
 		"chat show", "chat send",
-		"reactions get", "search",
+		"reactions get", "users show", "search",
 		"NEXTCLOUD_URL", "NEXTCLOUD_LOGIN", "NEXTCLOUD_PASS", "NEXTCLOUD_TIMEOUT",
 		"Exit-коды",
 	} {
@@ -322,7 +326,7 @@ func TestHandleHelp_GeneralContent(t *testing.T) {
 	}
 }
 
-// TestHandleHelp_DetailedContent — для каждой из 10 команд проверяем: имя команды,
+// TestHandleHelp_DetailedContent — для каждой из 11 команд проверяем: имя команды,
 // заголовок, usage, каждый флаг, описание флага, --json, примеры.
 func TestHandleHelp_DetailedContent(t *testing.T) {
 	for _, cs := range cmdSpecs {
@@ -588,6 +592,8 @@ func buildPositionalArgs(cs cmdSpec) []string {
 		return []string{"tok123", "1"}
 	case "reactions get":
 		return []string{"tok123", "1"}
+	case "users show":
+		return []string{"ivan.p"}
 	case "search":
 		return []string{"term"}
 	default:

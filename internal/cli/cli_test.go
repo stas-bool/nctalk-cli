@@ -71,7 +71,7 @@ func newTestDeps() Deps {
 	}
 }
 
-// TestRunRoutesAllStubs — все 10 команд доходят до своих stub-handler'ов и
+// TestRunRoutesAllStubs — все 11 команд доходят до своих stub-handler'ов и
 // возвращают ExitGeneric (1). Проверяет базовую маршрутизацию по таблице routes
 // и special-case search.
 func TestRunRoutesAllStubs(t *testing.T) {
@@ -88,6 +88,7 @@ func TestRunRoutesAllStubs(t *testing.T) {
 		{"chat threads", []string{"chat", "threads", "tok"}},
 		{"chat edit", []string{"chat", "edit", "tok", "1", "--text", "hi"}},
 		{"reactions get", []string{"reactions", "get", "tok", "1"}},
+		{"users show", []string{"users", "show", "ivan.p"}},
 		{"search (special-case)", []string{"search", "foo"}},
 	}
 	for _, tc := range cases {
@@ -173,6 +174,7 @@ func TestRunRoutesToCorrectHandler(t *testing.T) {
 		{"chat/threads", []string{"chat", "threads", "TOK123"}, []string{"TOK123"}, ""},
 		{"chat/edit", []string{"chat", "edit", "TOK123", "42"}, []string{"TOK123", "42"}, ""},
 		{"reactions/get", []string{"reactions", "get", "TOK123", "42"}, []string{"TOK123", "42"}, ""},
+		{"users/show", []string{"users", "show", "ivan.p"}, []string{"ivan.p"}, ""},
 		{"search", []string{"search", "baz"}, []string{"baz"}, ""}, // special-case: rest передаётся целиком
 	}
 	for _, tc := range cases {
@@ -301,10 +303,10 @@ func TestRunUnknownVerb(t *testing.T) {
 	}
 }
 
-// TestRunMissingVerb — известный resource без verb → exit 1 (rooms/chat/reactions
+// TestRunMissingVerb — известный resource без verb → exit 1 (rooms/chat/reactions/users
 // требуют verb).
 func TestRunMissingVerb(t *testing.T) {
-	for _, resource := range []string{"rooms", "chat", "reactions"} {
+	for _, resource := range []string{"rooms", "chat", "reactions", "users"} {
 		t.Run(resource, func(t *testing.T) {
 			deps := newTestDeps()
 			code := Run([]string{resource}, deps)

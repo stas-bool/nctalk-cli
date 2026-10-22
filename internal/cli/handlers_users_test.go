@@ -246,3 +246,21 @@ func TestUsersShowHandlerErrors(t *testing.T) {
 		})
 	}
 }
+
+// TestUsersShowViaRun — `users show ivan.p --json` через Run: роутинг,
+// вырезанный глобальный --json, handler, JSON-вывод.
+func TestUsersShowViaRun(t *testing.T) {
+	spy := &usersSpyClient{profileResult: profileFixture()}
+	deps := newUsersDeps(spy)
+
+	code := Run([]string{"users", "show", "ivan.p", "--json"}, deps)
+	if code != ExitOK {
+		t.Fatalf("Run code: got %d, want %d (stderr=%q)", code, ExitOK, deps.Stderr.(*bytes.Buffer).String())
+	}
+	if len(spy.profileCalls) != 1 || spy.profileCalls[0] != "ivan.p" {
+		t.Fatalf("GetProfile: got %v, want [ivan.p]", spy.profileCalls)
+	}
+	if out := deps.Stdout.(*bytes.Buffer).String(); !strings.Contains(out, `"userId": "ivan.p"`) {
+		t.Fatalf("stdout: ожидается JSON профиля; got %q", out)
+	}
+}
