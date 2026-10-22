@@ -37,7 +37,8 @@ type Profile struct {
 }
 
 // ProfileContact — контакт из actions профиля (спека-дельта §2): служебные
-// talk/talk-call отброшены, префиксы mailto:/tel: срезаны.
+// talk/talk-call отброшены, префиксы mailto:/tel: срезаны; Type и Value
+// непустые после strings.TrimSpace (текст и --json выводят одни контакты).
 type ProfileContact struct {
 	Type  string `json:"type"`  // action id: email / phone / website / twitter / ...
 	Value string `json:"value"` // target без mailto:/tel:
@@ -127,8 +128,12 @@ func (c *TalkClient) GetProfile(ctx context.Context, userId string) (*Profile, e
 			continue
 		}
 		v := contactValue(a.Target)
-		if v == "" {
-			continue // пустой target (или голый «mailto:») — контакта нет
+		// Пустой target (или голый «mailto:»), значение из одних пробелов или
+		// пустой/пробельный id — контакта нет. Пробельные — тоже: рендер
+		// схлопывает пробелы и пропускает строку с пустой меткой или значением,
+		// и без этого фильтра --json отдал бы контакт, которого нет в тексте.
+		if strings.TrimSpace(v) == "" || strings.TrimSpace(a.Id) == "" {
+			continue
 		}
 		p.Contacts = append(p.Contacts, ProfileContact{Type: a.Id, Value: v})
 	}

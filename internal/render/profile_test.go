@@ -107,13 +107,20 @@ func TestProfileText_BiographyTrailingNewline(t *testing.T) {
 }
 
 // TestProfileText_CollapseWhitespace — \n/\t/повторы в однострочном поле и в
-// контакте схлопываются в один пробел; ставшее пустым значение — строки нет.
+// контакте схлопываются в один пробел; ставшее пустым значение или метка
+// контакта — строки нет (защита рендера; клиент такие контакты и так
+// отбрасывает).
 func TestProfileText_CollapseWhitespace(t *testing.T) {
 	p := &client.Profile{
 		UserId:   "u",
 		Address:  "Калининград,\n\tул.  Мира",
 		Pronouns: " \n\t ",
-		Contacts: []client.ProfileContact{{Type: "email", Value: "a@b\n.c"}},
+		Contacts: []client.ProfileContact{
+			{Type: "email", Value: "a@b\n.c"},
+			{Type: "", Value: "https://x.example.org"},
+			{Type: " \t", Value: "https://y.example.org"},
+			{Type: "phone", Value: " \n "},
+		},
 	}
 	var buf bytes.Buffer
 	if err := ProfileText(&buf, p, profileNow); err != nil {

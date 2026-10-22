@@ -144,13 +144,19 @@ func TestGetProfile_AllNull(t *testing.T) {
 }
 
 // TestGetProfile_ActionsEdgeCases — пустой target и голый «mailto:»
-// пропускаются; неизвестный id выводится тем же правилом (format-drift-safe);
-// target без известной схемы — как есть.
+// пропускаются; пустой/пробельный id и пробельное значение — тоже (иначе
+// --json отдал бы контакт, которого нет в тексте: рендер схлопывает пробелы и
+// пропускает строку с пустой меткой или значением); неизвестный id выводится
+// тем же правилом (format-drift-safe); target без известной схемы — как есть.
 func TestGetProfile_ActionsEdgeCases(t *testing.T) {
 	const body = `{"ocs":{"meta":{"status":"ok","statuscode":200,"message":"OK"},"data":{` +
 		`"userId":"ivan.p","actions":[` +
 		`{"id":"email","icon":"","title":"","target":""},` +
 		`{"id":"email","icon":"","title":"","target":"mailto:"},` +
+		`{"id":"email","icon":"","title":"","target":"mailto: \t"},` +
+		`{"id":"phone","icon":"","title":"","target":"   "},` +
+		`{"id":"","icon":"","title":"","target":"https://x.example.org"},` +
+		`{"id":" \n","icon":"","title":"","target":"https://y.example.org"},` +
 		`{"id":"talk","icon":"","title":"","target":"https://cloud.example.org/apps/spreed/"},` +
 		`{"id":"fediverse","icon":"","title":"","target":"https://social.example.org/@ivan"},` +
 		`{"id":"matrix","icon":"","title":"","target":"tel:+70000000001"}` +
@@ -271,22 +277,26 @@ func TestGetProfile_InvalidUserId(t *testing.T) {
 	}
 }
 
-// TestGetProfile_PathEscape — спецсимволы и управляющие символы уходят ОДНИМ
-// экранированным сегментом (эскейп делает транспорт; ручной PathEscape дал
-// бы %2520), на чужой путь запрос не уходит.
+// TestGetProfile_PathEscape — спецсимволы (включая ? и #) и управляющие
+// символы уходят ОДНИМ экранированным сегментом без query (эскейп делает
+// транспорт; ручной PathEscape дал бы %2520), на чужой путь запрос не уходит.
 func TestGetProfile_PathEscape(t *testing.T) {
 	cases := []struct{ id, wantSuffix string }{
 		{"ivan p@example.org", "/ocs/v2.php/profile/ivan%20p@example.org"},
 		{"a\nb", "/ocs/v2.php/profile/a%0Ab"},
 		{"50%", "/ocs/v2.php/profile/50%25"},
+		// ? и # не уводят запрос из сегмента в query/fragment.
+		{"a?b=1", "/ocs/v2.php/profile/a%3Fb=1"},
+		{"a#b", "/ocs/v2.php/profile/a%23b"},
 	}
 	// Фикстура читается ДО серверов: profileFixture зовёт t.Fatalf, а его нельзя
 	// вызывать из горутины обработчика httptest (только из горутины теста).
 	notFound := profileFixture(t, "profile_not_found.json")
 	for _, tc := range cases {
-		var gotEscaped string
+		var gotEscaped, gotQuery string
 		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			gotEscaped = r.URL.EscapedPath()
+			gotQuery = r.URL.RawQuery
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write(notFound)
@@ -299,6 +309,9 @@ func TestGetProfile_PathEscape(t *testing.T) {
 		}
 		if gotEscaped != tc.wantSuffix {
 			t.Errorf("GetProfile(%q): escaped path got %q, want %q", tc.id, gotEscaped, tc.wantSuffix)
+		}
+		if gotQuery != "" {
+			t.Errorf("GetProfile(%q): query got %q, want пустой", tc.id, gotQuery)
 		}
 	}
 }
