@@ -53,6 +53,10 @@ func (m *mockTalkClient) SearchMessages(_ context.Context, _ string, _ client.Se
 	return nil, errMock
 }
 
+func (m *mockTalkClient) GetProfile(_ context.Context, _ string) (*client.Profile, error) {
+	return nil, errMock
+}
+
 // compile-time проверка: mockTalkClient реализует TalkClient.
 var _ TalkClient = (*mockTalkClient)(nil)
 
