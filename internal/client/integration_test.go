@@ -301,6 +301,39 @@ func TestIntegration_GetParticipants(t *testing.T) {
 	}
 }
 
+// TestIntegration_GetProfile — read-only профиль ТЕКУЩЕГО пользователя
+// (спека-дельта 2026-10-22 §6): uid — существующим c.currentUserId (запрос к
+// cloud/user, не к profile-API), затем ОДИН GET /profile/{uid} — лимит
+// profile-API (30 запросов / 120 с) не задевается. Ожидания: UserId == uid
+// (сервер отвечает каноническим uid), Contacts non-nil. Логи обезличенные:
+// только пояс/смещение/число контактов (репозиторий публичный).
+func TestIntegration_GetProfile(t *testing.T) {
+	c := integrationClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
+	defer cancel()
+
+	uid, err := c.currentUserId(ctx)
+	if err != nil {
+		t.Fatalf("currentUserId: %v", err)
+	}
+
+	p, err := c.GetProfile(ctx, uid)
+	if err != nil {
+		var oe *OCSError
+		if errors.As(err, &oe) && oe.Code == http.StatusNotFound && oe.Message != "" {
+			t.Skipf("profile-API недоступен (сервер старше Nextcloud 31?): %v", err)
+		}
+		t.Fatalf("GetProfile: %v", err)
+	}
+	if p.UserId != uid {
+		t.Errorf("UserId не совпадает с uid текущего пользователя (равны без учёта регистра: %v)", strings.EqualFold(p.UserId, uid))
+	}
+	if p.Contacts == nil {
+		t.Error("Contacts: got nil, want non-nil слайс")
+	}
+	t.Logf("timezone=%q offset=%d contacts=%d", p.Timezone, p.TimezoneOffset, len(p.Contacts))
+}
+
 // TestIntegration_SendMessage — ЕДИНСТВЕННЫЙ мутационный сценарий (спека §12
 // «не проверено»). Двухслойная защита от случайного запуска:
 //  1. env NCTALK_INTEGRATION_SEND=1 — явный opt-in (без него skip);
