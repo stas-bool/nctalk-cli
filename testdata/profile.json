@@ -1,0 +1,60 @@
+{
+  "ocs": {
+    "meta": {
+      "status": "ok",
+      "statuscode": 200,
+      "message": "OK"
+    },
+    "data": {
+      "userId": "ivan.p",
+      "address": "Калининград",
+      "isUserAvatarVisible": true,
+      "biography": null,
+      "displayname": "Иван Петров",
+      "headline": null,
+      "organisation": "Example LLC",
+      "role": "Генеральный директор",
+      "pronouns": null,
+      "actions": [
+        {
+          "id": "talk",
+          "icon": "https://cloud.example.org/apps/spreed/img/app-dark.svg",
+          "title": "Open Talk",
+          "target": "https://cloud.example.org/apps/spreed/?callUser=ivan.p"
+        },
+        {
+          "id": "talk-call",
+          "icon": "https://cloud.example.org/apps/spreed/img/icon-video-dark.svg",
+          "title": "Open Talk",
+          "target": "https://cloud.example.org/apps/spreed/?callUser=ivan.p#direct-call"
+        },
+        {
+          "id": "email",
+          "icon": "https://cloud.example.org/core/img/actions/mail.svg",
+          "title": "Mail ivan.p@example.org",
+          "target": "mailto:ivan.p@example.org"
+        },
+        {
+          "id": "phone",
+          "icon": "https://cloud.example.org/core/img/actions/phone.svg",
+          "title": "Call +70000000000",
+          "target": "tel:+70000000000"
+        },
+        {
+          "id": "website",
+          "icon": "https://cloud.example.org/core/img/actions/website.svg",
+          "title": "Visit https://example.org",
+          "target": "https://example.org"
+        },
+        {
+          "id": "twitter",
+          "icon": "https://cloud.example.org/core/img/actions/twitter.svg",
+          "title": "View @example on X",
+          "target": "https://x.com/example"
+        }
+      ],
+      "timezone": "Europe/Kaliningrad",
+      "timezoneOffset": 7200
+    }
+  }
+}
