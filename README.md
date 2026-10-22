@@ -74,7 +74,7 @@ nctalk rooms list --include-former      # включить «former» (типы 
 
 ```sh
 nctalk rooms find иван                  # подстрока в displayName
-nctalk rooms find --user ivan.p   # личный чат 1-на-1 с пользователем (по actorId)
+nctalk rooms find --user ivan.p         # личный чат 1-на-1 с пользователем (по actorId)
 ```
 
 Возвращает **все** совпадения (exit `0`, даже если пусто). Главное в выводе — `token`.
@@ -103,7 +103,7 @@ nctalk rooms participants kytxaiyc --json      # каноническая мод
 nctalk chat show kytxaiyc               # <room> = token позиционно
 nctalk chat show --name "review team"   # ...или fuzzy по имени
 nctalk chat show kytxaiyc --last 50     # последние N (по умолчанию 20)
-nctalk chat show kytxaiyc --from ivan.p   # фильтр по автору (actorId)
+nctalk chat show kytxaiyc --from ivan.p # фильтр по автору (actorId)
 nctalk chat show kytxaiyc --since 2h    # сообщения за последние 2 часа
 nctalk chat show kytxaiyc --since 2026-07-17
 nctalk chat show kytxaiyc --system      # показать системные сообщения (по умолчанию скрыты)
