@@ -461,3 +461,58 @@ func TestRun_PasswordDoesNotLeak_AttachPutRedirect(t *testing.T) {
 		t.Errorf("шаринг после заблокированного PUT: %d, want 0", n)
 	}
 }
+
+// profileOCS404JSON — живой формат ответа profile-API на недоступного
+// пользователя (спека-дельта 2026-10-22 §3): HTTP 404, OCS 404, message "",
+// data null.
+const profileOCS404JSON = `{"ocs":{"meta":{"status":"failure","statuscode":404,"message":""},"data":null}}`
+
+// TestRun_UsersShow_OCS404_Exit2 — `users show <нет такого>` через весь путь
+// main → cli → client: OCS 404 с пустым message → exit 2 и текст «не найден
+// или недоступен» (спека-дельта §2, §6).
+func TestRun_UsersShow_OCS404_Exit2(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, profileOCS404JSON)
+	}))
+	defer srv.Close()
+
+	setEnv(t, srv.URL)
+	var out, errOut bytes.Buffer
+	code := run([]string{"users", "show", "nobody"}, &out, &errOut, nil)
+	if code != 2 {
+		t.Fatalf("exit: got %d, want 2 (OCS 404 → NotFound; stderr=%q)", code, errOut.String())
+	}
+	if out.String() != "" {
+		t.Errorf("stdout: got %q, want empty при ошибке", out.String())
+	}
+	if want := `users show: пользователь "nobody" не найден или недоступен`; !strings.Contains(errOut.String(), want) {
+		t.Errorf("stderr: got %q, want содержит %q", errOut.String(), want)
+	}
+}
+
+// TestRun_UsersShow_InvalidUserId_NoRequest — `users show a/b` → exit 1, и
+// httptest-сервер не получил НИ одного запроса: единственный guard сегмента
+// (client.GetProfile) срабатывает до сети на реальном клиенте.
+func TestRun_UsersShow_InvalidUserId_NoRequest(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	setEnv(t, srv.URL)
+	var out, errOut bytes.Buffer
+	code := run([]string{"users", "show", "a/b"}, &out, &errOut, nil)
+	if code != 1 {
+		t.Fatalf("exit: got %d, want 1 (stderr=%q)", code, errOut.String())
+	}
+	if n := atomic.LoadInt32(&hits); n != 0 {
+		t.Fatalf("запросов к серверу: got %d, want 0 (guard до сети)", n)
+	}
+	if !strings.Contains(errOut.String(), "недопустимый userId") {
+		t.Errorf("stderr: got %q, want содержит «недопустимый userId»", errOut.String())
+	}
+}

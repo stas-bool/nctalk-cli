@@ -103,6 +103,10 @@ func (m *roomsSpyClient) SearchMessages(_ context.Context, _ string, _ client.Se
 	return nil, errMock
 }
 
+func (m *roomsSpyClient) GetProfile(_ context.Context, _ string) (*client.Profile, error) {
+	return nil, errMock
+}
+
 // compile-time гарантия: roomsSpyClient реализует TalkClient.
 var _ TalkClient = (*roomsSpyClient)(nil)
 

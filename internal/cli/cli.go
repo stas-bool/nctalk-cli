@@ -13,7 +13,7 @@ import (
 	"github.com/stas-bool/nctalk-cli/internal/client"
 )
 
-// TalkClient — минимальный интерфейс, покрывающий 11 методов реального
+// TalkClient — минимальный интерфейс, покрывающий 12 методов реального
 // *client.TalkClient. Нужен для mockability: в production в Deps.Client
 // кладётся *client.TalkClient, в тестах — заглушка.
 type TalkClient interface {
@@ -28,6 +28,7 @@ type TalkClient interface {
 	GetParticipants(ctx context.Context, token string) ([]client.Participant, error)
 	ListThreads(ctx context.Context, token string, limit int) ([]client.ThreadInfo, error)
 	SearchMessages(ctx context.Context, term string, opts client.SearchMessagesOpts) ([]client.MessageResult, error)
+	GetProfile(ctx context.Context, userId string) (*client.Profile, error)
 }
 
 // compile-time гарантия: *client.TalkClient реализует TalkClient. Если в client
@@ -79,6 +80,9 @@ var routes = map[string]map[string]handlerFn{
 	"reactions": {
 		"get": reactionsGetHandler,
 	},
+	"users": {
+		"show": usersShowHandler,
+	},
 }
 
 // searchHandlerFn — handler для `search` (спека §6), вынесен в переменную:
@@ -109,7 +113,7 @@ func Run(args []string, deps Deps) int {
 	args, jsonOut := extractJSON(args)
 
 	if len(args) == 0 {
-		fmt.Fprintln(deps.Stderr, "nctalk: неизвестная команда; ожидается одна из: rooms, chat, reactions, search")
+		fmt.Fprintln(deps.Stderr, "nctalk: неизвестная команда; ожидается одна из: rooms, chat, reactions, users, search")
 		return ExitGeneric
 	}
 
@@ -121,7 +125,7 @@ func Run(args []string, deps Deps) int {
 		return invokeHandler(deps, searchHandlerFn, ctx, rest, jsonOut)
 	}
 
-	// rooms/chat/reactions — двухуровневый разбор: args[0]=resource, args[1]=verb.
+	// rooms/chat/reactions/users — двухуровневый разбор: args[0]=resource, args[1]=verb.
 	if len(rest) == 0 {
 		fmt.Fprintf(deps.Stderr, "nctalk %s: ожидается verb (list/find/search/participants/show/send/threads/edit/get)\n", resource)
 		return ExitGeneric

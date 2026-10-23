@@ -66,6 +66,10 @@ func (m *roomMockClient) SearchMessages(_ context.Context, _ string, _ client.Se
 	panic("SearchMessages: не должен вызываться из ResolveRoom")
 }
 
+func (m *roomMockClient) GetProfile(_ context.Context, _ string) (*client.Profile, error) {
+	return nil, errMock
+}
+
 // compile-time проверка: roomMockClient реализует TalkClient.
 var _ TalkClient = (*roomMockClient)(nil)
 

@@ -34,9 +34,10 @@ type cmdSpec struct {
 	Examples    []string
 }
 
-// cmdSpecs — единый источник правды: 10 команд базового CLI.
+// cmdSpecs — единый источник правды: 11 команд базового CLI.
 // Порядок соответствует общему help (спека §3). Флаги — строго по handler-ам
-// (handlers_rooms.go, handlers_chat.go, handlers_reactions.go, handlers_search.go);
+// (handlers_rooms.go, handlers_chat.go, handlers_reactions.go, handlers_users.go,
+// handlers_search.go);
 // --name включён только в тех командах, где handler его парсит.
 //
 // ВНИЗУ: каждая правка флагов в handler-е обязана сопровождаться правкой здесь;
@@ -161,6 +162,16 @@ var cmdSpecs = []cmdSpec{
 		},
 		Examples: []string{
 			"nctalk reactions get abc123 100",
+		},
+	},
+	{
+		Path:        []string{"users", "show"},
+		Short:       "профиль пользователя (контакты, часовой пояс)",
+		UsageExtras: "<userId>",
+		Flags:       nil, // без флагов; handler отвергает любое --*
+		Examples: []string{
+			"nctalk users show ivan.p",
+			"nctalk users show ivan.p --json",
 		},
 	},
 	{
@@ -304,7 +315,7 @@ func HandleHelp(args []string, deps Deps) (handled bool, exit int) {
 	// `search foo --help` → computePath даст ["search","foo"], но search — leaf
 	// без verb-уровня, её positional не должен расширять путь. Если path[0] —
 	// известная leaf-команда (findSpec([path[0]]) != nil), усекаем path до [path[0]].
-	// Для 2-уровневых команд (rooms/chat/reactions) findSpec([resource]) всегда
+	// Для 2-уровневых команд (rooms/chat/reactions/users) findSpec([resource]) всегда
 	// nil (paths в cmdSpecs — 2-токенные) → усечения не происходит, "rooms list"
 	// сохраняется.
 	if len(path) > 1 && findSpec(path[:1]) != nil {
@@ -322,7 +333,7 @@ func HandleHelp(args []string, deps Deps) (handled bool, exit int) {
 		renderGeneral(deps.Stdout)
 		return true, ExitOK
 	case 1:
-		// Может быть ресурсом (rooms/chat/reactions) или leaf-командой (search).
+		// Может быть ресурсом (rooms/chat/reactions/users) или leaf-командой (search).
 		if spec := findSpec(path); spec != nil {
 			renderDetailed(deps.Stdout, spec)
 			return true, ExitOK
@@ -343,7 +354,7 @@ func HandleHelp(args []string, deps Deps) (handled bool, exit int) {
 	return true, ExitGeneric
 }
 
-// isResourceName проверяет, есть ли resource в таблице routes (rooms/chat/reactions).
+// isResourceName проверяет, есть ли resource в таблице routes (rooms/chat/reactions/users).
 func isResourceName(name string) bool {
 	_, ok := routes[name]
 	return ok

@@ -68,6 +68,10 @@ func (m *reactionsSpyClient) SearchMessages(_ context.Context, _ string, _ clien
 	return nil, errMock
 }
 
+func (m *reactionsSpyClient) GetProfile(_ context.Context, _ string) (*client.Profile, error) {
+	return nil, errMock
+}
+
 // compile-time гарантия: reactionsSpyClient реализует TalkClient.
 var _ TalkClient = (*reactionsSpyClient)(nil)
 

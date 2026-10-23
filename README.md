@@ -4,7 +4,7 @@
 
 `nctalk` is a thin terminal CLI for [Nextcloud Talk](https://github.com/nextcloud/spreed) (Spreed) built on top of the OCS API.
 
-- 10 primitives over rooms, chat (incl. file attachments), threads, reactions and search — no business logic, composable in scripts
+- 11 primitives over rooms, chat (incl. file attachments), threads, reactions, user profiles and search — no business logic, composable in scripts
 - Machine-friendly: `--json` on every command, predictable exit codes (`0`/`1`/`2`/`3`)
 - Credentials only via environment variables (app-password), never in flags or files
 - Pure Go 1.21 stdlib, CGO-free single binary
@@ -23,7 +23,7 @@ nctalk rooms list
 <a name="nctalk-ru"></a>
 # nctalk (рус.)
 
-Тонкий CLI-клиент над **Nextcloud Talk** (приложение Spreed) поверх OCS-API. Только примитивы: список/поиск чатов, участники комнаты, чтение, отправка и редактирование сообщений, отправка файлов, треды, реакции, поиск. Основной потребитель — агент (через skill-обёртку), вторичный — человек в терминале. Бизнес-логики не содержит.
+Тонкий CLI-клиент над **Nextcloud Talk** (приложение Spreed) поверх OCS-API. Только примитивы: список/поиск чатов, участники комнаты, чтение, отправка и редактирование сообщений, отправка файлов, треды, реакции, профиль пользователя, поиск. Основной потребитель — агент (через skill-обёртку), вторичный — человек в терминале. Бизнес-логики не содержит.
 
 Написан на Go 1.21 (только стандартная библиотека).
 
@@ -73,8 +73,8 @@ nctalk rooms list --include-former      # включить «former» (типы 
 ### `rooms find <запрос>` — поиск по имени (client-side)
 
 ```sh
-nctalk rooms find дайна                 # подстрока в displayName
-nctalk rooms find --user daiana.zhukotskaia   # личный чат 1-на-1 с пользователем (по actorId)
+nctalk rooms find иван                  # подстрока в displayName
+nctalk rooms find --user ivan.p         # личный чат 1-на-1 с пользователем (по actorId)
 ```
 
 Возвращает **все** совпадения (exit `0`, даже если пусто). Главное в выводе — `token`.
@@ -103,7 +103,7 @@ nctalk rooms participants kytxaiyc --json      # каноническая мод
 nctalk chat show kytxaiyc               # <room> = token позиционно
 nctalk chat show --name "review team"   # ...или fuzzy по имени
 nctalk chat show kytxaiyc --last 50     # последние N (по умолчанию 20)
-nctalk chat show kytxaiyc --from daiana.zhukotskaia   # фильтр по автору (actorId)
+nctalk chat show kytxaiyc --from ivan.p # фильтр по автору (actorId)
 nctalk chat show kytxaiyc --since 2h    # сообщения за последние 2 часа
 nctalk chat show kytxaiyc --since 2026-07-17
 nctalk chat show kytxaiyc --system      # показать системные сообщения (по умолчанию скрыты)
@@ -167,11 +167,20 @@ nctalk reactions get kytxaiyc 2927
 
 Вывод: `реакция → [авторы]`. Если реакций нет — пусто, exit `0`.
 
+### `users show <userId>` — профиль пользователя
+
+```sh
+nctalk users show ivan.p                       # имя, должность, контакты, часовой пояс
+nctalk users show ivan.p --json                # каноническая модель профиля
+```
+
+`<userId>` — actorId пользователя (колонка `ID` в `rooms participants`). Вывод — блок «ключ: значение», пустые поля пропускаются: `Имя`, `ID`, `Должность`, `Заголовок`, `Организация`, `Город`, `Местоимения`, `Часовой пояс` (`Europe/Kaliningrad (UTC+2), сейчас 2026-10-22 10:41` — местное время собеседника), контакты (`email`, `phone`, `website`, …), последним — `О себе`. `--json` — объект `userId, displayName, role, headline, organisation, address, pronouns, biography, timezone, timezoneOffset, contacts` (`contacts` — массив `{type, value}`; скрытые поля — `""`; местное время не вычисляется). Нужен Nextcloud 31+ (profile-API ядра). Пользователь не найден или недоступен → exit `2`; профиль отключён → exit `1`. Сервер ограничивает profile-API (~30 запросов за 2 минуты, дальше HTTP 429 → exit `1`) — не опрашивайте всех участников подряд.
+
 ### `search <term>` — глобальный поиск сообщений (server-side)
 
 ```sh
 nctalk search "release notes"
-nctalk search deploy --from daiana.zhukotskaia --limit 25
+nctalk search deploy --from ivan.p --limit 25
 nctalk search deploy --all              # собрать несколько страниц (до 5)
 ```
 
@@ -183,14 +192,14 @@ nctalk search deploy --all              # собрать несколько ст
 | --- | ------------------------------------------------------------------------------ |
 | `0` | успех (в т.ч. пустой результат поиска `rooms find`/`rooms search`/`search`)    |
 | `1` | общая ошибка (сеть, авторизация 401, таймаут)                                 |
-| `2` | not found — комната/сообщение/тред не найдены, либо 0 совпадений по `--name`   |
+| `2` | not found — комната/сообщение/тред/пользователь (`users show`) не найдены, либо 0 совпадений по `--name` |
 | `3` | неоднозначно — >1 совпадение по `--name`                                      |
 
 Для агентского конвейера: `rooms find`/`search` → взять `token` → далее работать с каноническим id.
 
 ## Идентификация пользователей
 
-Все флаги «человека» (`--from`, `--user`) принимают **actorId** (userId, напр. `daiana.zhukotskaia`), а не displayName. Узнать actorId: из `rooms list`/`rooms find` (колонка/`--json`) или `chat show` (`--json`).
+Все флаги «человека» (`--from`, `--user`) принимают **actorId** (userId, напр. `ivan.p`), а не displayName. Узнать actorId: из `rooms participants` (колонка `ID`), `rooms list`/`rooms find` (колонка/`--json`) или `chat show` (`--json`). Профиль, часовой пояс и контакты по actorId — `users show <actorId>`.
 
 ## Тесты
 

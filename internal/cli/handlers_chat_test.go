@@ -149,6 +149,10 @@ func (m *chatSpyClient) SearchMessages(_ context.Context, _ string, _ client.Sea
 	return nil, errMock
 }
 
+func (m *chatSpyClient) GetProfile(_ context.Context, _ string) (*client.Profile, error) {
+	return nil, errMock
+}
+
 // compile-time гарантия: chatSpyClient реализует TalkClient.
 var _ TalkClient = (*chatSpyClient)(nil)
 
